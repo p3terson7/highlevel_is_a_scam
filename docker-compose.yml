@@ -1,0 +1,88 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      APP_NAME: lead-conversion-sms-agent
+      ENV: dev
+      LOG_LEVEL: INFO
+      AUTO_CREATE_TABLES: "false"
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/leads_db
+      REDIS_URL: redis://redis:6379/0
+      META_VERIFY_TOKEN: meta-verify-token
+      LINKEDIN_VERIFY_TOKEN: linkedin-verify-token
+      ADMIN_TOKEN: change-me
+      RQ_EAGER: "false"
+      RATE_LIMIT_COUNT: "4"
+      RATE_LIMIT_WINDOW_MINUTES: "5"
+      AFTER_HOURS_FOLLOWUP_MINUTES: "720"
+      TWILIO_ACCOUNT_SID: ""
+      TWILIO_AUTH_TOKEN: ""
+      TWILIO_FROM_NUMBER: ""
+      OPENAI_API_KEY: ""
+      OPENAI_MODEL: gpt-4.1-mini
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./:/app
+
+  worker:
+    build: .
+    command: rq worker --with-scheduler
+    environment:
+      APP_NAME: lead-conversion-sms-agent
+      ENV: dev
+      LOG_LEVEL: INFO
+      AUTO_CREATE_TABLES: "false"
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/leads_db
+      REDIS_URL: redis://redis:6379/0
+      META_VERIFY_TOKEN: meta-verify-token
+      LINKEDIN_VERIFY_TOKEN: linkedin-verify-token
+      ADMIN_TOKEN: change-me
+      RQ_EAGER: "false"
+      RATE_LIMIT_COUNT: "4"
+      RATE_LIMIT_WINDOW_MINUTES: "5"
+      AFTER_HOURS_FOLLOWUP_MINUTES: "720"
+      TWILIO_ACCOUNT_SID: ""
+      TWILIO_AUTH_TOKEN: ""
+      TWILIO_FROM_NUMBER: ""
+      OPENAI_API_KEY: ""
+      OPENAI_MODEL: gpt-4.1-mini
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./:/app
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: leads_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d leads_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:

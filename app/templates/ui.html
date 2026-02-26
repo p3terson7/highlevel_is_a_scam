@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lead Conversion SMS Agent Admin</title>
+    <style>
+      :root {
+        --bg: #f4f6f8;
+        --card: #ffffff;
+        --ink: #132033;
+        --muted: #596377;
+        --line: #d8dee7;
+        --accent: #0d7f72;
+        --accent-soft: #d9f2ef;
+        --warn: #b43e3e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at -10% -10%, #d7f0eb 0%, transparent 38%),
+          radial-gradient(circle at 110% 0%, #e7edf2 0%, transparent 35%),
+          var(--bg);
+      }
+      .wrap {
+        max-width: 1340px;
+        margin: 0 auto;
+        padding: 22px 16px 36px;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 28px;
+      }
+      .sub {
+        margin: 0 0 16px;
+        color: var(--muted);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 12px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+        box-shadow: 0 10px 30px rgba(19, 32, 51, 0.06);
+      }
+      .span-12 { grid-column: span 12; }
+      .span-8 { grid-column: span 8; }
+      .span-6 { grid-column: span 6; }
+      .span-4 { grid-column: span 4; }
+      .span-3 { grid-column: span 3; }
+      h2 {
+        margin: 0 0 10px;
+        font-size: 17px;
+      }
+      .row2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .row3 {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 8px;
+      }
+      label {
+        display: block;
+        margin: 8px 0 4px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      input, textarea, select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 10px;
+        font: inherit;
+        color: var(--ink);
+        background: #fff;
+      }
+      textarea {
+        min-height: 92px;
+        resize: vertical;
+      }
+      button {
+        border: 0;
+        border-radius: 9px;
+        padding: 9px 12px;
+        font-weight: 600;
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+      }
+      button.light {
+        background: var(--accent-soft);
+        color: #0b544b;
+      }
+      button.dark {
+        background: #303f55;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .status {
+        margin-top: 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .ok { color: #137a62; }
+      .err { color: var(--warn); }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: #eef3f8;
+        font-size: 12px;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .table-wrap {
+        max-height: 290px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th, td {
+        text-align: left;
+        border-bottom: 1px solid var(--line);
+        padding: 8px;
+      }
+      th {
+        position: sticky;
+        top: 0;
+        background: #f8fbfd;
+      }
+      pre {
+        margin: 0;
+        background: #0f1724;
+        color: #d2ecff;
+        border-radius: 10px;
+        padding: 10px;
+        min-height: 90px;
+        overflow: auto;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .kv div {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 8px;
+      }
+      .kv b {
+        display: block;
+        margin-bottom: 4px;
+      }
+      @media (max-width: 1100px) {
+        .span-8, .span-6, .span-4, .span-3 { grid-column: span 12; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Lead Conversion SMS Agent Admin</h1>
+      <p class="sub">Configure providers, manage client settings, copy webhooks, run tests, and inspect events.</p>
+
+      <div class="grid">
+        <section class="card span-4">
+          <h2>1) Admin Session</h2>
+          <label for="adminToken">X-Admin-Token</label>
+          <input id="adminToken" type="password" placeholder="change-me" />
+          <div class="actions">
+            <button onclick="bootstrap()">Load Console</button>
+          </div>
+          <p id="sessionStatus" class="status">Enter token and click Load Console.</p>
+        </section>
+
+        <section class="card span-8">
+          <h2>2) Runtime Provider Settings</h2>
+          <div class="row3">
+            <div>
+              <label for="twilioSid">Twilio Account SID</label>
+              <input id="twilioSid" type="password" placeholder="ACxxxxxxxx" />
+            </div>
+            <div>
+              <label for="twilioToken">Twilio Auth Token</label>
+              <input id="twilioToken" type="password" placeholder="token" />
+            </div>
+            <div>
+              <label for="twilioFrom">Twilio From Number</label>
+              <input id="twilioFrom" placeholder="+15551234567" />
+            </div>
+          </div>
+          <div class="row3">
+            <div>
+              <label for="openaiKey">OpenAI API Key</label>
+              <input id="openaiKey" type="password" placeholder="sk-..." />
+            </div>
+            <div>
+              <label for="openaiModel">OpenAI Model</label>
+              <input id="openaiModel" value="gpt-4.1-mini" />
+            </div>
+            <div>
+              <label for="metaVerifyToken">Meta Verify Token</label>
+              <input id="metaVerifyToken" type="password" placeholder="meta-verify-token" />
+            </div>
+          </div>
+          <div class="row2">
+            <div>
+              <label for="linkedinVerifyToken">LinkedIn Verify Token</label>
+              <input id="linkedinVerifyToken" type="password" placeholder="linkedin-verify-token" />
+            </div>
+            <div>
+              <label>Current status</label>
+              <div>
+                <span id="statusTwilio" class="pill">Twilio: unknown</span>
+                <span id="statusAI" class="pill">AI: unknown</span>
+                <span id="statusMeta" class="pill">Meta token: unknown</span>
+                <span id="statusLinkedIn" class="pill">LinkedIn token: unknown</span>
+              </div>
+            </div>
+          </div>
+          <div class="actions">
+            <button onclick="saveRuntimeConfig()">Save Provider Settings</button>
+            <button class="light" onclick="loadRuntimeStatus()">Refresh Status</button>
+          </div>
+          <p id="runtimeStatus" class="status"></p>
+        </section>
+
+        <section class="card span-4">
+          <h2>3) Clients</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Business</th>
+                  <th>Key</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="clientsBody"></tbody>
+            </table>
+          </div>
+          <div class="actions">
+            <button class="light" onclick="loadClients()">Refresh Clients</button>
+          </div>
+        </section>
+
+        <section class="card span-8">
+          <h2>4) Create / Edit Client</h2>
+          <label for="selectedClientKey">Selected Client Key</label>
+          <input id="selectedClientKey" placeholder="select client from table or create one" />
+          <div class="row2">
+            <div>
+              <label for="businessName">Business Name</label>
+              <input id="businessName" />
+            </div>
+            <div>
+              <label for="clientKey">Create with Custom Key (optional)</label>
+              <input id="clientKey" />
+            </div>
+          </div>
+          <div class="row3">
+            <div>
+              <label for="tone">Tone</label>
+              <input id="tone" />
+            </div>
+            <div>
+              <label for="timezone">Timezone</label>
+              <input id="timezone" />
+            </div>
+            <div>
+              <label for="bookingUrl">Booking URL</label>
+              <input id="bookingUrl" />
+            </div>
+          </div>
+          <div class="row3">
+            <div>
+              <label for="handoffNumber">Handoff Number</label>
+              <input id="handoffNumber" />
+            </div>
+            <div>
+              <label for="consentText">Consent Text</label>
+              <input id="consentText" />
+            </div>
+            <div>
+              <label for="isActive">Active</label>
+              <select id="isActive">
+                <option value="true">Active</option>
+                <option value="false">Inactive</option>
+              </select>
+            </div>
+          </div>
+          <div class="row2">
+            <div>
+              <label for="operatingDays">Operating Days (0-6 comma separated)</label>
+              <input id="operatingDays" value="0,1,2,3,4" />
+            </div>
+            <div class="row2">
+              <div>
+                <label for="operatingStart">Start HH:MM</label>
+                <input id="operatingStart" value="09:00" />
+              </div>
+              <div>
+                <label for="operatingEnd">End HH:MM</label>
+                <input id="operatingEnd" value="18:00" />
+              </div>
+            </div>
+          </div>
+          <label for="qualificationQuestions">Qualification Questions (one per line)</label>
+          <textarea id="qualificationQuestions"></textarea>
+          <label for="faqContext">FAQ Context</label>
+          <textarea id="faqContext"></textarea>
+          <label for="templateOverrides">Template Overrides JSON</label>
+          <textarea id="templateOverrides">{}</textarea>
+          <div class="actions">
+            <button onclick="createClient()">Create Client</button>
+            <button class="dark" onclick="saveClient()">Save Client</button>
+            <button class="light" onclick="loadSelectedClient()">Reload Selected</button>
+          </div>
+          <p id="clientStatus" class="status"></p>
+        </section>
+
+        <section class="card span-6">
+          <h2>5) Webhook URLs</h2>
+          <div class="kv">
+            <div><b>Meta Verify URL</b><span id="webhookMetaVerify" class="mono"></span></div>
+            <div><b>Meta Events URL</b><span id="webhookMetaEvents" class="mono"></span></div>
+            <div><b>LinkedIn Events URL</b><span id="webhookLinkedIn" class="mono"></span></div>
+            <div><b>Twilio Inbound URL</b><span id="webhookTwilio" class="mono"></span></div>
+          </div>
+        </section>
+
+        <section class="card span-6">
+          <h2>6) Test Lab</h2>
+          <div class="row3">
+            <div>
+              <label for="testFrom">Lead Phone</label>
+              <input id="testFrom" value="+15554443333" />
+            </div>
+            <div>
+              <label for="testLeadId">External Lead ID</label>
+              <input id="testLeadId" value="demo-lead-001" />
+            </div>
+            <div>
+              <label for="testBody">Inbound SMS Body</label>
+              <input id="testBody" value="Can I book this week?" />
+            </div>
+          </div>
+          <div class="actions">
+            <button class="dark" onclick="simulateLead()">Simulate Lead Intake</button>
+            <button class="dark" onclick="simulateInboundSms()">Simulate Inbound SMS</button>
+            <button onclick="sendTestSms()">Send Test SMS (Twilio)</button>
+            <button class="light" onclick="runAiTest()">Run AI Test Response</button>
+          </div>
+          <pre id="testOutput">Ready.</pre>
+        </section>
+
+        <section class="card span-4">
+          <h2>7) Event Summary</h2>
+          <p class="status"><span class="pill">Last lead: <span id="evtLead">-</span></span></p>
+          <p class="status"><span class="pill">Last SMS inbound: <span id="evtIn">-</span></span></p>
+          <p class="status"><span class="pill">Last SMS outbound: <span id="evtOut">-</span></span></p>
+          <p class="status"><span class="pill">Last AI decision: <span id="evtAI">-</span></span></p>
+          <div class="actions">
+            <button class="light" onclick="loadClientEvents()">Refresh Events</button>
+          </div>
+        </section>
+
+        <section class="card span-8">
+          <h2>8) Recent Audit Logs</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Event</th>
+                  <th>Lead ID</th>
+                  <th>Decision</th>
+                </tr>
+              </thead>
+              <tbody id="auditBody"></tbody>
+            </table>
+          </div>
+          <div class="actions">
+            <button class="light" onclick="loadAuditLogs()">Refresh Logs</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script>
+      function adminHeaders() {
+        const token = document.getElementById("adminToken").value.trim();
+        return token ? { "X-Admin-Token": token } : {};
+      }
+
+      async function apiJson(path, options = {}) {
+        const headers = {
+          ...(options.headers || {}),
+          ...adminHeaders(),
+        };
+        const response = await fetch(path, { ...options, headers });
+        const text = await response.text();
+        let parsed = text;
+        try {
+          parsed = JSON.parse(text);
+        } catch (_) {}
+        if (!response.ok) {
+          throw new Error(typeof parsed === "string" ? parsed : JSON.stringify(parsed));
+        }
+        return parsed;
+      }
+
+      function setStatus(id, message, ok = true) {
+        const el = document.getElementById(id);
+        el.textContent = message;
+        el.className = "status " + (ok ? "ok" : "err");
+      }
+
+      function getSelectedClientKey() {
+        return document.getElementById("selectedClientKey").value.trim();
+      }
+
+      function output(text) {
+        document.getElementById("testOutput").textContent = text;
+      }
+
+      function safeJsonParse(text, fallback) {
+        try {
+          return JSON.parse(text);
+        } catch (_) {
+          return fallback;
+        }
+      }
+
+      function renderWebhookUrls(clientKey) {
+        const origin = window.location.origin;
+        document.getElementById("webhookMetaVerify").textContent = `${origin}/webhooks/meta/${clientKey}`;
+        document.getElementById("webhookMetaEvents").textContent = `${origin}/webhooks/meta/${clientKey}`;
+        document.getElementById("webhookLinkedIn").textContent = `${origin}/webhooks/linkedin/${clientKey}`;
+        document.getElementById("webhookTwilio").textContent = `${origin}/sms/inbound/${clientKey}`;
+      }
+
+      async function bootstrap() {
+        await loadRuntimeStatus();
+        await loadClients();
+      }
+
+      async function loadRuntimeStatus() {
+        try {
+          const statusData = await apiJson("/admin/runtime-config/status");
+          document.getElementById("statusTwilio").textContent =
+            `Twilio: ${statusData.twilio_account_sid_configured && statusData.twilio_auth_token_configured && statusData.twilio_from_number ? "configured" : "incomplete"}`;
+          document.getElementById("statusAI").textContent =
+            `AI: ${statusData.openai_api_key_configured ? "configured" : "fallback heuristic"}`;
+          document.getElementById("statusMeta").textContent =
+            `Meta token: ${statusData.meta_verify_token_configured ? "set" : "missing"}`;
+          document.getElementById("statusLinkedIn").textContent =
+            `LinkedIn token: ${statusData.linkedin_verify_token_configured ? "set" : "missing"}`;
+          document.getElementById("twilioFrom").value = statusData.twilio_from_number || "";
+          document.getElementById("openaiModel").value = statusData.openai_model || "gpt-4.1-mini";
+          setStatus("runtimeStatus", "Runtime status loaded.");
+          setStatus("sessionStatus", "Session authenticated.");
+        } catch (error) {
+          setStatus("runtimeStatus", "Runtime status failed: " + error.message, false);
+          setStatus("sessionStatus", "Session failed: " + error.message, false);
+        }
+      }
+
+      async function saveRuntimeConfig() {
+        const payload = {
+          twilio_account_sid: document.getElementById("twilioSid").value.trim(),
+          twilio_auth_token: document.getElementById("twilioToken").value.trim(),
+          twilio_from_number: document.getElementById("twilioFrom").value.trim(),
+          openai_api_key: document.getElementById("openaiKey").value.trim(),
+          openai_model: document.getElementById("openaiModel").value.trim(),
+          meta_verify_token: document.getElementById("metaVerifyToken").value.trim(),
+          linkedin_verify_token: document.getElementById("linkedinVerifyToken").value.trim(),
+        };
+        try {
+          const result = await apiJson("/admin/runtime-config", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          document.getElementById("twilioSid").value = "";
+          document.getElementById("twilioToken").value = "";
+          document.getElementById("openaiKey").value = "";
+          document.getElementById("metaVerifyToken").value = "";
+          document.getElementById("linkedinVerifyToken").value = "";
+          setStatus(
+            "runtimeStatus",
+            `Saved runtime config. Updated keys: ${result.updated_keys.join(", ") || "none"}.`
+          );
+          await loadRuntimeStatus();
+        } catch (error) {
+          setStatus("runtimeStatus", "Save failed: " + error.message, false);
+        }
+      }
+
+      async function loadClients() {
+        try {
+          const clients = await apiJson("/admin/clients");
+          const body = document.getElementById("clientsBody");
+          body.innerHTML = "";
+          clients.forEach((client) => {
+            const row = document.createElement("tr");
+            row.innerHTML = `
+              <td>${escapeHtml(client.business_name)}</td>
+              <td><span class="mono">${escapeHtml(client.client_key)}</span></td>
+              <td><button class="light" onclick="selectClient('${escapeJs(client.client_key)}')">Select</button></td>
+            `;
+            body.appendChild(row);
+          });
+        } catch (error) {
+          setStatus("sessionStatus", "Load clients failed: " + error.message, false);
+        }
+      }
+
+      function selectClient(clientKey) {
+        document.getElementById("selectedClientKey").value = clientKey;
+        loadSelectedClient();
+      }
+
+      async function loadSelectedClient() {
+        const clientKey = getSelectedClientKey();
+        if (!clientKey) {
+          return;
+        }
+        try {
+          const client = await apiJson(`/admin/clients/${encodeURIComponent(clientKey)}`);
+          document.getElementById("businessName").value = client.business_name || "";
+          document.getElementById("tone").value = client.tone || "";
+          document.getElementById("timezone").value = client.timezone || "";
+          document.getElementById("bookingUrl").value = client.booking_url || "";
+          document.getElementById("handoffNumber").value = client.fallback_handoff_number || "";
+          document.getElementById("consentText").value = client.consent_text || "";
+          document.getElementById("faqContext").value = client.faq_context || "";
+          document.getElementById("qualificationQuestions").value = (client.qualification_questions || []).join("\n");
+          document.getElementById("templateOverrides").value = JSON.stringify(client.template_overrides || {}, null, 2);
+          document.getElementById("isActive").value = client.is_active ? "true" : "false";
+          const days = ((client.operating_hours || {}).days || []).join(",");
+          document.getElementById("operatingDays").value = days;
+          document.getElementById("operatingStart").value = (client.operating_hours || {}).start || "09:00";
+          document.getElementById("operatingEnd").value = (client.operating_hours || {}).end || "18:00";
+          renderWebhookUrls(client.client_key);
+          setStatus("clientStatus", "Client loaded.");
+          await loadClientEvents();
+          await loadAuditLogs();
+        } catch (error) {
+          setStatus("clientStatus", "Load client failed: " + error.message, false);
+        }
+      }
+
+      async function createClient() {
+        const businessName = document.getElementById("businessName").value.trim();
+        if (!businessName) {
+          setStatus("clientStatus", "Business name is required.", false);
+          return;
+        }
+        const payload = collectClientPayload();
+        payload.client_key = document.getElementById("clientKey").value.trim() || null;
+        try {
+          const result = await apiJson("/admin/clients", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          document.getElementById("selectedClientKey").value = result.client_key;
+          document.getElementById("clientKey").value = "";
+          renderWebhookUrls(result.client_key);
+          setStatus("clientStatus", `Created client ${result.client_key}.`);
+          await loadClients();
+          await loadSelectedClient();
+        } catch (error) {
+          setStatus("clientStatus", "Create failed: " + error.message, false);
+        }
+      }
+
+      async function saveClient() {
+        const clientKey = getSelectedClientKey();
+        if (!clientKey) {
+          setStatus("clientStatus", "Select a client key first.", false);
+          return;
+        }
+        const payload = collectClientPayload();
+        try {
+          await apiJson(`/admin/clients/${encodeURIComponent(clientKey)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          setStatus("clientStatus", `Client ${clientKey} updated.`);
+          await loadClients();
+          await loadSelectedClient();
+        } catch (error) {
+          setStatus("clientStatus", "Update failed: " + error.message, false);
+        }
+      }
+
+      function collectClientPayload() {
+        const templateOverrides = safeJsonParse(document.getElementById("templateOverrides").value, {});
+        const operatingDays = document
+          .getElementById("operatingDays")
+          .value.split(",")
+          .map((x) => x.trim())
+          .filter(Boolean)
+          .map((x) => Number(x))
+          .filter((x) => Number.isInteger(x) && x >= 0 && x <= 6);
+        return {
+          business_name: document.getElementById("businessName").value.trim(),
+          tone: document.getElementById("tone").value.trim(),
+          timezone: document.getElementById("timezone").value.trim(),
+          qualification_questions: document
+            .getElementById("qualificationQuestions")
+            .value.split("\n")
+            .map((x) => x.trim())
+            .filter(Boolean),
+          booking_url: document.getElementById("bookingUrl").value.trim(),
+          fallback_handoff_number: document.getElementById("handoffNumber").value.trim(),
+          consent_text: document.getElementById("consentText").value.trim(),
+          operating_hours: {
+            days: operatingDays.length ? operatingDays : [0, 1, 2, 3, 4],
+            start: document.getElementById("operatingStart").value.trim() || "09:00",
+            end: document.getElementById("operatingEnd").value.trim() || "18:00",
+          },
+          faq_context: document.getElementById("faqContext").value.trim(),
+          template_overrides: templateOverrides,
+          is_active: document.getElementById("isActive").value === "true",
+        };
+      }
+
+      async function simulateLead() {
+        const clientKey = getSelectedClientKey();
+        if (!clientKey) {
+          output("Select a client first.");
+          return;
+        }
+        const demoLeadId = document.getElementById("testLeadId").value.trim() || "demo-lead-001";
+        const demoPhone = document.getElementById("testFrom").value.trim() || "+15554443333";
+        const payload = {
+          entry: [
+            {
+              changes: [
+                {
+                  value: {
+                    leadgen_id: demoLeadId,
+                    field_data: [
+                      { name: "full_name", values: ["UI Demo Lead"] },
+                      { name: "phone_number", values: [demoPhone] },
+                      { name: "email", values: ["ui-demo@example.com"] },
+                      { name: "city", values: ["Austin"] },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        };
+        try {
+          const result = await apiJson(`/webhooks/meta/${encodeURIComponent(clientKey)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          output(JSON.stringify(result, null, 2));
+          await loadClientEvents();
+          await loadAuditLogs();
+        } catch (error) {
+          output("Simulate lead failed: " + error.message);
+        }
+      }
+
+      async function simulateInboundSms() {
+        const clientKey = getSelectedClientKey();
+        if (!clientKey) {
+          output("Select a client first.");
+          return;
+        }
+        const form = new URLSearchParams();
+        form.set("From", document.getElementById("testFrom").value.trim());
+        form.set("Body", document.getElementById("testBody").value.trim());
+        form.set("MessageSid", "SMUI" + String(Date.now()));
+        try {
+          const response = await fetch(`/sms/inbound/${encodeURIComponent(clientKey)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: form.toString(),
+          });
+          const text = await response.text();
+          output(text);
+          await loadClientEvents();
+          await loadAuditLogs();
+        } catch (error) {
+          output("Simulate inbound SMS failed: " + error.message);
+        }
+      }
+
+      async function sendTestSms() {
+        const clientKey = getSelectedClientKey();
+        if (!clientKey) {
+          output("Select a client first.");
+          return;
+        }
+        const payload = {
+          client_key: clientKey,
+          to_number: document.getElementById("testFrom").value.trim(),
+          body: "Test SMS from admin console.",
+        };
+        try {
+          const result = await apiJson("/admin/test/sms", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          output(JSON.stringify(result, null, 2));
+          await loadClientEvents();
+          await loadAuditLogs();
+        } catch (error) {
+          output("Test SMS failed: " + error.message);
+        }
+      }
+
+      async function runAiTest() {
+        const clientKey = getSelectedClientKey();
+        if (!clientKey) {
+          output("Select a client first.");
+          return;
+        }
+        const payload = {
+          client_key: clientKey,
+          inbound_text: document.getElementById("testBody").value.trim(),
+          lead_name: "UI Test Lead",
+          lead_city: "Austin",
+        };
+        try {
+          const result = await apiJson("/admin/test/ai", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          output(JSON.stringify(result, null, 2));
+          await loadClientEvents();
+          await loadAuditLogs();
+        } catch (error) {
+          output("AI test failed: " + error.message);
+        }
+      }
+
+      async function loadClientEvents() {
+        const clientKey = getSelectedClientKey();
+        if (!clientKey) {
+          return;
+        }
+        try {
+          const evt = await apiJson(`/admin/clients/${encodeURIComponent(clientKey)}/events`);
+          document.getElementById("evtLead").textContent = evt.last_lead_received_at || "-";
+          document.getElementById("evtIn").textContent = evt.last_sms_inbound_at || "-";
+          document.getElementById("evtOut").textContent = evt.last_sms_outbound_at || "-";
+          document.getElementById("evtAI").textContent = evt.last_ai_decision_at || "-";
+        } catch (error) {
+          output("Load events failed: " + error.message);
+        }
+      }
+
+      async function loadAuditLogs() {
+        const clientKey = getSelectedClientKey();
+        if (!clientKey) {
+          return;
+        }
+        try {
+          const logs = await apiJson(`/admin/clients/${encodeURIComponent(clientKey)}/audit-logs?limit=40`);
+          const body = document.getElementById("auditBody");
+          body.innerHTML = "";
+          logs.forEach((log) => {
+            const row = document.createElement("tr");
+            row.innerHTML = `
+              <td>${escapeHtml(log.created_at)}</td>
+              <td>${escapeHtml(log.event_type)}</td>
+              <td>${log.lead_id ?? "-"}</td>
+              <td><span class="mono">${escapeHtml(JSON.stringify(log.decision))}</span></td>
+            `;
+            body.appendChild(row);
+          });
+        } catch (error) {
+          output("Load logs failed: " + error.message);
+        }
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function escapeJs(value) {
+        return String(value).replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+      }
+    </script>
+  </body>
+</html>

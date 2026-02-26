@@ -1,0 +1,11 @@
+INFO:     Started server process [28376]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+{"ts": "2026-02-26T17:12:08.556174+00:00", "level": "INFO", "logger": "app.main", "message": "request_completed", "request_id": "0f6b9f0110354f8598f86cbb9c99b08f", "extra": {"taskName": "Task-6", "method": "GET", "path": "/health", "elapsed_ms": 1.09}}
+{"ts": "2026-02-26T17:12:57.080515+00:00", "level": "INFO", "logger": "app.main", "message": "request_completed", "request_id": "c27431cb3f8f4799bd2f0044eb365463", "extra": {"taskName": "Task-9", "method": "GET", "path": "/ui", "elapsed_ms": 0.6}}
+{"ts": "2026-02-26T17:12:58.053516+00:00", "level": "INFO", "logger": "app.main", "message": "request_completed", "request_id": "fcfb084edbec425ba118980257537f08", "extra": {"taskName": "Task-12", "method": "GET", "path": "/health", "elapsed_ms": 0.67}}
+{"ts": "2026-02-26T17:25:41.793035+00:00", "level": "INFO", "logger": "app.main", "message": "request_completed", "request_id": "6c3e43897f1e4c64a85afa4357a71941", "extra": {"taskName": "Task-16", "method": "GET", "path": "/ui", "elapsed_ms": 6.34}}
+{"ts": "2026-02-26T17:25:41.945093+00:00", "level": "INFO", "logger": "app.main", "message": "request_completed", "request_id": "4e2e830ae42340b8b5c8860fc9eca07f", "extra": {"taskName": "Task-18", "method": "GET", "path": "/favicon.ico", "elapsed_ms": 1.17}}
+{"ts": "2026-02-26T17:26:52.072991+00:00", "level": "INFO", "logger": "app.main", "message": "request_completed", "request_id": "3552f646608e4512b092091f111cf6ff", "extra": {"taskName": "Task-21", "method": "POST", "path": "/admin/clients", "elapsed_ms": 27.9}}
+{"ts": "2026-02-26T17:28:01.177182+00:00", "level": "INFO", "logger": "app.main", "message": "request_completed", "request_id": "25c36d294fa74ac29d8fa8c79d982565", "extra": {"taskName": "Task-26", "method": "GET", "path": "/admin/clients", "elapsed_ms": 2.73}}

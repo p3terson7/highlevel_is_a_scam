@@ -1,0 +1,8 @@
+initial_sms: "Hi {first_name}, thanks for reaching out to {business_name}. I can help you quickly. {consent_text}"
+after_hours: "Thanks for messaging {business_name}. We are currently offline and will reply during business hours."
+follow_up: "Quick follow-up from {business_name}: if you are ready, pick a time here {booking_url}"
+stop_confirmation: "You are unsubscribed and will no longer receive messages. Reply START to re-subscribe."
+help_response: "Thanks for contacting {business_name}. Reply STOP to opt out. Reply with your goal and we can help schedule a call."
+booking_prompt: "Great. Please choose a time that works for you: {booking_url}"
+booked_confirmation: "Perfect, you are all set. We look forward to speaking with you."
+handoff: "I can connect you to a team member at {handoff_number}."
