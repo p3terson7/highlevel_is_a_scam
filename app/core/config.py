@@ -22,17 +22,22 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_from_number: str = ""
+    public_base_url: str = ""
 
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
+    ai_provider_mode: str = "auto"
 
     meta_verify_token: str = "meta-verify-token"
+    meta_access_token: str = ""
+    meta_graph_api_version: str = "v22.0"
     linkedin_verify_token: str = "linkedin-verify-token"
     admin_token: str = "change-me"
+    enable_demo_seed: bool = False
 
     rq_eager: bool = False
-    rate_limit_count: int = 4
-    rate_limit_window_minutes: int = 5
+    rate_limit_count: int = 30
+    rate_limit_window_minutes: int = 1
     after_hours_followup_minutes: int = 720
     request_timeout_seconds: int = 20
 

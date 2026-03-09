@@ -82,16 +82,24 @@ class Client(Base, TimestampMixin):
         JSON, default=default_questions, nullable=False
     )
     booking_url: Mapped[str] = mapped_column(String(1024), default="", nullable=False)
+    booking_mode: Mapped[str] = mapped_column(String(32), default="link", nullable=False)
+    booking_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
+    provider_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
     fallback_handoff_number: Mapped[str] = mapped_column(String(32), default="", nullable=False)
     consent_text: Mapped[str] = mapped_column(
         String(512),
         default="Reply STOP to opt out. Msg/data rates may apply.",
         nullable=False,
     )
+    portal_display_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    portal_email: Mapped[str] = mapped_column(String(255), default="", nullable=False, index=True)
+    portal_password_hash: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    portal_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     operating_hours: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=default_operating_hours, nullable=False
     )
     faq_context: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    ai_context: Mapped[str] = mapped_column(Text, default="", nullable=False)
     template_overrides: Mapped[dict[str, str]] = mapped_column(
         JSON, default=default_dict, nullable=False
     )

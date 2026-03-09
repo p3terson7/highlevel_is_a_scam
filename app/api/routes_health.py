@@ -24,9 +24,12 @@ from app.db.models import (
 )
 from app.db.session import get_db
 from app.services.llm_agent import build_llm_agent
+from app.services.portal_auth import hash_portal_password
 from app.services.runtime_config import (
+    RUNTIME_KEYS,
     SECRET_KEYS,
     get_effective_runtime_map,
+    get_effective_runtime_map_for_client,
     load_runtime_overrides,
     upsert_runtime_values,
 )
@@ -39,6 +42,7 @@ def _webhook_urls(client_key: str) -> dict[str, str]:
     return {
         "meta_verify": f"/webhooks/meta/{client_key}",
         "meta_events": f"/webhooks/meta/{client_key}",
+        "zapier_events": f"/webhooks/zapier/{client_key}",
         "linkedin_events": f"/webhooks/linkedin/{client_key}",
         "twilio_sms": f"/sms/inbound/{client_key}",
     }
@@ -55,14 +59,22 @@ class ClientCreateRequest(BaseModel):
         ]
     )
     booking_url: str = ""
+    booking_mode: str = "link"
+    booking_config: dict[str, Any] = Field(default_factory=dict)
+    provider_config: dict[str, Any] = Field(default_factory=dict)
     fallback_handoff_number: str = ""
     consent_text: str = "Reply STOP to opt out. Msg/data rates may apply."
     operating_hours: dict[str, Any] = Field(
         default_factory=lambda: {"days": [0, 1, 2, 3, 4], "start": "09:00", "end": "18:00"}
     )
     faq_context: str = ""
+    ai_context: str = ""
     template_overrides: dict[str, str] = Field(default_factory=dict)
     client_key: str | None = None
+    portal_display_name: str = ""
+    portal_email: str = ""
+    portal_password: str | None = None
+    portal_enabled: bool = False
 
 
 class ClientUpdateRequest(BaseModel):
@@ -71,12 +83,20 @@ class ClientUpdateRequest(BaseModel):
     timezone: str | None = None
     qualification_questions: list[str] | None = None
     booking_url: str | None = None
+    booking_mode: str | None = None
+    booking_config: dict[str, Any] | None = None
+    provider_config: dict[str, Any] | None = None
     fallback_handoff_number: str | None = None
     consent_text: str | None = None
     operating_hours: dict[str, Any] | None = None
     faq_context: str | None = None
+    ai_context: str | None = None
     template_overrides: dict[str, str] | None = None
     is_active: bool | None = None
+    portal_display_name: str | None = None
+    portal_email: str | None = None
+    portal_password: str | None = None
+    portal_enabled: bool | None = None
 
 
 class ClientCreateResponse(BaseModel):
@@ -93,7 +113,9 @@ class AdminClientOut(BaseModel):
     tone: str
     timezone: str
     booking_url: str
+    booking_mode: str
     is_active: bool
+    portal_enabled: bool
     created_at: datetime
 
 
@@ -105,10 +127,18 @@ class AdminClientDetailOut(BaseModel):
     timezone: str
     qualification_questions: list[str]
     booking_url: str
+    booking_mode: str
+    booking_config: dict[str, Any]
+    provider_config: dict[str, Any]
     fallback_handoff_number: str
     consent_text: str
+    portal_display_name: str
+    portal_email: str
+    portal_enabled: bool
+    portal_password_configured: bool
     operating_hours: dict[str, Any]
     faq_context: str
+    ai_context: str
     template_overrides: dict[str, str]
     is_active: bool
     created_at: datetime
@@ -143,20 +173,34 @@ class RuntimeConfigUpdateRequest(BaseModel):
     twilio_account_sid: str | None = None
     twilio_auth_token: str | None = None
     twilio_from_number: str | None = None
+    public_base_url: str | None = None
     openai_api_key: str | None = None
     openai_model: str | None = None
+    ai_provider_mode: str | None = None
     meta_verify_token: str | None = None
+    meta_access_token: str | None = None
+    meta_graph_api_version: str | None = None
     linkedin_verify_token: str | None = None
 
 
 class RuntimeConfigStatusOut(BaseModel):
     twilio_account_sid_configured: bool
     twilio_auth_token_configured: bool
+    twilio_account_sid: str
+    twilio_auth_token: str
     twilio_from_number: str
+    public_base_url: str
     openai_api_key_configured: bool
+    openai_api_key: str
     openai_model: str
+    ai_provider_mode: str
     meta_verify_token_configured: bool
+    meta_verify_token: str
+    meta_access_token_configured: bool
+    meta_access_token: str
+    meta_graph_api_version: str
     linkedin_verify_token_configured: bool
+    linkedin_verify_token: str
 
 
 class RuntimeConfigUpdateResponse(BaseModel):
@@ -212,6 +256,20 @@ def _effective_runtime_config(settings: Settings, db: Session) -> dict[str, str]
     return get_effective_runtime_map(settings=settings, overrides=load_runtime_overrides(db))
 
 
+def _normalize_provider_config(raw: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    output: dict[str, str] = {}
+    for key in RUNTIME_KEYS:
+        value = raw.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            output[key] = text
+    return output
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
@@ -236,6 +294,11 @@ def create_client(
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="client_key already exists")
 
+    try:
+        portal_password_hash = hash_portal_password(payload.portal_password) if payload.portal_password else ""
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
     client = Client(
         client_key=client_key,
         business_name=payload.business_name,
@@ -243,10 +306,18 @@ def create_client(
         timezone=payload.timezone,
         qualification_questions=payload.qualification_questions,
         booking_url=payload.booking_url,
+        booking_mode=payload.booking_mode,
+        booking_config=payload.booking_config,
+        provider_config=_normalize_provider_config(payload.provider_config),
         fallback_handoff_number=payload.fallback_handoff_number,
         consent_text=payload.consent_text,
+        portal_display_name=payload.portal_display_name.strip(),
+        portal_email=payload.portal_email.strip().lower(),
+        portal_password_hash=portal_password_hash,
+        portal_enabled=payload.portal_enabled,
         operating_hours=payload.operating_hours,
         faq_context=payload.faq_context,
+        ai_context=payload.ai_context,
         template_overrides=payload.template_overrides,
     )
     db.add(client)
@@ -277,7 +348,9 @@ def list_clients(
             tone=client.tone,
             timezone=client.timezone,
             booking_url=client.booking_url,
+            booking_mode=client.booking_mode,
             is_active=client.is_active,
+            portal_enabled=client.portal_enabled,
             created_at=client.created_at,
         )
         for client in clients
@@ -301,10 +374,18 @@ def get_client(
         timezone=client.timezone,
         qualification_questions=client.qualification_questions,
         booking_url=client.booking_url,
+        booking_mode=client.booking_mode,
+        booking_config=client.booking_config,
+        provider_config=client.provider_config,
         fallback_handoff_number=client.fallback_handoff_number,
         consent_text=client.consent_text,
+        portal_display_name=client.portal_display_name,
+        portal_email=client.portal_email,
+        portal_enabled=client.portal_enabled,
+        portal_password_configured=bool(client.portal_password_hash),
         operating_hours=client.operating_hours,
         faq_context=client.faq_context,
+        ai_context=client.ai_context,
         template_overrides=client.template_overrides,
         is_active=client.is_active,
         created_at=client.created_at,
@@ -325,8 +406,22 @@ def update_client(
     client = _load_client_by_key(db, client_key)
 
     changes = payload.model_dump(exclude_unset=True)
+    portal_password = changes.pop("portal_password", None)
     for key, value in changes.items():
+        if key == "provider_config":
+            merged = dict(client.provider_config or {})
+            merged.update(_normalize_provider_config(value))
+            value = merged
+        if key == "portal_email" and value is not None:
+            value = value.strip().lower()
+        if key == "portal_display_name" and value is not None:
+            value = value.strip()
         setattr(client, key, value)
+    if portal_password is not None:
+        try:
+            client.portal_password_hash = hash_portal_password(portal_password) if portal_password.strip() else ""
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     db.commit()
     db.refresh(client)
@@ -339,10 +434,18 @@ def update_client(
         timezone=client.timezone,
         qualification_questions=client.qualification_questions,
         booking_url=client.booking_url,
+        booking_mode=client.booking_mode,
+        booking_config=client.booking_config,
+        provider_config=client.provider_config,
         fallback_handoff_number=client.fallback_handoff_number,
         consent_text=client.consent_text,
+        portal_display_name=client.portal_display_name,
+        portal_email=client.portal_email,
+        portal_enabled=client.portal_enabled,
+        portal_password_configured=bool(client.portal_password_hash),
         operating_hours=client.operating_hours,
         faq_context=client.faq_context,
+        ai_context=client.ai_context,
         template_overrides=client.template_overrides,
         is_active=client.is_active,
         created_at=client.created_at,
@@ -434,11 +537,21 @@ def runtime_config_status(
     return RuntimeConfigStatusOut(
         twilio_account_sid_configured=bool(effective["twilio_account_sid"]),
         twilio_auth_token_configured=bool(effective["twilio_auth_token"]),
+        twilio_account_sid=effective["twilio_account_sid"],
+        twilio_auth_token=effective["twilio_auth_token"],
         twilio_from_number=effective["twilio_from_number"],
+        public_base_url=effective["public_base_url"],
         openai_api_key_configured=bool(effective["openai_api_key"]),
+        openai_api_key=effective["openai_api_key"],
         openai_model=effective["openai_model"],
+        ai_provider_mode=effective["ai_provider_mode"],
         meta_verify_token_configured=bool(effective["meta_verify_token"]),
+        meta_verify_token=effective["meta_verify_token"],
+        meta_access_token_configured=bool(effective["meta_access_token"]),
+        meta_access_token=effective["meta_access_token"],
+        meta_graph_api_version=effective["meta_graph_api_version"],
         linkedin_verify_token_configured=bool(effective["linkedin_verify_token"]),
+        linkedin_verify_token=effective["linkedin_verify_token"],
     )
 
 
@@ -469,7 +582,11 @@ def admin_test_sms(
 ) -> dict[str, Any]:
     _require_admin(settings, admin_token)
     client = _load_client_by_key(db, payload.client_key)
-    effective = _effective_runtime_config(settings, db)
+    effective = get_effective_runtime_map_for_client(
+        settings=settings,
+        overrides=load_runtime_overrides(db),
+        client=client,
+    )
 
     if not (
         effective["twilio_account_sid"]
@@ -478,7 +595,7 @@ def admin_test_sms(
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Twilio is not fully configured in runtime settings.",
+            detail="Twilio is not fully configured for this client.",
         )
 
     sms_service = build_sms_service(settings, runtime_overrides=effective)
@@ -507,7 +624,11 @@ def admin_test_ai(
     _require_admin(settings, admin_token)
     client = _load_client_by_key(db, payload.client_key)
 
-    effective = _effective_runtime_config(settings, db)
+    effective = get_effective_runtime_map_for_client(
+        settings=settings,
+        overrides=load_runtime_overrides(db),
+        client=client,
+    )
     llm_agent = build_llm_agent(settings=settings, runtime_overrides=effective)
 
     fake_lead = Lead(
@@ -540,6 +661,8 @@ def admin_test_ai(
                 "inbound_text": payload.inbound_text,
                 "reply_text": result.reply_text,
                 "next_state": result.next_state.value,
+                "provider": result.provider,
+                "provider_error": result.provider_error,
                 "actions": [action.model_dump() for action in result.actions],
             },
         )
@@ -548,7 +671,8 @@ def admin_test_ai(
 
     return {
         "status": "ok",
-        "provider": "openai" if effective["openai_api_key"] else "heuristic",
+        "provider": result.provider,
+        "provider_error": result.provider_error,
         "reply_text": result.reply_text,
         "next_state": result.next_state.value,
         "actions": [action.model_dump() for action in result.actions],

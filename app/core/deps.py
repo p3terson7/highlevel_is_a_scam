@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
+from app.services.booking import BookingService, build_booking_service
 from app.services.llm_agent import LLMAgent, build_llm_agent
 from app.services.runtime_config import load_runtime_overrides
 from app.services.sms_service import SMSService, build_sms_service
@@ -44,6 +45,12 @@ def get_llm_agent(
     if overrides:
         return build_llm_agent(settings, runtime_overrides=overrides)
     return _llm_singleton()
+
+
+def get_booking_service(
+    settings: Settings = Depends(get_app_settings),
+) -> BookingService:
+    return build_booking_service(timeout_seconds=settings.request_timeout_seconds)
 
 
 def clear_dependency_caches() -> None:

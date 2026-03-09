@@ -4,6 +4,17 @@ from fastapi import Request
 from twilio.request_validator import RequestValidator
 
 
+def _public_request_url(request: Request) -> str:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+    forwarded_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+    host = request.headers.get("host", request.url.netloc).split(",")[0].strip()
+    scheme = forwarded_proto or request.url.scheme
+    netloc = forwarded_host or host or request.url.netloc
+    query_string = request.url.query
+    base = f"{scheme}://{netloc}{request.url.path}"
+    return f"{base}?{query_string}" if query_string else base
+
+
 def verify_twilio_signature(
     request: Request,
     form_data: Mapping[str, str],
@@ -14,7 +25,7 @@ def verify_twilio_signature(
 
     signature = request.headers.get("X-Twilio-Signature", "")
     validator = RequestValidator(auth_token)
-    url = str(request.url)
+    url = _public_request_url(request)
     return bool(validator.validate(url, dict(form_data), signature))
 
 

@@ -4,10 +4,15 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.logging import get_logger
 from app.db.models import Client, Lead, LeadSource
+from app.services.lead_summary import normalize_form_answers
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -39,7 +44,15 @@ def normalize_phone(raw_phone: str | None) -> str:
 
 
 def _field_lookup(answers: dict[str, Any], keys: list[str]) -> str:
-    lowered = {str(key).lower(): value for key, value in answers.items()}
+    lowered: dict[str, Any] = {}
+    for key, value in answers.items():
+        raw_key = str(key).strip().lower()
+        if not raw_key:
+            continue
+        lowered.setdefault(raw_key, value)
+        canonical = re.sub(r"[^a-z0-9]+", "_", raw_key).strip("_")
+        if canonical:
+            lowered.setdefault(canonical, value)
     for key in keys:
         if key in lowered and lowered[key]:
             return str(lowered[key]).strip()
@@ -86,15 +99,43 @@ def _meta_field_data_to_dict(field_data: Any) -> dict[str, Any]:
     return output
 
 
-def fetch_meta_lead_details(leadgen_id: str, client: Client) -> dict[str, Any]:
-    """
-    Placeholder for a real Meta Graph API call.
-    In production, use the client's access token to call:
-    GET /{leadgen_id}?fields=field_data,created_time
-    """
-    _ = client
-    _ = leadgen_id
-    return {}
+def fetch_meta_lead_details(
+    leadgen_id: str,
+    client: Client,
+    *,
+    access_token: str = "",
+    api_version: str = "v22.0",
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    if not leadgen_id or not access_token:
+        return {}
+
+    clean_version = (api_version or "v22.0").strip().lstrip("/")
+    url = f"https://graph.facebook.com/{clean_version}/{leadgen_id}"
+    try:
+        response = httpx.get(
+            url,
+            params={
+                "fields": "field_data,created_time",
+                "access_token": access_token,
+            },
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+    except Exception as exc:
+        logger.warning(
+            "meta_lead_details_fetch_failed",
+            extra={
+                "client_key": client.client_key,
+                "leadgen_id": leadgen_id,
+                "error": str(exc),
+            },
+        )
+        return {}
 
 
 def fetch_linkedin_lead_details(linkedin_lead_id: str, client: Client) -> dict[str, Any]:
@@ -107,7 +148,14 @@ def fetch_linkedin_lead_details(linkedin_lead_id: str, client: Client) -> dict[s
     return {}
 
 
-def normalize_meta_payload(payload: dict[str, Any], client: Client) -> list[NormalizedLead]:
+def normalize_meta_payload(
+    payload: dict[str, Any],
+    client: Client,
+    *,
+    access_token: str = "",
+    api_version: str = "v22.0",
+    timeout_seconds: int = 20,
+) -> list[NormalizedLead]:
     candidates: list[NormalizedLead] = []
 
     if isinstance(payload.get("lead"), dict):
@@ -115,6 +163,7 @@ def normalize_meta_payload(payload: dict[str, Any], client: Client) -> list[Norm
         form_answers = lead_payload.get("form_answers", lead_payload)
         if not isinstance(form_answers, dict):
             form_answers = {}
+        form_answers = normalize_form_answers(form_answers)
         name, phone, email, city = _extract_common_fields(form_answers)
         candidates.append(
             NormalizedLead(
@@ -140,9 +189,16 @@ def normalize_meta_payload(payload: dict[str, Any], client: Client) -> list[Norm
 
             # If webhook only includes lead ID, this is where a real API fetch is plugged in.
             if not form_answers and leadgen_id:
-                fetched = fetch_meta_lead_details(leadgen_id, client)
+                fetched = fetch_meta_lead_details(
+                    leadgen_id,
+                    client,
+                    access_token=access_token,
+                    api_version=api_version,
+                    timeout_seconds=timeout_seconds,
+                )
                 form_answers = _meta_field_data_to_dict(fetched.get("field_data"))
                 value = {**value, **fetched}
+            form_answers = normalize_form_answers(form_answers)
 
             name, phone, email, city = _extract_common_fields(form_answers)
             candidates.append(
@@ -165,6 +221,7 @@ def normalize_meta_payload(payload: dict[str, Any], client: Client) -> list[Norm
             form_answers = item.get("form_answers", item)
             if not isinstance(form_answers, dict):
                 form_answers = {}
+            form_answers = normalize_form_answers(form_answers)
             name, phone, email, city = _extract_common_fields(form_answers)
             candidates.append(
                 NormalizedLead(
@@ -207,6 +264,7 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
         answers = lead_data.get("form_answers", lead_data)
         if not isinstance(answers, dict):
             answers = {}
+        answers = normalize_form_answers(answers)
 
         name, phone, email, city = _extract_common_fields(answers)
         candidates.append(
@@ -227,6 +285,7 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
         answers = lead_data.get("form_answers", lead_data)
         if not isinstance(answers, dict):
             answers = {}
+        answers = normalize_form_answers(answers)
         name, phone, email, city = _extract_common_fields(answers)
         candidates.append(
             NormalizedLead(
@@ -244,9 +303,23 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
     return candidates
 
 
-def normalize_webhook_payload(source: str, payload: dict[str, Any], client: Client) -> list[NormalizedLead]:
+def normalize_webhook_payload(
+    source: str,
+    payload: dict[str, Any],
+    client: Client,
+    *,
+    meta_access_token: str = "",
+    meta_api_version: str = "v22.0",
+    request_timeout_seconds: int = 20,
+) -> list[NormalizedLead]:
     if source == LeadSource.META.value:
-        return normalize_meta_payload(payload, client)
+        return normalize_meta_payload(
+            payload,
+            client,
+            access_token=meta_access_token,
+            api_version=meta_api_version,
+            timeout_seconds=request_timeout_seconds,
+        )
     if source == LeadSource.LINKEDIN.value:
         return normalize_linkedin_payload(payload, client)
     return []
