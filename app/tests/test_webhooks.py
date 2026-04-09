@@ -37,6 +37,7 @@ def test_meta_webhook_intake_and_initial_sms(test_context):
         )
         assert lead is not None
         assert lead.phone == "+15551234567"
+        assert lead.crm_stage == "Contacted"
 
         outbound_messages = db.scalars(
             select(Message).where(
@@ -117,6 +118,7 @@ def test_meta_webhook_fetches_leadgen_details_and_sends_ai_initial_sms(test_cont
         assert lead.phone == "+15552229999"
         assert lead.email == "morgan@example.com"
         assert lead.conversation_state.value == "QUALIFYING"
+        assert lead.crm_stage == "Contacted"
 
         outbound_messages = db.scalars(
             select(Message).where(
@@ -157,6 +159,7 @@ def test_zapier_webhook_accepts_flat_payload_and_processes_meta_flow(test_contex
         assert lead is not None
         assert lead.phone == "+15558881212"
         assert lead.email == "zap@example.com"
+        assert lead.crm_stage == "Contacted"
 
         outbound_messages = db.scalars(
             select(Message).where(
@@ -196,6 +199,7 @@ def test_zapier_webhook_parses_blob_payload_into_context_fields(test_context):
         assert lead.form_answers.get("running_ads") == "Yes, Google Ads"
         assert lead.form_answers.get("when_to_start") == "Immediately"
         assert "Getting more leads" in (lead.form_answers.get("biggest_marketing_challenge") or "")
+        assert lead.crm_stage == "Contacted"
 
         outbound_messages = db.scalars(
             select(Message).where(

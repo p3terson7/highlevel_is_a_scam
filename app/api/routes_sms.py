@@ -23,16 +23,18 @@ from app.db.models import (
     MessageDirection,
 )
 from app.db.session import get_db
-from app.services.booking import (
-    BookingProviderError,
-    BookingService,
-    automated_booking_enabled,
-    ensure_booking_link,
-    extract_email,
-    handoff_suffix,
-)
+from app.services.booking import BookingService
 from app.services.compliance import evaluate_text, is_rate_limited
+from app.services.crm import (
+    CRM_STAGE_CONTACTED,
+    CRM_STAGE_LOST,
+    CRM_STAGE_MEETING_BOOKED,
+    CRM_STAGE_QUALIFIED,
+    is_meaningful_inbound,
+    progress_crm_stage,
+)
 from app.services.lead_intake import normalize_phone
+from app.services.inbound_sms import process_inbound_turn
 from app.services.llm_agent import LLMAgent, build_llm_agent
 from app.services.runtime_config import (
     client_runtime_overrides,
@@ -40,7 +42,7 @@ from app.services.runtime_config import (
     load_runtime_overrides,
 )
 from app.services.sms_service import SMSService, build_sms_service
-from app.workers.tasks import get_redis_connection
+from app.workers.tasks import enqueue_process_inbound_sms, get_redis_connection
 
 router = APIRouter(prefix="/sms", tags=["sms"])
 
@@ -103,6 +105,52 @@ def _store_outbound_message(
     )
 
 
+def _auto_update_crm_stage(
+    *,
+    db: Session,
+    lead: Lead,
+    client_id: int,
+    target_stage: str,
+    reason: str,
+    inbound_text: str | None = None,
+) -> None:
+    previous_stage = lead.crm_stage
+    next_stage = progress_crm_stage(previous_stage, target_stage)
+    if next_stage == previous_stage:
+        return
+    lead.crm_stage = next_stage
+    decision: dict[str, Any] = {
+        "previous_stage": previous_stage,
+        "new_stage": next_stage,
+        "reason": reason,
+    }
+    if inbound_text:
+        decision["inbound"] = inbound_text
+    db.add(
+        AuditLog(
+            client_id=client_id,
+            lead_id=lead.id,
+            event_type="crm_stage_auto_updated",
+            decision=decision,
+        )
+    )
+
+
+def _inbound_sid_already_seen(*, db: Session, client_id: int, inbound_sid: str) -> bool:
+    if not inbound_sid:
+        return False
+    existing_id = db.scalar(
+        select(Message.id)
+        .where(
+            Message.client_id == client_id,
+            Message.direction == MessageDirection.INBOUND,
+            Message.provider_message_sid == inbound_sid,
+        )
+        .limit(1)
+    )
+    return existing_id is not None
+
+
 @router.post("/inbound/{client_key}")
 async def inbound_sms(
     client_key: str,
@@ -137,20 +185,22 @@ async def inbound_sms(
 
     if not from_phone:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing sender phone")
+    if _inbound_sid_already_seen(db=db, client_id=client.id, inbound_sid=inbound_sid):
+        return _empty_twiml_response()
 
     lead = _load_or_create_lead(db=db, client=client, phone=from_phone, raw_payload=payload)
 
     now = datetime.now(timezone.utc)
-    db.add(
-        Message(
-            lead_id=lead.id,
-            client_id=lead.client_id,
-            direction=MessageDirection.INBOUND,
-            body=body,
-            provider_message_sid=inbound_sid,
-            raw_payload=payload,
-        )
+    inbound_message = Message(
+        lead_id=lead.id,
+        client_id=lead.client_id,
+        direction=MessageDirection.INBOUND,
+        body=body,
+        provider_message_sid=inbound_sid,
+        raw_payload=payload,
     )
+    db.add(inbound_message)
+    db.flush()
     lead.last_inbound_at = now
     incr("sms_inbound_total")
 
@@ -159,6 +209,8 @@ async def inbound_sms(
         previous_state = lead.conversation_state
         lead.opted_out = True
         lead.conversation_state = ConversationStateEnum.OPTED_OUT
+        previous_crm_stage = lead.crm_stage
+        lead.crm_stage = CRM_STAGE_LOST
 
         reply_text = sms_service.render_template(client, "stop_confirmation", context={})
         sid = sms_service.send_message(to_number=lead.phone, body=reply_text)
@@ -172,6 +224,20 @@ async def inbound_sms(
                     new_state=lead.conversation_state,
                     reason="STOP keyword",
                     metadata_json={},
+                )
+            )
+        if previous_crm_stage != lead.crm_stage:
+            db.add(
+                AuditLog(
+                    client_id=client.id,
+                    lead_id=lead.id,
+                    event_type="crm_stage_auto_updated",
+                    decision={
+                        "previous_stage": previous_crm_stage,
+                        "new_stage": lead.crm_stage,
+                        "reason": "opt_out_stop_keyword",
+                        "inbound": body,
+                    },
                 )
             )
 
@@ -216,6 +282,16 @@ async def inbound_sms(
         incr("sms_outbound_total")
         return _empty_twiml_response()
 
+    if is_meaningful_inbound(body):
+        _auto_update_crm_stage(
+            db=db,
+            lead=lead,
+            client_id=client.id,
+            target_stage=CRM_STAGE_QUALIFIED,
+            reason="meaningful_inbound",
+            inbound_text=body,
+        )
+
     redis_conn = get_redis_connection()
     if is_rate_limited(
         redis_client=redis_conn,
@@ -234,185 +310,20 @@ async def inbound_sms(
         db.commit()
         return _empty_twiml_response()
 
-    recent_desc = db.scalars(
-        select(Message)
-        .where(Message.lead_id == lead.id)
-        .order_by(Message.created_at.desc())
-        .limit(20)
-    ).all()
-    history = list(reversed(recent_desc))
-
-    detected_email = extract_email(body)
-    if detected_email and not lead.email:
-        lead.email = detected_email
-
-    if automated_booking_enabled(client) and lead.conversation_state == ConversationStateEnum.BOOKING_SENT:
-        try:
-            selection = booking_service.handle_slot_selection(
-                client=client,
-                lead=lead,
-                inbound_text=body,
-                history=history,
-            )
-        except BookingProviderError as exc:
-            fallback_reply = (
-                ensure_booking_link("I could not reach live scheduling right now, but you can still book here.", client)
-                if client.booking_url
-                else "I could not reach live scheduling right now. A team member will follow up shortly."
-            )
-            sid = sms_service.send_message(to_number=lead.phone, body=fallback_reply)
-            _store_outbound_message(
-                db=db,
-                lead=lead,
-                body=fallback_reply,
-                provider_sid=sid,
-                raw_payload={"booking_provider_error": str(exc)},
-            )
-            lead.last_outbound_at = now
-            db.add(
-                AuditLog(
-                    client_id=client.id,
-                    lead_id=lead.id,
-                    event_type="calendar_booking_error",
-                    decision={"inbound": body, "error": str(exc)},
-                )
-            )
-            db.commit()
-            incr("sms_outbound_total")
-            return _empty_twiml_response()
-
-        if selection and selection.handled:
-            sid = sms_service.send_message(to_number=lead.phone, body=selection.reply_text)
-            _store_outbound_message(
-                db=db,
-                lead=lead,
-                body=selection.reply_text,
-                provider_sid=sid,
-                raw_payload=selection.raw_payload,
-            )
-            previous_state = lead.conversation_state
-            lead.conversation_state = selection.next_state
-            lead.last_outbound_at = now
-            if previous_state != lead.conversation_state:
-                db.add(
-                    ConversationState(
-                        lead_id=lead.id,
-                        previous_state=previous_state,
-                        new_state=lead.conversation_state,
-                        reason=selection.transition_reason,
-                        metadata_json=selection.raw_payload,
-                    )
-                )
-            db.add(
-                AuditLog(
-                    client_id=client.id,
-                    lead_id=lead.id,
-                    event_type=selection.audit_event_type,
-                    decision=selection.audit_decision,
-                )
-            )
-            db.commit()
-            incr("sms_outbound_total")
-            return _empty_twiml_response()
-
-    agent_response = llm_agent.next_reply(
-        client=client,
-        lead=lead,
-        inbound_text=body,
-        history=history,
-    )
-
-    reply_text = agent_response.reply_text.strip()
-    next_state = agent_response.next_state
-
-    for action in agent_response.actions:
-        if action.type == "send_booking_link":
-            reply_text = ensure_booking_link(reply_text=reply_text, client=client)
-            if next_state in {
-                ConversationStateEnum.NEW,
-                ConversationStateEnum.GREETED,
-                ConversationStateEnum.QUALIFYING,
-            }:
-                next_state = ConversationStateEnum.BOOKING_SENT
-        elif action.type == "offer_calendar_slots":
-            if not lead.email:
-                reply_text = "I can book this directly. What email should I use for the calendar confirmation?"
-                next_state = ConversationStateEnum.QUALIFYING
-                continue
-            try:
-                offer = booking_service.offer_slots(client=client, lead=lead)
-                reply_text = offer.reply_text
-                if offer.slots:
-                    next_state = ConversationStateEnum.BOOKING_SENT
-                else:
-                    next_state = ConversationStateEnum.BOOKING_SENT if client.booking_url else ConversationStateEnum.QUALIFYING
-                action.payload = offer.raw_payload.get("booking_offer", {})
-            except BookingProviderError as exc:
-                reply_text = (
-                    ensure_booking_link("I could not pull live availability right now, but you can still book here.", client)
-                    if client.booking_url
-                    else "I could not pull live availability right now. A team member will follow up shortly."
-                )
-                action.payload = {"error": str(exc)}
-        elif action.type == "handoff_to_human":
-            reply_text = f"{reply_text}{handoff_suffix(client)}".strip()
-            next_state = ConversationStateEnum.HANDOFF
-
-    outbound_raw_payload = {"actions": [action.model_dump() for action in agent_response.actions]}
-    booking_offer_payload = next(
-        (
-            action.payload
-            for action in agent_response.actions
-            if action.type == "offer_calendar_slots" and isinstance(action.payload, dict) and action.payload.get("slots")
-        ),
-        None,
-    )
-    if booking_offer_payload:
-        outbound_raw_payload["booking_offer"] = booking_offer_payload
-
-    sid = sms_service.send_message(to_number=lead.phone, body=reply_text)
-    _store_outbound_message(
-        db=db,
-        lead=lead,
-        body=reply_text,
-        provider_sid=sid,
-        raw_payload=outbound_raw_payload,
-    )
-
-    previous_state = lead.conversation_state
-    lead.conversation_state = next_state
-    lead.last_outbound_at = now
-
-    if previous_state != lead.conversation_state:
-        db.add(
-                ConversationState(
-                    lead_id=lead.id,
-                    previous_state=previous_state,
-                    new_state=lead.conversation_state,
-                    reason="agent_transition",
-                    metadata_json={
-                        **outbound_raw_payload,
-                        "provider": agent_response.provider,
-                    },
-                )
-            )
-
-    db.add(
-        AuditLog(
-            client_id=client.id,
-            lead_id=lead.id,
-            event_type="agent_decision",
-            decision={
-                "inbound": body,
-                "outbound": reply_text,
-                "next_state": lead.conversation_state.value,
-                "provider": agent_response.provider,
-                "provider_error": agent_response.provider_error,
-                **outbound_raw_payload,
-            },
+    if settings.rq_eager:
+        process_inbound_turn(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=body,
+            now=now,
+            sms_service=sms_service,
+            booking_service=booking_service,
+            llm_agent=llm_agent,
+            inbound_message_id=inbound_message.id,
         )
-    )
-    db.commit()
-    incr("sms_outbound_total")
+    else:
+        db.commit()
+        enqueue_process_inbound_sms(lead_id=lead.id, inbound_message_id=inbound_message.id)
 
     return _empty_twiml_response()

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import select
 
-from app.db.models import Client
+from app.db.models import CalendarBooking, Client, Lead, LeadSource
 from app.db.session import get_session_factory
 
 
@@ -80,6 +82,86 @@ def test_demo_seed_populates_inbox_and_client_detail(test_context):
     assert len(client_payload["recent_conversations"]) > 0
     assert len(client_payload["recent_logs"]) > 0
 
+
+def test_seed_showcase_for_selected_existing_client(test_context):
+    seed = test_context.client.post(
+        f"/ui/api/seed-showcase/{test_context.client_key}?reset=true",
+        headers=_admin_headers(),
+    )
+    assert seed.status_code == 200
+    payload = seed.json()
+    assert payload["seeded"] is True
+    assert payload["client_key"] == test_context.client_key
+    assert payload["leads_created"] > 0
+    assert payload["messages_created"] > 0
+
+    conversations = test_context.client.get(
+        f"/ui/api/conversations?client_key={test_context.client_key}",
+        headers=_admin_headers(),
+    )
+    assert conversations.status_code == 200
+    convo_payload = conversations.json()
+    assert convo_payload["total"] >= payload["leads_created"]
+
+    crm_leads = test_context.client.get(
+        f"/ui/api/crm/leads?client_key={test_context.client_key}",
+        headers=_admin_headers(),
+    )
+    assert crm_leads.status_code == 200
+    crm_payload = crm_leads.json()
+    assert crm_payload["total"] >= payload["leads_created"]
+    assert any(item["conversation_state"] == "BOOKING_SENT" for item in crm_payload["items"])
+
+
+def test_ui_can_simulate_peter_lead_thread(test_context):
+    response = test_context.client.post(
+        f"/ui/api/owner/{test_context.client_key}/simulate-peter-lead",
+        headers=_admin_headers(),
+        json={"phone": "+15554443333"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["template"] == "Peter Lead"
+    assert payload["delivery_mode"] == "mock"
+    assert payload["phone"] == "+15554443333"
+    assert test_context.fake_sms.sent
+    assert test_context.fake_sms.sent[-1]["to"] == "+15554443333"
+
+    thread = test_context.client.get(
+        f"/ui/api/conversations/{payload['lead_id']}/thread",
+        headers=_admin_headers(),
+    )
+    assert thread.status_code == 200
+    thread_payload = thread.json()
+    assert thread_payload["lead"]["full_name"] == "Peter Lead"
+    assert thread_payload["lead"]["source"] == "meta"
+    assert thread_payload["messages"]
+    assert thread_payload["messages"][0]["direction"] == "OUTBOUND"
+    assert any(item["event_type"] == "ui_simulated_initial_ai_sms" for item in thread_payload["audit_events"])
+
+
+def test_client_portal_can_launch_test_lead_without_admin_token(test_context):
+    seed = test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
+    assert seed.status_code == 200
+
+    login = test_context.client.post(
+        "/ui/api/login/client",
+        json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
+    )
+    assert login.status_code == 200
+    token = login.json()["token"]
+
+    response = test_context.client.post(
+        f"/ui/api/owner/{test_context.client_key}/simulate-peter-lead",
+        headers=_portal_headers(token),
+        json={"phone": "+15556667777"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["phone"] == "+15556667777"
+    assert test_context.fake_sms.sent[-1]["to"] == "+15556667777"
 
 
 def test_conversation_thread_notes_and_actions(test_context):
@@ -164,6 +246,92 @@ def test_zapier_results_console_endpoint_returns_recent_events(test_context):
     assert payload["client_key"] == test_context.client_key
     assert payload["webhook_url"] == f"/webhooks/zapier/{test_context.client_key}"
     assert any(item["event_type"] == "zapier_webhook_received" for item in payload["items"])
+
+
+def test_calendar_endpoint_returns_internal_bookings(test_context):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.booking_mode = "internal"
+        client.booking_config = {
+            "internal_calendar": {
+                "slot_minutes": 30,
+                "notice_minutes": 0,
+                "horizon_days": 14,
+                "availability": [{"day": day, "start": "09:00", "end": "17:00", "enabled": True} for day in range(5)],
+            }
+        }
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.META,
+            full_name="Calendar API Lead",
+            phone="+15553334444",
+            email="calendar-api@example.com",
+            city="Austin",
+            form_answers={},
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.flush()
+        start_at = datetime.now(timezone.utc) + timedelta(days=1)
+        db.add(
+            CalendarBooking(
+                client_id=client.id,
+                lead_id=lead.id,
+                provider="internal",
+                source="sms_ai",
+                status="scheduled",
+                start_at=start_at,
+                end_at=start_at + timedelta(minutes=30),
+                timezone=client.timezone,
+                title="Lead call",
+                notes="",
+            )
+        )
+        db.commit()
+
+    response = test_context.client.get(
+        f"/ui/api/clients/{test_context.client_key}/calendar",
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["booking_mode"] == "internal"
+    assert payload["total"] >= 1
+    assert any(item["lead_name"] == "Calendar API Lead" for item in payload["items"])
+
+
+def test_owner_calendar_settings_endpoint_updates_client_booking_config(test_context):
+    response = test_context.client.patch(
+        f"/ui/api/owner/{test_context.client_key}/calendar",
+        headers=_admin_headers(),
+        json={
+            "slot_minutes": 45,
+            "notice_minutes": 90,
+            "horizon_days": 21,
+            "availability": [
+                {"day": 0, "start": "09:00", "end": "17:00", "enabled": True},
+                {"day": 1, "start": "09:00", "end": "17:00", "enabled": True},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["booking_mode"] == "internal"
+    assert payload["internal_calendar"]["slot_minutes"] == 45
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        assert client.booking_mode == "internal"
+        internal = (client.booking_config or {}).get("internal_calendar", {})
+        assert internal.get("slot_minutes") == 45
+        assert isinstance(internal.get("availability"), list)
 
 
 def test_owner_workspace_can_start_test_contact_and_send_manual_message(test_context):
@@ -265,7 +433,7 @@ def test_owner_portal_can_view_and_update_ai_context(test_context):
     assert "Chicago suburbs" in updated_payload["client"]["faq_context"]
 
 
-def test_client_portal_login_is_scoped_to_own_leads_and_can_delete_conversation(test_context):
+def test_client_portal_login_is_scoped_to_own_leads_and_cannot_delete_conversation(test_context):
     seed = test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
     assert seed.status_code == 200
 
@@ -303,19 +471,76 @@ def test_client_portal_login_is_scoped_to_own_leads_and_can_delete_conversation(
         f"/ui/api/conversations/{delete_lead_id}",
         headers=_portal_headers(token),
     )
-    assert delete_response.status_code == 200
-    assert delete_response.json()["deleted_lead_id"] == delete_lead_id
+    assert delete_response.status_code == 403
+    assert delete_response.json()["detail"] == "Admin access required"
 
-    missing_thread = test_context.client.get(
+    existing_thread = test_context.client.get(
         f"/ui/api/conversations/{delete_lead_id}/thread",
         headers=_portal_headers(token),
     )
-    assert missing_thread.status_code == 404
+    assert existing_thread.status_code == 200
 
     refreshed = test_context.client.get("/ui/api/conversations", headers=_portal_headers(token))
     assert refreshed.status_code == 200
     refreshed_ids = {item["lead_id"] for item in refreshed.json()["items"]}
-    assert delete_lead_id not in refreshed_ids
+    assert delete_lead_id in refreshed_ids
+
+
+def test_client_portal_can_archive_and_restore_conversation(test_context):
+    seed = test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
+    assert seed.status_code == 200
+
+    login = test_context.client.post(
+        "/ui/api/login/client",
+        json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
+    )
+    assert login.status_code == 200
+    token = login.json()["token"]
+
+    conversations = test_context.client.get("/ui/api/conversations", headers=_portal_headers(token))
+    assert conversations.status_code == 200
+    lead_id = conversations.json()["items"][0]["lead_id"]
+
+    archive = test_context.client.patch(
+        f"/ui/api/conversations/{lead_id}/archive",
+        headers=_portal_headers(token),
+        json={"archived": True},
+    )
+    assert archive.status_code == 200
+    assert archive.json()["archived"] is True
+
+    archived_thread = test_context.client.get(
+        f"/ui/api/conversations/{lead_id}/thread",
+        headers=_portal_headers(token),
+    )
+    assert archived_thread.status_code == 200
+    archived_payload = archived_thread.json()
+    assert "archived" in archived_payload["lead"]["tags"]
+    assert any(event["event_type"] == "conversation_archived" for event in archived_payload["audit_events"])
+
+    archived_detail = test_context.client.get(
+        f"/ui/api/crm/leads/{lead_id}",
+        headers=_portal_headers(token),
+    )
+    assert archived_detail.status_code == 200
+    assert "archived" in archived_detail.json()["tags"]
+
+    restore = test_context.client.patch(
+        f"/ui/api/conversations/{lead_id}/archive",
+        headers=_portal_headers(token),
+        json={"archived": False},
+    )
+    assert restore.status_code == 200
+    assert restore.json()["archived"] is False
+
+    restored_thread = test_context.client.get(
+        f"/ui/api/conversations/{lead_id}/thread",
+        headers=_portal_headers(token),
+    )
+    assert restored_thread.status_code == 200
+    restored_payload = restored_thread.json()
+    assert "archived" not in restored_payload["lead"]["tags"]
+    assert any(event["event_type"] == "conversation_unarchived" for event in restored_payload["audit_events"])
 
 
 def test_seed_demo_backfills_missing_portal_credentials(test_context):
@@ -343,3 +568,119 @@ def test_seed_demo_backfills_missing_portal_credentials(test_context):
         json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
     )
     assert login.status_code == 200
+
+
+def test_crm_lead_detail_and_tasks_endpoints(test_context):
+    seed = test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
+    assert seed.status_code == 200
+
+    leads = test_context.client.get(
+        "/ui/api/crm/leads?client_key=demo-roofing",
+        headers=_admin_headers(),
+    )
+    assert leads.status_code == 200
+    leads_payload = leads.json()
+    assert leads_payload["total"] > 0
+    assert "stages" in leads_payload
+    lead_id = leads_payload["items"][0]["lead_id"]
+
+    detail = test_context.client.get(
+        f"/ui/api/crm/leads/{lead_id}",
+        headers=_admin_headers(),
+    )
+    assert detail.status_code == 200
+    detail_payload = detail.json()
+    assert detail_payload["lead"]["crm_stage"]
+    assert "timeline" in detail_payload
+
+    stage_update = test_context.client.patch(
+        f"/ui/api/crm/leads/{lead_id}/stage",
+        headers=_admin_headers(),
+        json={"stage": "Meeting Completed"},
+    )
+    assert stage_update.status_code == 200
+    assert stage_update.json()["crm_stage"] == "Meeting Completed"
+
+    tag_add = test_context.client.post(
+        f"/ui/api/crm/leads/{lead_id}/tags",
+        headers=_admin_headers(),
+        json={"tag": "High Budget"},
+    )
+    assert tag_add.status_code == 200
+    assert "high budget" in tag_add.json()["tags"]
+
+    note_add = test_context.client.post(
+        f"/ui/api/crm/leads/{lead_id}/notes",
+        headers=_admin_headers(),
+        json={"note": "CRM follow-up note from admin."},
+    )
+    assert note_add.status_code == 200
+
+    task_create = test_context.client.post(
+        f"/ui/api/crm/leads/{lead_id}/tasks",
+        headers=_admin_headers(),
+        json={
+            "title": "Review after meeting",
+            "description": "Send recap and next steps.",
+            "due_date": "2026-03-12",
+        },
+    )
+    assert task_create.status_code == 200
+    task_payload = task_create.json()["task"]
+    assert task_payload["status"] == "open"
+    task_id = task_payload["id"]
+
+    task_done = test_context.client.patch(
+        f"/ui/api/crm/tasks/{task_id}",
+        headers=_admin_headers(),
+        json={"status": "done"},
+    )
+    assert task_done.status_code == 200
+    assert task_done.json()["task"]["status"] == "done"
+
+    refreshed_detail = test_context.client.get(
+        f"/ui/api/crm/leads/{lead_id}",
+        headers=_admin_headers(),
+    )
+    assert refreshed_detail.status_code == 200
+    refreshed_payload = refreshed_detail.json()
+    assert refreshed_payload["lead"]["crm_stage"] == "Meeting Completed"
+    assert any(tag == "high budget" for tag in refreshed_payload["tags"])
+    assert any("CRM follow-up note" in note["body"] for note in refreshed_payload["notes"])
+    assert any(task["id"] == task_id and task["status"] == "done" for task in refreshed_payload["tasks"])
+    assert any(item["type"] == "crm_stage" for item in refreshed_payload["timeline"])
+
+    task_list = test_context.client.get(
+        "/ui/api/crm/tasks?client_key=demo-roofing&status=done",
+        headers=_admin_headers(),
+    )
+    assert task_list.status_code == 200
+    assert any(item["id"] == task_id for item in task_list.json()["items"])
+
+
+def test_crm_endpoints_are_scoped_for_client_portal(test_context):
+    seed = test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
+    assert seed.status_code == 200
+
+    login = test_context.client.post(
+        "/ui/api/login/client",
+        json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
+    )
+    assert login.status_code == 200
+    token = login.json()["token"]
+
+    crm_leads = test_context.client.get("/ui/api/crm/leads", headers=_portal_headers(token))
+    assert crm_leads.status_code == 200
+    items = crm_leads.json()["items"]
+    assert items
+    assert all(item["client_key"] == "demo-roofing" for item in items)
+
+    foreign_lead_id = test_context.client.get(
+        "/ui/api/crm/leads?client_key=demo-legal",
+        headers=_admin_headers(),
+    ).json()["items"][0]["lead_id"]
+    forbidden = test_context.client.get(
+        f"/ui/api/crm/leads/{foreign_lead_id}",
+        headers=_portal_headers(token),
+    )
+    assert forbidden.status_code == 404

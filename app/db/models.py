@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -106,6 +107,10 @@ class Client(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     leads: Mapped[list["Lead"]] = relationship(back_populates="client", cascade="all, delete-orphan")
+    calendar_bookings: Mapped[list["CalendarBooking"]] = relationship(
+        back_populates="client",
+        cascade="all, delete-orphan",
+    )
 
 
 class Lead(Base, TimestampMixin):
@@ -142,6 +147,8 @@ class Lead(Base, TimestampMixin):
         default=ConversationStateEnum.NEW,
         nullable=False,
     )
+    crm_stage: Mapped[str] = mapped_column(String(32), default="New Lead", nullable=False, index=True)
+    owner_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     initial_sms_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_outbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -152,6 +159,12 @@ class Lead(Base, TimestampMixin):
         back_populates="lead", cascade="all, delete-orphan"
     )
     audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="lead", cascade="all, delete-orphan")
+    tasks: Mapped[list["LeadTask"]] = relationship(back_populates="lead", cascade="all, delete-orphan")
+    tags: Mapped[list["LeadTag"]] = relationship(back_populates="lead", cascade="all, delete-orphan")
+    calendar_bookings: Mapped[list["CalendarBooking"]] = relationship(
+        back_populates="lead",
+        cascade="all, delete-orphan",
+    )
 
 
 class Message(Base):
@@ -216,3 +229,55 @@ class RuntimeSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class LeadTag(Base):
+    __tablename__ = "lead_tags"
+    __table_args__ = (
+        UniqueConstraint("lead_id", "tag", name="uq_lead_tags_lead_tag"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    tag: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    lead: Mapped[Lead] = relationship(back_populates="tags")
+
+
+class LeadTask(Base, TimestampMixin):
+    __tablename__ = "lead_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+
+    lead: Mapped[Lead] = relationship(back_populates="tasks")
+
+
+class CalendarBooking(Base, TimestampMixin):
+    __tablename__ = "calendar_bookings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id", ondelete="SET NULL"), index=True, nullable=True)
+    provider: Mapped[str] = mapped_column(String(32), default="internal", nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="sms_ai", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="scheduled", nullable=False, index=True)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC", nullable=False)
+    title: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    client: Mapped[Client] = relationship(back_populates="calendar_bookings")
+    lead: Mapped[Lead | None] = relationship(back_populates="calendar_bookings")

@@ -18,7 +18,7 @@ x-app-environment: &app-environment
   TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
   AI_PROVIDER_MODE: ${AI_PROVIDER_MODE:-auto}
 
 services:

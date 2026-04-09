@@ -1,12 +1,18 @@
-"""Compatibility shim: LLMAgent now routes to agent_v2."""
+from __future__ import annotations
 
-from app.services.agent_v2 import (
+"""Compatibility shim.
+
+All imports from app.services.llm_agent resolve to the current tool-driven agent.
+"""
+
+from app.services.agent_v3 import (  # noqa: F401
     AgentAction,
     AgentResponse,
     LLMAgent,
-    LLMAgentV2,
+    LLMAgentV3,
     LLMProvider,
     OpenAIProvider,
+    ToolCall,
     build_llm_agent,
 )
 
@@ -14,8 +20,9 @@ __all__ = [
     "AgentAction",
     "AgentResponse",
     "LLMAgent",
-    "LLMAgentV2",
+    "LLMAgentV3",
     "LLMProvider",
     "OpenAIProvider",
+    "ToolCall",
     "build_llm_agent",
 ]

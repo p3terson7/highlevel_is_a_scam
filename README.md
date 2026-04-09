@@ -95,6 +95,8 @@ In **Clients > Edit**:
   - AI Context / Business Playbook (how the business sells, differentiators, do/don't say rules)
   - FAQ/context (authoritative service/pricing/policy facts)
   - booking URL
+  - booking mode: `internal`
+  - internal calendar availability (weekly windows, slot length, notice, horizon)
   - operating hours
   - handoff number
   - template overrides (JSON)
@@ -187,7 +189,7 @@ When fully configured with public URLs and provider credentials:
 The UI is now a compact operator workspace with two roles:
 - `Admin`: full overview across all clients
 - `Client portal`: scoped inbox for one business owner, limited to that client's own leads
-- Left sidebar with icon-first navigation: `Dashboard`, `Clients`, `Conversations`, `Logs`, `Settings`, `Test Lab`
+- Left sidebar with icon-first navigation: `Dashboard`, `Clients`, `Conversations`, `CRM`, `Leads`, `Calendar`, `Tasks`, `Logs`, `Settings`, `Test Lab`
 - Top bar with global search, current client selector, environment/runtime badges, refresh, and dark/light theme toggle
 - Dense panels, small controls, monospace metadata, and split panes optimized for desktop operations
 - If you were already on `/ui`, hard-refresh the page after updating because the app ships the UI as one inline HTML/JS template
@@ -223,6 +225,52 @@ The UI is now a compact operator workspace with two roles:
 
 `[Screenshot placeholder: Conversations split-pane workspace with thread open]`
 
+### CRM
+- Pipeline board grouped by CRM stage:
+  - `New Lead`
+  - `Contacted`
+  - `Qualified`
+  - `Meeting Booked`
+  - `Meeting Completed`
+  - `Won`
+  - `Lost`
+- Stage counts are shown as compact badges in the toolbar
+- Click any card to open the full CRM lead record
+
+`[Screenshot placeholder: CRM board by stage]`
+
+### Leads
+- Full CRM lead record view with:
+  - contact/source fields
+  - CRM stage + AI conversation state
+  - lead summary + normalized form answers
+  - internal notes
+  - tasks/follow-ups
+  - tags
+  - conversation preview
+  - activity timeline (messages, state changes, stage updates, booking events, notes, task events)
+- Stage can be updated directly from this page
+
+`[Screenshot placeholder: Lead detail CRM record view]`
+
+### Tasks
+- Follow-up queue across all leads
+- Filters:
+  - client
+  - status (`open` / `done`)
+- Row actions:
+  - mark done/reopen
+  - jump to linked lead record
+
+`[Screenshot placeholder: Tasks list view]`
+
+### Calendar
+- Internal meeting calendar for the selected client
+- Shows upcoming meetings booked by the SMS AI flow
+- Use `Clients > Edit > Internal calendar` to configure weekly availability that powers slot offers
+
+`[Screenshot placeholder: Calendar view with upcoming booked meetings]`
+
 ### Logs
 - Selected-client event summary cards
 - Dense audit log table with local search from the top bar
@@ -233,6 +281,7 @@ The UI is now a compact operator workspace with two roles:
 ### Settings
 - Runtime provider settings in the left column (global fallback defaults)
 - Selected-client webhook URLs and demo-data controls in the right column
+- Selected-client `AI Context / Business Playbook` and internal calendar availability are editable here (admin and client portal)
 - Demo seed/reset stays in Settings to avoid another low-frequency page
 - Saved provider keys and tokens remain visible to the authenticated admin in this console
 
@@ -283,6 +332,12 @@ Seeded demo portal credentials:
 Automatic dev behavior:
 - `docker compose up --build` runs migrations and then runs `python -m app.scripts.seed_demo`
 - If demo data is already present, the seed step skips re-creating it
+- Seeded data includes CRM-ready records:
+  - mixed CRM stages
+  - internal notes
+  - tags
+  - open/done tasks
+  - activity timeline events (messages, transitions, stage updates)
 
 Manual commands:
 
@@ -296,10 +351,31 @@ UI controls:
 - Open `/ui`
 - Go to `Settings`
 - Use `Seed Demo Data`, `Reseed Demo Data`, or `Reset Demo Data`
+- For your own business tenant (for example `prototype`), use `Seed selected client` / `Reseed selected client` to inject realistic showcase leads, conversations, tasks, tags, and logs directly into the currently selected client.
 
 Seeded portal logins:
 - Demo clients are created with client-portal access enabled
 - Use the credentials in `Client Portal` above to test the scoped view immediately
+
+## CRM Stage Mapping
+
+CRM stages are business-facing pipeline labels and remain separate from AI conversation states.
+
+- `New Lead`: captured, no meaningful outreach yet
+- `Contacted`: outbound sent (auto/manual)
+- `Qualified`: meaningful response captured
+- `Meeting Booked`: booking confirmed or set manually
+- `Meeting Completed`: post-meeting follow-up phase
+- `Won`: closed as customer
+- `Lost`: closed-lost or opted out
+
+How stages relate to AI states:
+- AI states (`NEW`, `GREETED`, `QUALIFYING`, `BOOKING_SENT`, `BOOKED`, `HANDOFF`, `OPTED_OUT`) continue to drive the SMS workflow.
+- CRM stages drive pipeline operations in the `CRM`, `Leads`, and `Tasks` pages.
+- Conservative auto-updates are enabled:
+  - first outbound -> `Contacted`
+  - meaningful inbound -> `Qualified`
+  - booking confirmation -> `Meeting Booked`
 
 ## Live Phone Testing
 
@@ -336,6 +412,9 @@ Important:
 - Client create + dense client workspace editing
 - Client portal credential management per client
 - Three-pane conversation inbox with thread view and quick actions
+- CRM board view (`CRM`) with per-stage lead cards
+- CRM lead record page (`Leads`) with stage controls, notes, tags, tasks, and timeline
+- CRM task queue (`Tasks`) with open/done workflow and lead jump links
 - Lead summary block + normalized form answers in thread details
 - Hard delete for conversations from the thread details pane
 - Internal notes stored in `audit_logs`

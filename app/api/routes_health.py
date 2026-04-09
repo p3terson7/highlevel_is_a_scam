@@ -661,6 +661,9 @@ def admin_test_ai(
                 "inbound_text": payload.inbound_text,
                 "reply_text": result.reply_text,
                 "next_state": result.next_state.value,
+                "action": result.action,
+                "next_question_key": result.next_question_key,
+                "collected_fields": result.collected_fields.model_dump(exclude_none=True),
                 "provider": result.provider,
                 "provider_error": result.provider_error,
                 "actions": [action.model_dump() for action in result.actions],
@@ -675,6 +678,9 @@ def admin_test_ai(
         "provider_error": result.provider_error,
         "reply_text": result.reply_text,
         "next_state": result.next_state.value,
+        "action": result.action,
+        "next_question_key": result.next_question_key,
+        "collected_fields": result.collected_fields.model_dump(exclude_none=True),
         "actions": [action.model_dump() for action in result.actions],
     }
 

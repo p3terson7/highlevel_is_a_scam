@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -14,9 +14,22 @@ from app.db.models import (
     ConversationState,
     ConversationStateEnum,
     Lead,
+    LeadTag,
+    LeadTask,
     LeadSource,
     Message,
     MessageDirection,
+)
+from app.services.crm import (
+    CRM_STAGE_CONTACTED,
+    CRM_STAGE_LOST,
+    CRM_STAGE_MEETING_BOOKED,
+    CRM_STAGE_MEETING_COMPLETED,
+    CRM_STAGE_NEW_LEAD,
+    CRM_STAGE_QUALIFIED,
+    CRM_STAGE_WON,
+    TASK_STATUS_DONE,
+    TASK_STATUS_OPEN,
 )
 from app.services.portal_auth import hash_portal_password
 
@@ -26,6 +39,7 @@ DEMO_CLIENT_KEYS = {
     "demo-legal",
 }
 DEMO_PORTAL_PASSWORD = "demo-portal-2026"
+SHOWCASE_EXTERNAL_PREFIX = "showcase"
 
 
 @dataclass(frozen=True)
@@ -191,6 +205,8 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, Any]:
                 "messages_created": 0,
                 "state_transitions_created": 0,
                 "audit_logs_created": 0,
+                "crm_tags_created": 0,
+                "crm_tasks_created": 0,
                 "client_keys": sorted(DEMO_CLIENT_KEYS),
                 "seeded": False,
                 "reason": "demo_data_already_present",
@@ -202,6 +218,8 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, Any]:
         "messages_created": 0,
         "state_transitions_created": 0,
         "audit_logs_created": 0,
+        "crm_tags_created": 0,
+        "crm_tasks_created": 0,
     }
 
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
@@ -247,6 +265,68 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, Any]:
     }
 
 
+def seed_showcase_client_data(db: Session, *, client_key: str, reset: bool = False) -> dict[str, Any]:
+    client = db.scalar(select(Client).where(Client.client_key == client_key).limit(1))
+    if client is None:
+        raise ValueError("Client not found")
+
+    external_prefix = f"{SHOWCASE_EXTERNAL_PREFIX}-{client.client_key}"
+    existing_showcase_leads = db.scalars(
+        select(Lead).where(
+            Lead.client_id == client.id,
+            Lead.external_lead_id.is_not(None),
+            Lead.external_lead_id.like(f"{external_prefix}-%"),
+        )
+    ).all()
+
+    deleted = 0
+    if reset and existing_showcase_leads:
+        deleted = len(existing_showcase_leads)
+        for lead in existing_showcase_leads:
+            db.delete(lead)
+        db.flush()
+    elif existing_showcase_leads:
+        return {
+            "seeded": False,
+            "reason": "showcase_data_already_present",
+            "client_key": client.client_key,
+            "leads_existing": len(existing_showcase_leads),
+            "messages_created": 0,
+            "state_transitions_created": 0,
+            "audit_logs_created": 0,
+            "crm_tags_created": 0,
+            "crm_tasks_created": 0,
+        }
+
+    counters = {
+        "clients_created": 0,
+        "leads_created": 0,
+        "messages_created": 0,
+        "state_transitions_created": 0,
+        "audit_logs_created": 0,
+        "crm_tags_created": 0,
+        "crm_tasks_created": 0,
+    }
+
+    spec = _showcase_spec_for_client(client)
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _seed_client_conversations(
+        db=db,
+        client=client,
+        spec=spec,
+        now=now,
+        counters=counters,
+        external_lead_prefix=external_prefix,
+    )
+
+    return {
+        "seeded": True,
+        "client_key": client.client_key,
+        "leads_deleted": deleted,
+        **counters,
+    }
+
+
 def _seed_client_conversations(
     *,
     db: Session,
@@ -254,14 +334,16 @@ def _seed_client_conversations(
     spec: DemoClientSpec,
     now: datetime,
     counters: dict[str, int],
+    external_lead_prefix: str | None = None,
 ) -> None:
     scenarios = _scenario_blueprints(spec)
+    lead_prefix = external_lead_prefix or client.client_key
 
     for idx, scenario in enumerate(scenarios):
         start = now - timedelta(days=idx, hours=(idx % 3) * 2, minutes=idx * 7)
         lead = Lead(
             client_id=client.id,
-            external_lead_id=f"{client.client_key}-lead-{idx + 1:02d}",
+            external_lead_id=f"{lead_prefix}-lead-{idx + 1:02d}",
             source=scenario["source"],
             full_name=spec.names[idx],
             phone=f"+1555{client.id}{idx + 1:02d}{idx + 30:04d}",
@@ -272,6 +354,7 @@ def _seed_client_conversations(
             consented=True,
             opted_out=scenario["opted_out"],
             conversation_state=scenario["final_state"],
+            crm_stage=scenario["crm_stage"],
             created_at=start,
             updated_at=start,
         )
@@ -297,6 +380,50 @@ def _seed_client_conversations(
             )
             counters["audit_logs_created"] += 1
             last_event_at = max(last_event_at, created_at)
+
+        for tag in scenario.get("crm_tags", []):
+            db.add(
+                LeadTag(
+                    lead_id=lead.id,
+                    client_id=client.id,
+                    tag=tag,
+                    created_at=start + timedelta(minutes=2),
+                )
+            )
+            counters["crm_tags_created"] += 1
+
+        for task_index, task in enumerate(scenario.get("crm_tasks", []), start=1):
+            created_at = start + timedelta(minutes=10 + task_index)
+            completed_at = None
+            if task.get("status") == TASK_STATUS_DONE:
+                completed_at = start + timedelta(minutes=80 + task_index)
+            db.add(
+                LeadTask(
+                    lead_id=lead.id,
+                    client_id=client.id,
+                    title=task["title"],
+                    description=task.get("description", ""),
+                    due_date=task.get("due_date"),
+                    status=task.get("status", TASK_STATUS_OPEN),
+                    completed_at=completed_at,
+                    created_by="seed",
+                    created_at=created_at,
+                    updated_at=completed_at or created_at,
+                )
+            )
+            counters["crm_tasks_created"] += 1
+            if completed_at is not None:
+                db.add(
+                    AuditLog(
+                        client_id=client.id,
+                        lead_id=lead.id,
+                        event_type="crm_task_completed",
+                        decision={"title": task["title"], "actor_role": "seed"},
+                        created_at=completed_at,
+                    )
+                )
+                counters["audit_logs_created"] += 1
+                last_event_at = max(last_event_at, completed_at)
 
         for state in scenario["states"]:
             created_at = start + timedelta(minutes=state["minutes"])
@@ -348,6 +475,54 @@ def _seed_client_conversations(
     db.flush()
 
 
+def _showcase_spec_for_client(client: Client) -> DemoClientSpec:
+    questions = [str(item).strip() for item in (client.qualification_questions or []) if str(item).strip()]
+    defaults = [
+        "What are you looking to improve right now?",
+        "Who is your ideal customer?",
+        "What timeline are you targeting?",
+    ]
+    while len(questions) < 3:
+        questions.append(defaults[len(questions)])
+
+    faq = (client.faq_context or "").lower()
+    service_label = "consultation"
+    challenge_label = "lead quality"
+    if "roof" in faq:
+        service_label = "roof inspection"
+        challenge_label = "roof leaks"
+    elif any(token in faq for token in ("ads", "advert", "lead", "crm")):
+        service_label = "growth strategy call"
+        challenge_label = "low lead volume"
+    elif any(token in faq for token in ("spa", "treatment", "injectable", "laser")):
+        service_label = "treatment consultation"
+        challenge_label = "treatment planning"
+    elif any(token in faq for token in ("legal", "injury", "law")):
+        service_label = "case review"
+        challenge_label = "case intake"
+
+    return DemoClientSpec(
+        client_key=client.client_key,
+        business_name=client.business_name,
+        tone=client.tone or "friendly and practical",
+        timezone=client.timezone or "America/New_York",
+        qualification_questions=questions[:3],
+        booking_url=client.booking_url,
+        fallback_handoff_number=client.fallback_handoff_number,
+        consent_text=client.consent_text,
+        operating_hours=client.operating_hours or {"days": [0, 1, 2, 3, 4], "start": "09:00", "end": "18:00"},
+        faq_context=client.faq_context,
+        template_overrides=client.template_overrides or {},
+        source=LeadSource.META,
+        service_label=service_label,
+        challenge_label=challenge_label,
+        form_field_name="service_interest",
+        plan_field_name="desired_timeline",
+        cities=["Austin", "Dallas", "Miami", "Denver", "Chicago", "Phoenix", "Seattle"],
+        names=["Alex Rivera", "Taylor Brooks", "Jordan Kim", "Morgan Patel", "Casey Allen", "Riley Stone", "Parker Shaw"],
+    )
+
+
 def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
     q1 = spec.qualification_questions[0]
     q2 = spec.qualification_questions[1]
@@ -356,18 +531,29 @@ def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
     issue = spec.challenge_label
     form_field = spec.form_field_name
     plan_field = spec.plan_field_name
+    is_marketing_profile = _is_marketing_profile_spec(spec)
 
     return [
         {
             "slug": "qualifying-open",
             "source": spec.source,
             "final_state": ConversationStateEnum.QUALIFYING,
+            "crm_stage": CRM_STAGE_CONTACTED,
             "opted_out": False,
             "form_answers": {
                 form_field: issue,
                 plan_field: "This week",
                 "budget_range": "$2k-$5k" if spec.client_key == "demo-roofing" else "Flexible",
             },
+            "crm_tags": ["hot"] if spec.client_key == "demo-roofing" else ["follow up later"],
+            "crm_tasks": [
+                {
+                    "title": "Call this lead",
+                    "description": "Review qualification answers and confirm fit.",
+                    "due_date": date(2026, 3, 10),
+                    "status": TASK_STATUS_OPEN,
+                }
+            ],
             "audit_logs": [
                 {"minutes": 0, "event_type": f"{spec.source.value}_webhook_received", "decision": {"seeded": True}, "attach_lead": False},
                 {"minutes": 1, "event_type": "lead_normalized", "decision": {"seeded": True, "scenario": "qualifying-open"}},
@@ -383,21 +569,58 @@ def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
                 {"minutes": 39, "previous_state": ConversationStateEnum.GREETED, "new_state": ConversationStateEnum.QUALIFYING, "reason": "agent_transition"},
             ],
             "messages": [
-                {"minutes": 4, "direction": MessageDirection.OUTBOUND, "body": "Hi {first_name}, thanks for reaching out to {business_name}. I can help with your {business_name} request."},
-                {"minutes": 34, "direction": MessageDirection.INBOUND, "body": f"I need help with {issue}. Not sure what the next step is."},
-                {"minutes": 39, "direction": MessageDirection.OUTBOUND, "body": q1},
+                {
+                    "minutes": 4,
+                    "direction": MessageDirection.OUTBOUND,
+                    "body": (
+                        "Hi {first_name}, this is {business_name}. "
+                        "If ad spend is up but lead quality is weak, the fix is usually offer clarity, targeting, and faster follow-up. "
+                        "What service are you mainly trying to grow?"
+                        if is_marketing_profile
+                        else "Hi {first_name}, thanks for reaching out to {business_name}. I can help with your {business_name} request."
+                    ),
+                },
+                {
+                    "minutes": 34,
+                    "direction": MessageDirection.INBOUND,
+                    "body": (
+                        "I am spending around $1,000 a month on ads and still getting low-quality leads."
+                        if is_marketing_profile
+                        else f"I need help with {issue}. Not sure what the next step is."
+                    ),
+                },
+                {
+                    "minutes": 39,
+                    "direction": MessageDirection.OUTBOUND,
+                    "body": (
+                        "That usually means intent and landing-page messaging are misaligned. "
+                        "Are you focused on one city/market or multiple regions?"
+                        if is_marketing_profile
+                        else q1
+                    ),
+                },
             ],
         },
         {
             "slug": "booking-sent",
             "source": spec.source,
             "final_state": ConversationStateEnum.BOOKING_SENT,
+            "crm_stage": CRM_STAGE_QUALIFIED,
             "opted_out": False,
             "form_answers": {
                 form_field: service,
                 plan_field: "Next available appointment",
                 "notes": "Prefers text updates",
             },
+            "crm_tags": ["high budget", "hot"] if spec.client_key == "demo-roofing" else ["hot"],
+            "crm_tasks": [
+                {
+                    "title": "Follow up tomorrow",
+                    "description": "Nudge if booking is not completed.",
+                    "due_date": date(2026, 3, 11),
+                    "status": TASK_STATUS_OPEN,
+                }
+            ],
             "audit_logs": [
                 {"minutes": 0, "event_type": f"{spec.source.value}_webhook_received", "decision": {"seeded": True}, "attach_lead": False},
                 {"minutes": 1, "event_type": "lead_normalized", "decision": {"seeded": True, "scenario": "booking-sent"}},
@@ -413,21 +636,59 @@ def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
                 {"minutes": 44, "previous_state": ConversationStateEnum.GREETED, "new_state": ConversationStateEnum.BOOKING_SENT, "reason": "agent_transition"},
             ],
             "messages": [
-                {"minutes": 5, "direction": MessageDirection.OUTBOUND, "body": "Hi {first_name}, thanks for contacting {business_name}. I can help you get scheduled."},
-                {"minutes": 41, "direction": MessageDirection.INBOUND, "body": f"Yes, can I book the {service} this week?"},
-                {"minutes": 44, "direction": MessageDirection.OUTBOUND, "body": "Absolutely. Here is the fastest way to pick a time: {booking_url}"},
+                {
+                    "minutes": 5,
+                    "direction": MessageDirection.OUTBOUND,
+                    "body": (
+                        "Hi {first_name}, this is {business_name}. "
+                        "We improve lead quality by tightening targeting, offer framing, and speed-to-lead follow-up."
+                        if is_marketing_profile
+                        else "Hi {first_name}, thanks for contacting {business_name}. I can help you get scheduled."
+                    ),
+                },
+                {
+                    "minutes": 41,
+                    "direction": MessageDirection.INBOUND,
+                    "body": (
+                        "Yes, can we book a strategy call this week?"
+                        if is_marketing_profile
+                        else f"Yes, can I book the {service} this week?"
+                    ),
+                },
+                {
+                    "minutes": 44,
+                    "direction": MessageDirection.OUTBOUND,
+                    "body": (
+                        "Absolutely. Once we review your offer, targeting, and conversion path, we can map quick wins. "
+                        "Book here: {booking_url}"
+                        if is_marketing_profile
+                        else "Absolutely. Here is the fastest way to pick a time: {booking_url}"
+                    ),
+                },
             ],
         },
         {
             "slug": "booked-confirmed",
             "source": spec.source,
             "final_state": ConversationStateEnum.BOOKED,
+            "crm_stage": CRM_STAGE_MEETING_BOOKED
+            if spec.client_key == "demo-roofing"
+            else (CRM_STAGE_MEETING_COMPLETED if spec.client_key == "demo-medspa" else CRM_STAGE_WON),
             "opted_out": False,
             "form_answers": {
                 form_field: service,
                 plan_field: "Tuesday morning",
                 "notes": "Confirmed by text",
             },
+            "crm_tags": ["booked", "high budget"] if spec.client_key == "demo-legal" else ["booked"],
+            "crm_tasks": [
+                {
+                    "title": "Review after meeting",
+                    "description": "Prepare personalized proposal summary.",
+                    "due_date": date(2026, 3, 12),
+                    "status": TASK_STATUS_DONE if spec.client_key != "demo-roofing" else TASK_STATUS_OPEN,
+                }
+            ],
             "audit_logs": [
                 {"minutes": 0, "event_type": f"{spec.source.value}_webhook_received", "decision": {"seeded": True}, "attach_lead": False},
                 {"minutes": 2, "event_type": "lead_normalized", "decision": {"seeded": True, "scenario": "booked-confirmed"}},
@@ -449,22 +710,52 @@ def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
                 {"minutes": 140, "previous_state": ConversationStateEnum.BOOKING_SENT, "new_state": ConversationStateEnum.BOOKED, "reason": "booking_confirmed"},
             ],
             "messages": [
-                {"minutes": 6, "direction": MessageDirection.OUTBOUND, "body": "Thanks for reaching out to {business_name}. I can help you lock in time today."},
-                {"minutes": 48, "direction": MessageDirection.INBOUND, "body": "Tomorrow afternoon works. Can you send the link?"},
+                {
+                    "minutes": 6,
+                    "direction": MessageDirection.OUTBOUND,
+                    "body": (
+                        "Hi {first_name}, this is {business_name}. "
+                        "We can usually lift conversions by fixing the offer-message match and tightening follow-up speed. "
+                        "What are you trying to improve first?"
+                        if is_marketing_profile
+                        else "Thanks for reaching out to {business_name}. I can help you lock in time today."
+                    ),
+                },
+                {
+                    "minutes": 48,
+                    "direction": MessageDirection.INBOUND,
+                    "body": (
+                        "Tomorrow afternoon works. Send me your calendar."
+                        if is_marketing_profile
+                        else "Tomorrow afternoon works. Can you send the link?"
+                    ),
+                },
                 {"minutes": 52, "direction": MessageDirection.OUTBOUND, "body": "Here you go: {booking_url}"},
-                {"minutes": 140, "direction": MessageDirection.OUTBOUND, "body": "You are confirmed for Tuesday at 10:30 AM. Reply here if anything changes."},
+                {
+                    "minutes": 140,
+                    "direction": MessageDirection.OUTBOUND,
+                    "body": (
+                        "You are confirmed for Tuesday at 10:30 AM. "
+                        "Bring your current CPL and lead volume and we will map next steps live."
+                        if is_marketing_profile
+                        else "You are confirmed for Tuesday at 10:30 AM. Reply here if anything changes."
+                    ),
+                },
             ],
         },
         {
             "slug": "opted-out",
             "source": spec.source,
             "final_state": ConversationStateEnum.OPTED_OUT,
+            "crm_stage": CRM_STAGE_LOST,
             "opted_out": True,
             "form_answers": {
                 form_field: service,
                 plan_field: "No longer interested",
                 "notes": "Requested no further contact",
             },
+            "crm_tags": ["no response", "bad fit"],
+            "crm_tasks": [],
             "audit_logs": [
                 {"minutes": 0, "event_type": f"{spec.source.value}_webhook_received", "decision": {"seeded": True}, "attach_lead": False},
                 {"minutes": 1, "event_type": "lead_normalized", "decision": {"seeded": True, "scenario": "opted-out"}},
@@ -485,12 +776,22 @@ def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
             "slug": "handoff",
             "source": spec.source,
             "final_state": ConversationStateEnum.HANDOFF,
+            "crm_stage": CRM_STAGE_QUALIFIED,
             "opted_out": False,
             "form_answers": {
                 form_field: issue,
                 plan_field: "Needs senior review",
                 "notes": "Complex questions that need a human follow-up",
             },
+            "crm_tags": ["needs handoff", "follow up later"],
+            "crm_tasks": [
+                {
+                    "title": "Review after meeting",
+                    "description": "Assign senior rep before next outreach.",
+                    "due_date": date(2026, 3, 13),
+                    "status": TASK_STATUS_OPEN,
+                }
+            ],
             "audit_logs": [
                 {"minutes": 0, "event_type": f"{spec.source.value}_webhook_received", "decision": {"seeded": True}, "attach_lead": False},
                 {"minutes": 2, "event_type": "lead_normalized", "decision": {"seeded": True, "scenario": "handoff"}},
@@ -511,8 +812,24 @@ def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
                 {"minutes": 55, "previous_state": ConversationStateEnum.GREETED, "new_state": ConversationStateEnum.HANDOFF, "reason": "agent_transition"},
             ],
             "messages": [
-                {"minutes": 5, "direction": MessageDirection.OUTBOUND, "body": "Thanks for reaching out to {business_name}. I can help with the intake process."},
-                {"minutes": 50, "direction": MessageDirection.INBOUND, "body": f"I have a more involved question about {issue} and need to talk to a person."},
+                {
+                    "minutes": 5,
+                    "direction": MessageDirection.OUTBOUND,
+                    "body": (
+                        "Thanks for reaching out to {business_name}. I can help triage ad performance and lead handling questions."
+                        if is_marketing_profile
+                        else "Thanks for reaching out to {business_name}. I can help with the intake process."
+                    ),
+                },
+                {
+                    "minutes": 50,
+                    "direction": MessageDirection.INBOUND,
+                    "body": (
+                        "I need to review attribution and pipeline setup with a senior strategist."
+                        if is_marketing_profile
+                        else f"I have a more involved question about {issue} and need to talk to a person."
+                    ),
+                },
                 {"minutes": 55, "direction": MessageDirection.OUTBOUND, "body": "I am flagging this for a specialist now. For immediate help, call {handoff_number}."},
             ],
         },
@@ -520,12 +837,22 @@ def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
             "slug": "after-hours-pending",
             "source": spec.source,
             "final_state": ConversationStateEnum.GREETED,
+            "crm_stage": CRM_STAGE_NEW_LEAD,
             "opted_out": False,
             "form_answers": {
                 form_field: service,
                 plan_field: "Evening inquiry",
                 "notes": "Came in after hours",
             },
+            "crm_tags": ["follow up later"],
+            "crm_tasks": [
+                {
+                    "title": "Follow up tomorrow",
+                    "description": "After-hours inquiry pending first reply.",
+                    "due_date": date(2026, 3, 10),
+                    "status": TASK_STATUS_OPEN,
+                }
+            ],
             "audit_logs": [
                 {"minutes": 0, "event_type": f"{spec.source.value}_webhook_received", "decision": {"seeded": True}, "attach_lead": False},
                 {"minutes": 1, "event_type": "lead_normalized", "decision": {"seeded": True, "scenario": "after-hours-pending"}},
@@ -542,12 +869,22 @@ def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
             "slug": "after-hours-followup",
             "source": spec.source,
             "final_state": ConversationStateEnum.QUALIFYING,
+            "crm_stage": CRM_STAGE_CONTACTED,
             "opted_out": False,
             "form_answers": {
                 form_field: service,
                 plan_field: "Morning follow-up requested",
                 "notes": "Responded after follow-up",
             },
+            "crm_tags": ["follow up later"],
+            "crm_tasks": [
+                {
+                    "title": "Call this lead",
+                    "description": "Lead replied after follow-up; confirm preferred slot.",
+                    "due_date": date(2026, 3, 11),
+                    "status": TASK_STATUS_OPEN,
+                }
+            ],
             "audit_logs": [
                 {"minutes": 0, "event_type": f"{spec.source.value}_webhook_received", "decision": {"seeded": True}, "attach_lead": False},
                 {"minutes": 1, "event_type": "lead_normalized", "decision": {"seeded": True, "scenario": "after-hours-followup"}},
@@ -565,9 +902,59 @@ def _scenario_blueprints(spec: DemoClientSpec) -> list[dict[str, Any]]:
             ],
             "messages": [
                 {"minutes": 5, "direction": MessageDirection.OUTBOUND, "body": "Thanks for contacting {business_name} after hours. We will follow up as soon as the office opens."},
-                {"minutes": 720, "direction": MessageDirection.OUTBOUND, "body": "Good morning from {business_name}. If you are ready, you can pick a time here: {booking_url}"},
-                {"minutes": 782, "direction": MessageDirection.INBOUND, "body": f"I saw the follow-up. Before I book, {q2.lower()}"},
-                {"minutes": 790, "direction": MessageDirection.OUTBOUND, "body": q3},
+                {
+                    "minutes": 720,
+                    "direction": MessageDirection.OUTBOUND,
+                    "body": (
+                        "Good morning from {business_name}. Before we book, we can quickly diagnose the biggest leak in your ads funnel. "
+                        "Where do leads drop most right now?"
+                        if is_marketing_profile
+                        else "Good morning from {business_name}. If you are ready, you can pick a time here: {booking_url}"
+                    ),
+                },
+                {
+                    "minutes": 782,
+                    "direction": MessageDirection.INBOUND,
+                    "body": (
+                        "I think the biggest drop is after form submit. We call too late."
+                        if is_marketing_profile
+                        else f"I saw the follow-up. Before I book, {q2.lower()}"
+                    ),
+                },
+                {
+                    "minutes": 790,
+                    "direction": MessageDirection.OUTBOUND,
+                    "body": (
+                        "That is a common bottleneck. What is your current first-response time once a lead comes in?"
+                        if is_marketing_profile
+                        else q3
+                    ),
+                },
             ],
         },
     ]
+
+
+def _is_marketing_profile_spec(spec: DemoClientSpec) -> bool:
+    haystack = " ".join(
+        [
+            spec.client_key,
+            spec.business_name,
+            spec.service_label,
+            spec.challenge_label,
+            spec.faq_context or "",
+        ]
+    ).lower()
+    keywords = (
+        "ads",
+        "ad ",
+        "ad-",
+        "lead",
+        "crm",
+        "conversion",
+        "funnel",
+        "google ads",
+        "meta ads",
+        "ppc",
+    )
+    return any(token in haystack for token in keywords)

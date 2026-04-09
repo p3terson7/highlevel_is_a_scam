@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     enable_demo_seed: bool = False
 
     rq_eager: bool = False
-    rate_limit_count: int = 30
+    rate_limit_count: int = 100
     rate_limit_window_minutes: int = 1
     after_hours_followup_minutes: int = 720
     request_timeout_seconds: int = 20

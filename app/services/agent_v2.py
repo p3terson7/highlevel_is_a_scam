@@ -3,67 +3,148 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.db.models import Client, ConversationStateEnum, Lead, Message
+from app.db.models import Client, ConversationStateEnum, Lead, Message, MessageDirection
 from app.services.lead_summary import build_lead_summary_text, normalize_form_answers
 
 logger = get_logger(__name__)
 
-_ALLOWED_NEXT_STATES = {
+QuestionKey = Literal[
+    "locations_scope",
+    "timeline",
+    "deliverable_type",
+    "building_type",
+    "approximate_size_sqft",
+    "decision_maker_role",
+    "preferred_contact_method",
+]
+ActionType = Literal["none", "ask_next_question", "offer_booking", "send_booking_link", "mark_booked", "handoff_to_human"]
+
+_ALLOWED_STATES = {
     ConversationStateEnum.QUALIFYING,
     ConversationStateEnum.BOOKING_SENT,
     ConversationStateEnum.BOOKED,
     ConversationStateEnum.HANDOFF,
 }
+_LEGACY_ACTION_TYPES = {"send_booking_link", "offer_calendar_slots", "request_more_info", "handoff_to_human"}
+_BOOKING_INTENT_PATTERN = re.compile(
+    r"\b(book|booking|schedule|scheduled|meeting|call|consult|availability|available times|next step)\b",
+    re.IGNORECASE,
+)
+_BOOKED_CONFIRM_PATTERN = re.compile(
+    r"\b(i booked|we booked|booked already|already booked|appointment booked|scheduled it|i scheduled)\b",
+    re.IGNORECASE,
+)
+_HANDOFF_PATTERN = re.compile(r"\b(human|person|call me|someone from your team|manager|representative)\b", re.IGNORECASE)
+_CLOSING_PATTERN = re.compile(r"^(thanks|thank you|ok|okay|cool|great|perfect|sounds good)[.! ]*$", re.IGNORECASE)
+_SIZE_PATTERN = re.compile(r"\b(?P<size>\d{1,3}(?:,\d{3})+|\d{3,6})\s*(?:sq\.?\s*ft\.?|square feet|sf)\b", re.IGNORECASE)
+_TIMELINE_PATTERN = re.compile(
+    r"\b(asap|immediately|this week|next week|within \d+\s+(?:day|days|week|weeks|month|months)|\d+\s+(?:day|days|week|weeks|month|months))\b",
+    re.IGNORECASE,
+)
+_ROLE_PATTERN = re.compile(
+    r"\b(owner|architect|project manager|pm|facility manager|facilities manager|property manager|operations manager|director)\b",
+    re.IGNORECASE,
+)
+_BUILDING_TYPES = (
+    "retail space",
+    "commercial office",
+    "office",
+    "retail",
+    "warehouse",
+    "industrial",
+    "school",
+    "hospital",
+    "hotel",
+    "mixed-use",
+    "multifamily",
+    "apartment",
+    "condo",
+    "residential",
+    "commercial",
+)
+_BOOKING_REPLY_PATTERN = re.compile(
+    r"\b(schedule|scheduled|booking link|book a quick call|book a time|book here|available times|calendar|send (?:you|over) (?:a|the) link|send over the next booking step|jump on a quick call|quick call)\b",
+    re.IGNORECASE,
+)
 
-_BOOKING_ACTIONS = {"send_booking_link", "offer_calendar_slots"}
-_ALLOWED_ACTIONS = _BOOKING_ACTIONS | {"request_more_info", "handoff_to_human"}
 
-_START_INTENT_PHRASES = (
-    "how do we start",
-    "how do i start",
-    "how can we start",
-    "how can i start",
-    "next step",
-    "what's the next step",
-    "how do we get started",
-    "how can we get started",
+@dataclass(frozen=True)
+class QuestionSpec:
+    key: QuestionKey
+    label: str
+    question: str
+    description: str
+
+
+_QUESTION_SPECS: tuple[QuestionSpec, ...] = (
+    QuestionSpec(
+        key="locations_scope",
+        label="Locations",
+        question="Is this for one building or multiple locations?",
+        description="Whether the project covers one site or multiple properties.",
+    ),
+    QuestionSpec(
+        key="building_type",
+        label="Building type",
+        question="What kind of building is it?",
+        description="The property or asset type for the documentation work.",
+    ),
+    QuestionSpec(
+        key="approximate_size_sqft",
+        label="Approximate size",
+        question="Roughly how big is it in square feet?",
+        description="Approximate size of the building or space.",
+    ),
+    QuestionSpec(
+        key="deliverable_type",
+        label="Deliverable",
+        question="Do you need CAD as-builts, Revit/BIM, or both?",
+        description="The deliverable the client needs from the survey or documentation work.",
+    ),
+    QuestionSpec(
+        key="timeline",
+        label="Timeline",
+        question="What timeline are you working with?",
+        description="The target date or urgency for receiving deliverables.",
+    ),
+    QuestionSpec(
+        key="decision_maker_role",
+        label="Decision-maker",
+        question="Are you the main decision-maker for this project?",
+        description="Whether the lead is the decision-maker and what role they hold.",
+    ),
+    QuestionSpec(
+        key="preferred_contact_method",
+        label="Contact method",
+        question="If we need to coordinate details, do you prefer text, email, or a quick call?",
+        description="The best follow-up channel if coordination is needed.",
+    ),
 )
-_HANDOFF_KEYWORDS = (
-    "human",
-    "person",
-    "real person",
-    "representative",
-    "agent",
-    "manager",
-    "someone",
-)
-_BOOKED_KEYWORDS = (
-    "already booked",
-    "i booked",
-    "booked already",
-    "already scheduled",
-    "i scheduled",
-)
-_CLOSING_GRATITUDE_MARKERS = {
-    "thanks",
-    "thank you",
-    "thankyou",
-    "ok",
-    "okay",
-    "great",
-    "cool",
-    "perfect",
-    "awesome",
-    "sounds good",
-}
-_SHORT_REPLY_MARKERS = {"yes", "yep", "yeah", "ok", "okay", "sure", "maybe", "idk", "asap", "immediately"}
+_QUESTION_SPEC_BY_KEY = {spec.key: spec for spec in _QUESTION_SPECS}
+_QUESTION_ORDER: tuple[QuestionKey, ...] = tuple(spec.key for spec in _QUESTION_SPECS)
+
+
+class QualificationMemory(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    locations_scope: str | None = None
+    timeline: str | None = None
+    deliverable_type: str | None = None
+    building_type: str | None = None
+    approximate_size_sqft: int | None = None
+    decision_maker_role: str | None = None
+    preferred_contact_method: str | None = None
+
+    def known_fields(self) -> dict[str, Any]:
+        return self.model_dump(exclude_none=True)
 
 
 class AgentAction(BaseModel):
@@ -72,11 +153,30 @@ class AgentAction(BaseModel):
 
 
 class AgentResponse(BaseModel):
-    reply_text: str
-    next_state: ConversationStateEnum
-    actions: list[AgentAction] = Field(default_factory=list)
+    model_config = ConfigDict(extra="ignore")
+
+    reply_text: str = ""
+    next_state: ConversationStateEnum = ConversationStateEnum.QUALIFYING
+    collected_fields: QualificationMemory = Field(default_factory=QualificationMemory)
+    next_question_key: QuestionKey | None = None
+    action: ActionType = "none"
     provider: Literal["openai", "fallback"] = "openai"
     provider_error: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_shape(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        raw = dict(data)
+        raw.setdefault("collected_fields", {})
+        if "action" not in raw:
+            raw["action"] = _legacy_actions_to_action(raw.pop("actions", None))
+        return raw
+
+    @property
+    def actions(self) -> list[AgentAction]:
+        return _action_to_legacy(self.action, self.next_question_key)
 
 
 class LLMProvider(Protocol):
@@ -96,7 +196,7 @@ class OpenAIProvider:
     def _complete(self, system_prompt: str, user_prompt: str) -> str:
         response = self._client.chat.completions.create(
             model=self._model,
-            temperature=0.2,
+            temperature=0.35,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -117,14 +217,16 @@ class OpenAIProvider:
         try:
             return self._parse(content)
         except Exception as first_error:
-            # One repair pass before giving up.
             repair_system = (
-                "Return valid JSON only and match this exact schema: "
-                '{"reply_text":string,"next_state":"QUALIFYING|BOOKING_SENT|BOOKED|HANDOFF",'
-                '"actions":[{"type":"send_booking_link|offer_calendar_slots|request_more_info|handoff_to_human","payload":{}}]}'
+                "Return valid JSON only. Match this exact schema: "
+                '{"reply_text":"string","next_state":"QUALIFYING|BOOKING_SENT|BOOKED|HANDOFF",'
+                '"collected_fields":{"locations_scope":"string|null","timeline":"string|null","deliverable_type":"string|null",'
+                '"building_type":"string|null","approximate_size_sqft":"integer|null","decision_maker_role":"string|null",'
+                '"preferred_contact_method":"string|null"},"next_question_key":"locations_scope|timeline|deliverable_type|building_type|approximate_size_sqft|decision_maker_role|preferred_contact_method|null",'
+                '"action":"none|ask_next_question|offer_booking|send_booking_link|mark_booked|handoff_to_human"}'
             )
             repair_user = (
-                "Fix this invalid JSON into valid JSON only.\n"
+                "Fix this invalid response into valid JSON only.\n"
                 f"Invalid JSON:\n{content}\n"
                 f"Parser error: {type(first_error).__name__}: {first_error}"
             )
@@ -152,30 +254,22 @@ class LLMAgentV2:
         inbound_text: str,
         history: Sequence[Message],
     ) -> AgentResponse:
-        context = self._build_context_payload(client=client, lead=lead, inbound_text=inbound_text, history=history)
+        context = self._build_context(client=client, lead=lead, inbound_text=inbound_text, history=history)
         system_prompt = self._build_system_prompt(client=client)
         user_prompt = json.dumps(context, ensure_ascii=False)
 
         try:
             raw = self._provider.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
             response = AgentResponse.model_validate(raw)
-            if _is_parroting_reply(response.reply_text, inbound_text):
-                regenerated = self._regenerate_once_for_originality(
-                    system_prompt=system_prompt,
-                    context=context,
-                    inbound_text=inbound_text,
-                    previous_response=response,
-                )
-                if regenerated is not None:
-                    response = regenerated
-            sanitized = self._sanitize_response(
+            response = self._sanitize_response(
                 response=response,
                 client=client,
+                lead=lead,
                 inbound_text=inbound_text,
                 context=context,
             )
-            sanitized.provider = "openai"
-            return sanitized
+            response.provider = "openai"
+            return response
         except Exception as exc:
             logger.exception("agent_v2_llm_failed", extra={"error": str(exc)})
             fallback = self._safe_fallback(client=client, context=context)
@@ -183,75 +277,59 @@ class LLMAgentV2:
             fallback.provider_error = str(exc)
             return fallback
 
-    def _regenerate_once_for_originality(
-        self,
-        *,
-        system_prompt: str,
-        context: dict[str, Any],
-        inbound_text: str,
-        previous_response: AgentResponse,
-    ) -> AgentResponse | None:
-        rewrite_context = dict(context)
-        rewrite_context["rewrite_instruction"] = (
-            "Rewrite the draft to be more original and human. "
-            "Do not mirror/parrot the lead's full message. "
-            "Use one insight sentence + one next-step sentence or one diagnostic question. "
-            "Max one question mark."
-        )
-        rewrite_context["previous_reply_text"] = previous_response.reply_text
-        rewrite_context["previous_next_state"] = previous_response.next_state.value
-        rewrite_context["previous_actions"] = [{"type": action.type, "payload": action.payload} for action in previous_response.actions]
-        try:
-            raw = self._provider.generate_json(
-                system_prompt=system_prompt,
-                user_prompt=json.dumps(rewrite_context, ensure_ascii=False),
-            )
-            candidate = AgentResponse.model_validate(raw)
-        except Exception:
-            return None
-        if _is_parroting_reply(candidate.reply_text, inbound_text):
-            return None
-        return candidate
-
     def _build_system_prompt(self, *, client: Client) -> str:
         faq_context = (client.faq_context or "").strip() or "none provided"
         ai_context = (getattr(client, "ai_context", "") or "").strip() or "none provided"
+        qualification_guide = "\n".join(
+            f"- {spec.key}: {spec.description}. Ask with: {spec.question}" for spec in _QUESTION_SPECS
+        )
         return (
-            "You are an expert SMS sales assistant writing as the business owner/team.\n"
-            "Goal: answer the lead naturally, qualify efficiently, and move to booking.\n"
-            "You write the final customer-facing SMS copy yourself. Avoid canned/template phrasing.\n"
-            "Knowledge rules:\n"
-            "- faq_context and ai_context are authoritative for services, process, positioning, and pricing rules.\n"
-            "- If context does not contain an answer, do NOT invent details. Ask one clarifying question or guide to a quick call.\n"
+            "You are a human-sounding SMS sales assistant writing on behalf of the business.\n"
+            "The business provides building documentation, measured surveys, CAD as-builts, Revit/BIM models, and related deliverables.\n"
+            "Your job is to understand the latest message, answer questions clearly, use the lead form and message history as trusted project context, and move the lead toward booking when it makes sense.\n"
+            "Use faq_context as the source of truth for what the business does, what it delivers, and how it works.\n"
+            "Use ai_context only as extra guidance for tone, positioning, and do/don't-say rules. It must not override the business domain, the lead's actual project details, or the qualification flow.\n"
+            "If something is not in faq_context or clearly stated by the lead, do not invent it.\n"
             "Conversation rules:\n"
-            "- Use latest_inbound_message + recent_messages + lead_form_answers + lead_summary.\n"
-            "- Never ask a question already answered by lead_form_answers or prior inbound messages.\n"
-            "- Never repeat a question listed in asked_questions.\n"
-            "- Do not mirror/parrot. Never restate the lead's full message. Keep any acknowledgement to <=8 words.\n"
-            "- Insight-first style: one expert sentence tailored to context, then one next-step sentence OR one diagnostic question.\n"
-            "- Use teach-then-ask: explain the key lever briefly, then ask the single best next question.\n"
-            "- Ask at most ONE question in a reply. Zero questions is allowed when booking/handoff/booked is the next step.\n"
-            "- Handle short replies (yes/ok/asap/maybe/idk) using last_outbound_question context.\n"
-            "- If the lead proposes a specific time, respond to that proposal directly; do not send a generic numbered slots list unless they asked for options.\n"
-            "- If synthetic_seed_inbound=true (first outreach), send one clear opening message with one focused qualifier and no booking CTA.\n"
-            "- Keep tone human and concise (1-2 short SMS max, <=320 chars each).\n"
-            "State/action rules:\n"
-            "- Booking CTA only when: explicit booking intent OR explicit start intent OR minimum context exists (offer/service + market/location + budget or timeline).\n"
-            "- If inbound is an informational capability question, answer it directly first; do not jump to booking.\n"
-            "- If booking link/CTA was sent in last 3 outbound messages, do not resend link; ask a gentle nudge question instead.\n"
-            "- Already booked confirmation -> BOOKED with no booking action.\n"
-            "- If conversation is already BOOKED: stop selling/qualifying; do not send booking links; keep replies short and closing.\n"
-            "- Human handoff request -> HANDOFF with handoff action.\n"
-            "- Otherwise stay QUALIFYING with request_more_info.\n"
-            "Return STRICT JSON only with this exact schema:\n"
-            '{"reply_text":"string","next_state":"QUALIFYING|BOOKING_SENT|BOOKED|HANDOFF","actions":[{"type":"send_booking_link|offer_calendar_slots|request_more_info|handoff_to_human","payload":{}}]}\n'
+            "- Keep messages short and natural. Usually 1-2 short sentences.\n"
+            "- Do not parrot the lead's wording back to them.\n"
+            "- Do not use vague filler like 'What are you trying to solve?' if the lead already made that clear.\n"
+            "- Answer direct service, process, pricing, or capability questions first, then continue the flow naturally.\n"
+            "- Ask only one question at a time.\n"
+            "- Treat lead_form_answers and qualification_memory as valid known information. Do not ask for those details again unless the lead contradicted them or one clarification is truly needed before the next step.\n"
+            "- Never reuse a question key listed in asked_question_keys.\n"
+            "- Do not include the actual booking URL in reply_text. If the next step is to ask whether they want to schedule, use action=offer_booking. If they are explicitly ready for the booking step now, use action=send_booking_link.\n"
+            "- If the lead says they already booked, set action=mark_booked and stop qualifying.\n"
+            "- If the current state is BOOKED and the latest message is only a short closing, reply with a short closing and no question.\n"
+            "- If the lead gives a short affirmative reply right after you invited them to schedule, treat that as booking intent and move forward instead of asking again.\n"
+            "- On the first outbound message, do not ask to confirm a field that is already present in qualification_memory or lead_form_answers.\n"
+            "- Qualification questions are optional supporting tools, not a checklist. Ask one only when it genuinely helps you book the meeting or answer accurately.\n"
+            "- During or after the booking flow, if the lead asks a question, answer it clearly first and then continue the next booking step without restarting the whole qualification flow.\n"
+            "Helpful project details if still missing:\n"
+            f"{qualification_guide}\n"
+            "Booking rules:\n"
+            "- Explicit booking intent is the clearest reason to switch to booking.\n"
+            "- booking_threshold_met means the business already has enough context from the form, prior messages, or both to move to scheduling.\n"
+            "- If booking_threshold_met is true, it is okay to move toward booking even if not every qualification field is filled.\n"
+            "- On the very first outbound message, do not jump straight to scheduling unless the lead explicitly asked for it. Start with either one useful question or a concise helpful reply.\n"
+            "- If booking sounds appropriate but the lead has not said yes yet, use action=offer_booking with a short scheduling question.\n"
+            "- If pending_step is booking_approved_pending_qualification, the lead already said yes to booking. Do not ask for booking again. Either ask one final necessary clarification or use action=send_booking_link.\n"
+            "- If booking is not appropriate yet, ask the single best missing detail that would help scope or coordinate the project.\n"
+            "Output rules:\n"
+            "- reply_text is the exact SMS to send.\n"
+            "- next_state must be QUALIFYING, BOOKING_SENT, BOOKED, or HANDOFF.\n"
+            "- collected_fields must contain all known structured qualification values you can confidently infer.\n"
+            "- next_question_key should be null unless you are asking the next question.\n"
+            "- action must be one of: none, ask_next_question, offer_booking, send_booking_link, mark_booked, handoff_to_human.\n"
+            "Return strict JSON only with this exact schema:\n"
+            '{"reply_text":"string","next_state":"QUALIFYING|BOOKING_SENT|BOOKED|HANDOFF","collected_fields":{"locations_scope":"string|null","timeline":"string|null","deliverable_type":"string|null","building_type":"string|null","approximate_size_sqft":"integer|null","decision_maker_role":"string|null","preferred_contact_method":"string|null"},"next_question_key":"locations_scope|timeline|deliverable_type|building_type|approximate_size_sqft|decision_maker_role|preferred_contact_method|null","action":"none|ask_next_question|offer_booking|send_booking_link|mark_booked|handoff_to_human"}\n'
             f"Business name: {client.business_name}\n"
-            f"Tone target: {client.tone or 'friendly'}\n"
+            f"Tone target: {client.tone or 'clear, helpful, concise'}\n"
             f"faq_context: {faq_context}\n"
             f"ai_context: {ai_context}"
         )
 
-    def _build_context_payload(
+    def _build_context(
         self,
         *,
         client: Client,
@@ -260,79 +338,66 @@ class LLMAgentV2:
         history: Sequence[Message],
     ) -> dict[str, Any]:
         normalized_answers = normalize_form_answers(lead.form_answers or {})
-        recent_messages = [
-            {
-                "direction": msg.direction.value,
-                "body": " ".join(str(msg.body or "").split()).strip(),
-            }
-            for msg in history[-10:]
-        ]
-        asked_questions = _extract_outbound_questions(recent_messages)
-        asked_questions_norm = [_normalize_question(question) for question in asked_questions]
-        last_outbound_question = _last_outbound_question(recent_messages)
+        prior_memory = QualificationMemory.model_validate((lead.raw_payload or {}).get("qualification_memory") or {})
+        answer_memory = _extract_from_form_answers(normalized_answers)
+        history_memory = _extract_from_messages(history)
+        inbound_memory = _extract_from_text(inbound_text)
+        memory = _merge_memory(prior_memory, answer_memory, history_memory, inbound_memory)
 
-        facts = _extract_facts(
-            normalized_answers=normalized_answers,
-            recent_messages=recent_messages,
-            inbound_text=inbound_text,
+        recent_messages = [_serialize_message(message) for message in history[-10:]]
+        initial_outreach = len(history) == 0
+        last_outbound = _last_outbound_message(history)
+        booking_invite_pending = _booking_invite_pending(last_outbound)
+        affirmative_reply = is_affirmative_reply(inbound_text)
+        asked_question_keys = _extract_asked_question_keys(history)
+        missing_fields = [key for key in _QUESTION_ORDER if not _memory_has_value(memory, key)]
+        conversation_memory = _merge_memory(history_memory, inbound_memory)
+        recommended_next_question_key = _recommended_next_question_key(
+            memory=memory,
+            asked_question_keys=asked_question_keys,
         )
-
-        qualification_questions = [
-            str(question).strip()
-            for question in (client.qualification_questions or [])
-            if str(question).strip()
-        ]
-        missing_qualifiers = _derive_missing_qualifiers(
-            qualification_questions=qualification_questions,
-            facts=facts,
-            normalized_answers=normalized_answers,
-            recent_messages=recent_messages,
-        )
-
-        booking_mode = str(getattr(client, "booking_mode", "link") or "link").strip().lower()
-        booking_config = getattr(client, "booking_config", {})
-        automated_booking_enabled = bool(
-            booking_mode == "calendly"
-            and isinstance(booking_config, dict)
-            and booking_config.get("calendly_event_type_uri")
-        )
-
-        enough_info_for_booking = bool(facts["goal"] and (facts["timeline"] or facts["budget"]))
-        enough_min_context_for_booking = bool(
-            facts["offer"] and (facts["audience"] or facts["geography"]) and (facts["timeline"] or facts["budget"])
-        )
-        booking_link_sent_recently = _booking_link_sent_recently(
-            recent_messages=recent_messages,
-            booking_url=client.booking_url,
-            lookback=3,
-        )
+        conversation_threshold_met, booking_gap_fields = _booking_threshold(memory=memory)
 
         return {
             "business_name": client.business_name,
             "tone": client.tone,
             "faq_context": client.faq_context or "",
             "ai_context": getattr(client, "ai_context", "") or "",
-            "lead_name": lead.full_name,
-            "lead_city": lead.city,
-            "lead_summary": build_lead_summary_text(normalized_answers, limit=6),
+            "lead_name": lead.full_name or "",
+            "lead_phone": lead.phone or "",
+            "lead_email": lead.email or "",
+            "lead_city": lead.city or "",
+            "lead_summary": build_lead_summary_text(normalized_answers, limit=8),
             "lead_form_answers": normalized_answers,
             "latest_inbound_message": inbound_text,
             "recent_messages": recent_messages,
-            "last_outbound_question": last_outbound_question,
-            "asked_questions": asked_questions,
-            "asked_questions_normalized": asked_questions_norm,
-            "qualification_questions": qualification_questions,
-            "missing_qualifiers": missing_qualifiers,
-            "booking_url": client.booking_url,
-            "booking_mode": booking_mode,
-            "automated_booking_enabled": automated_booking_enabled,
-            "enough_info_for_booking": enough_info_for_booking,
-            "enough_min_context_for_booking": enough_min_context_for_booking,
-            "booking_link_sent_recently": booking_link_sent_recently,
-            "facts": facts,
-            "is_short_reply": _is_short_reply(inbound_text),
-            "synthetic_seed_inbound": _is_system_seed_inbound(inbound_text),
-            "current_state": lead.conversation_state.value if lead.conversation_state else "",
+            "last_outbound_message": last_outbound,
+            "initial_outreach": initial_outreach,
+            "current_state": lead.conversation_state.value if lead.conversation_state else ConversationStateEnum.NEW.value,
+            "qualification_memory": memory.model_dump(exclude_none=True),
+            "conversation_confirmed_fields": conversation_memory.model_dump(exclude_none=True),
+            "conversation_confirmation_count": len(conversation_memory.model_dump(exclude_none=True)),
+            "asked_question_keys": asked_question_keys,
+            "asked_question_count": len(asked_question_keys),
+            "missing_fields": missing_fields,
+            "recommended_next_question_key": recommended_next_question_key,
+            "booking_threshold_met": conversation_threshold_met,
+            "booking_gap_fields": booking_gap_fields,
+            "pending_step": str((lead.raw_payload or {}).get("pending_step") or "").strip() or None,
+            "booking_invite_pending": booking_invite_pending,
+            "affirmative_reply": affirmative_reply,
+            "explicit_booking_intent": bool(_BOOKING_INTENT_PATTERN.search(inbound_text or "")),
+            "booked_confirmation_intent": bool(_BOOKED_CONFIRM_PATTERN.search(inbound_text or "")),
+            "handoff_intent": bool(_HANDOFF_PATTERN.search(inbound_text or "")),
+            "closing_only": bool(_CLOSING_PATTERN.match((inbound_text or "").strip())),
+            "question_specs": {
+                spec.key: {
+                    "label": spec.label,
+                    "question": spec.question,
+                    "description": spec.description,
+                }
+                for spec in _QUESTION_SPECS
+            },
         }
 
     def _sanitize_response(
@@ -340,649 +405,557 @@ class LLMAgentV2:
         *,
         response: AgentResponse,
         client: Client,
+        lead: Lead,
         inbound_text: str,
         context: dict[str, Any],
     ) -> AgentResponse:
-        inbound_norm = _normalize_text(inbound_text)
-        booking_url = str(context.get("booking_url", "")).strip()
-        link_recently_sent = bool(context.get("booking_link_sent_recently"))
-        enough_min_context = bool(context.get("enough_min_context_for_booking"))
-        automated_booking_enabled = bool(context.get("automated_booking_enabled"))
-        seed_turn = bool(context.get("synthetic_seed_inbound"))
-        recent_messages = context.get("recent_messages", [])
-        recent_outbound_booking_cue = any(
-            str(message.get("direction", "")).upper() == "OUTBOUND"
-            and _contains_booking_cue(str(message.get("body", "")))
-            for message in recent_messages[-3:]
-            if isinstance(message, dict)
+        current_state = str(context.get("current_state") or "").upper()
+        explicit_booking_intent = bool(context.get("explicit_booking_intent"))
+        pending_step = str(context.get("pending_step") or "").strip()
+        booking_already_approved = pending_step == "booking_approved_pending_qualification"
+        booking_threshold_met = bool(context.get("booking_threshold_met"))
+        initial_outreach = bool(context.get("initial_outreach"))
+        asked_question_keys = {str(key) for key in context.get("asked_question_keys", [])}
+        coerced_back_to_qualification = False
+        merged_memory = _merge_memory(
+            QualificationMemory.model_validate(context.get("qualification_memory") or {}),
+            response.collected_fields,
         )
-        time_proposal = _looks_like_time_proposal(inbound_norm)
 
-        response.reply_text = _trim_sms_text(response.reply_text)
-        response.next_state = response.next_state if response.next_state in _ALLOWED_NEXT_STATES else ConversationStateEnum.QUALIFYING
-        response.actions = [action for action in response.actions if action.type in _ALLOWED_ACTIONS]
+        response.collected_fields = merged_memory
+        response.reply_text = _trim_sms_text(_strip_urls(response.reply_text))
+        if response.next_state not in _ALLOWED_STATES:
+            response.next_state = ConversationStateEnum.QUALIFYING
 
-        current_state = str(context.get("current_state", "")).upper()
-        booking_intent = _shows_booking_intent(inbound_norm) or _shows_start_intent(inbound_norm)
-        if time_proposal and recent_outbound_booking_cue:
-            booking_intent = True
-        booking_allowed = (booking_intent or enough_min_context) and not seed_turn
-        handoff_intent = _shows_handoff_intent(inbound_norm)
-        booked_intent = _shows_booked_confirmation(inbound_norm)
-        already_booked = current_state == ConversationStateEnum.BOOKED.value
+        if current_state == ConversationStateEnum.BOOKED.value and bool(context.get("closing_only")):
+            response.action = "none"
+            response.next_state = ConversationStateEnum.BOOKED
+            response.next_question_key = None
+            response.reply_text = response.reply_text or "Perfect. See you then."
+            return _finalize_response(response)
 
-        if handoff_intent or response.next_state == ConversationStateEnum.HANDOFF:
+        if response.action == "handoff_to_human":
             response.next_state = ConversationStateEnum.HANDOFF
-            response.actions = [AgentAction(type="handoff_to_human", payload={})]
-            if not response.reply_text:
-                response.reply_text = "Understood. I'll connect you with a team member right now."
-            response.reply_text = _trim_sms_text(_ensure_single_question(response.reply_text))
-            return response
+            response.next_question_key = None
+            response.reply_text = response.reply_text or "Understood. I'll have someone from the team reach out."
+            return _finalize_response(response)
 
-        if booked_intent:
+        if response.action == "mark_booked":
             response.next_state = ConversationStateEnum.BOOKED
-            response.actions = []
-            response.reply_text = _strip_booking_links(response.reply_text, booking_url=booking_url, keep_link=False)
-            if (
-                not response.reply_text
-                or _contains_booking_cue(response.reply_text)
-                or _extract_primary_question(response.reply_text)
-                or _is_gratitude_closing(inbound_norm)
-            ):
-                response.reply_text = "Perfect - you're booked. See you then!"
-            response.reply_text = _remove_questions(response.reply_text)
-            response.reply_text = _trim_sms_text(_ensure_single_question(response.reply_text))
-            return response
+            response.next_question_key = None
+            response.reply_text = response.reply_text or "Perfect. You're booked."
+            return _finalize_response(response)
 
-        if already_booked:
-            response.next_state = ConversationStateEnum.BOOKED
-            response.actions = []
-            if _is_gratitude_closing(inbound_norm):
-                response.reply_text = "Perfect - see you then!"
-                response.reply_text = _trim_sms_text(_remove_questions(response.reply_text))
-                return response
-
-            response.reply_text = _strip_booking_links(response.reply_text, booking_url=booking_url, keep_link=False)
-            if not response.reply_text or _contains_booking_cue(response.reply_text):
-                response.reply_text = "You're all set for the meeting."
-            response.reply_text = _remove_questions(response.reply_text)
-            response.reply_text = _trim_sms_text(_ensure_single_question(response.reply_text))
-            return response
-
-        if seed_turn:
-            response.next_state = ConversationStateEnum.QUALIFYING
-            response.actions = [AgentAction(type="request_more_info", payload={})]
-            response.reply_text = _strip_booking_links(response.reply_text, booking_url=booking_url, keep_link=False)
-            response.reply_text = _drop_booking_sentences(response.reply_text)
-            if not _extract_primary_question(response.reply_text):
-                next_question = _next_unasked_question(context=context) or "What would you like help with first?"
-                response.reply_text = _append_question(response.reply_text, next_question)
-            response.reply_text = _trim_sms_text(_ensure_single_question(response.reply_text))
-            return response
-
-        model_requests_booking = response.next_state == ConversationStateEnum.BOOKING_SENT or any(
-            action.type in _BOOKING_ACTIONS for action in response.actions
-        )
-
-        if model_requests_booking and not booking_allowed:
-            response.next_state = ConversationStateEnum.QUALIFYING
-            response.actions = [AgentAction(type="request_more_info", payload={})]
-            response.reply_text = _strip_booking_links(response.reply_text, booking_url=booking_url, keep_link=False)
-            response.reply_text = _drop_booking_sentences(response.reply_text)
-        elif model_requests_booking:
-            response.next_state = ConversationStateEnum.BOOKING_SENT
-            if not response.actions:
-                response.actions = [_booking_action(context=context)]
-            if link_recently_sent and any(action.type == "send_booking_link" for action in response.actions):
-                response.actions = [AgentAction(type="request_more_info", payload={})]
-                response.reply_text = _strip_booking_links(response.reply_text, booking_url=booking_url, keep_link=False)
-                if not response.reply_text:
-                    response.reply_text = _booking_nudge_reply()
-        elif booking_intent and booking_allowed and booking_url and not link_recently_sent:
-            response.next_state = ConversationStateEnum.BOOKING_SENT
-            response.actions = [_booking_action(context=context)]
-        else:
-            if response.next_state == ConversationStateEnum.BOOKING_SENT:
+        if response.action == "offer_booking":
+            if booking_already_approved:
+                if booking_threshold_met:
+                    response.action = "send_booking_link"
+                    response.next_state = ConversationStateEnum.BOOKING_SENT
+                    response.next_question_key = None
+                    if not response.reply_text or "?" in response.reply_text:
+                        response.reply_text = "Perfect. I'll send over the next booking step."
+                else:
+                    response.action = "ask_next_question"
+                    response.next_state = ConversationStateEnum.QUALIFYING
+                    response.reply_text = ""
+                    coerced_back_to_qualification = True
+            else:
                 response.next_state = ConversationStateEnum.QUALIFYING
-            if response.next_state == ConversationStateEnum.QUALIFYING and not response.actions:
-                response.actions = [AgentAction(type="request_more_info", payload={})]
+                response.next_question_key = None
+                response.reply_text = response.reply_text or "If you'd like, I can send over the next booking step."
+                return _finalize_response(response)
 
-        if time_proposal and recent_outbound_booking_cue and not automated_booking_enabled:
+        if response.action == "send_booking_link":
+            if explicit_booking_intent or booking_threshold_met or booking_already_approved:
+                response.next_state = ConversationStateEnum.BOOKING_SENT
+                response.next_question_key = None
+                response.reply_text = response.reply_text or "That gives me enough to move this forward."
+            else:
+                response.action = "ask_next_question"
+                response.next_state = ConversationStateEnum.QUALIFYING
+                response.reply_text = ""
+                coerced_back_to_qualification = True
+
+        if booking_already_approved and booking_threshold_met and response.action in {"ask_next_question", "none"}:
+            response.action = "send_booking_link"
+            response.next_state = ConversationStateEnum.BOOKING_SENT
+            response.next_question_key = None
+            response.reply_text = "Perfect. I'll send over the next booking step."
+
+        if response.action == "ask_next_question":
+            original_key = response.next_question_key
+            next_key = response.next_question_key
+            if (
+                initial_outreach
+                and next_key in _QUESTION_SPEC_BY_KEY
+                and _memory_has_value(merged_memory, next_key)
+            ):
+                next_key = None
+            if next_key not in _QUESTION_SPEC_BY_KEY or next_key in asked_question_keys:
+                next_key = _recommended_next_question_key(
+                    memory=merged_memory,
+                    asked_question_keys=list(asked_question_keys),
+                )
+            response.next_question_key = next_key
+            response.next_state = ConversationStateEnum.QUALIFYING
+            if coerced_back_to_qualification or (booking_already_approved and _reply_mentions_booking(response.reply_text)):
+                response.reply_text = ""
+            if response.next_question_key and (response.reply_text.count("?") == 0 or response.next_question_key != original_key):
+                question = _QUESTION_SPEC_BY_KEY[response.next_question_key].question
+                if response.reply_text.count("?") > 0:
+                    response.reply_text = _replace_question(response.reply_text, question)
+                else:
+                    response.reply_text = _append_question(response.reply_text, question)
+            elif not response.reply_text and response.next_question_key:
+                response.reply_text = _QUESTION_SPEC_BY_KEY[response.next_question_key].question
+            elif response.next_question_key is None:
+                response.action = "none"
+        else:
+            response.next_question_key = None
+
+        if current_state == ConversationStateEnum.BOOKED.value:
             response.next_state = ConversationStateEnum.BOOKED
-            response.actions = []
-            response.reply_text = _strip_booking_links(response.reply_text, booking_url=booking_url, keep_link=False)
-            if not response.reply_text or _contains_booking_cue(response.reply_text) or _extract_primary_question(response.reply_text):
-                response.reply_text = "Perfect - that time works. You're all set."
-            response.reply_text = _remove_questions(response.reply_text)
-            response.reply_text = _trim_sms_text(_ensure_single_question(response.reply_text))
-            return response
-
-        asked_norm = {
-            _normalize_question(question)
-            for question in context.get("asked_questions_normalized", [])
-            if _normalize_question(question)
-        }
-        current_question = _extract_primary_question(response.reply_text)
-        current_question_norm = _normalize_question(current_question)
-        if current_question_norm and current_question_norm in asked_norm:
-            next_question = _next_unasked_question(context=context)
-            if next_question:
-                response.reply_text = _replace_primary_question(response.reply_text, next_question)
-
-        if _is_parroting_reply(response.reply_text, inbound_text):
-            response.reply_text = _deparrot_reply(response.reply_text)
-
-        if any(action.type == "send_booking_link" for action in response.actions):
-            response.reply_text = _ensure_booking_url_present(response.reply_text, booking_url)
+            response.action = "none"
+            response.next_question_key = None
+            response.reply_text = response.reply_text or "You're all set."
+            if "?" in response.reply_text:
+                response.reply_text = "You're all set."
 
         if not response.reply_text:
-            response.reply_text = "Got it."
+            if response.action == "ask_next_question" and response.next_question_key:
+                response.reply_text = _QUESTION_SPEC_BY_KEY[response.next_question_key].question
+            elif response.action == "send_booking_link":
+                response.reply_text = "I can send over the booking link."
+            else:
+                response.reply_text = "Understood."
 
-        response.reply_text = _trim_sms_text(_ensure_single_question(response.reply_text))
-        return response
+        return _finalize_response(response)
 
-    def _safe_fallback(self, *, client: Client, context: dict[str, Any] | None = None) -> AgentResponse:
-        text = "Got it - quick question: what's the best time to chat?"
-        actions: list[AgentAction] = [AgentAction(type="request_more_info", payload={})]
-        state = ConversationStateEnum.QUALIFYING
-
-        allow_booking_link = bool((client.booking_url or "").strip()) and not bool((context or {}).get("synthetic_seed_inbound"))
-        if allow_booking_link:
-            text = f"{text} Book here: {client.booking_url.strip()}"
-            actions = [AgentAction(type="send_booking_link", payload={})]
-            state = ConversationStateEnum.BOOKING_SENT
-
-        return AgentResponse(
-            reply_text=_trim_sms_text(text),
-            next_state=state,
-            actions=actions,
+    def _safe_fallback(self, *, client: Client, context: dict[str, Any]) -> AgentResponse:
+        next_key = _recommended_next_question_key(
+            memory=QualificationMemory.model_validate(context.get("qualification_memory") or {}),
+            asked_question_keys=context.get("asked_question_keys", []),
         )
+        if next_key:
+            reply = _QUESTION_SPEC_BY_KEY[next_key].question
+            return AgentResponse(
+                reply_text=reply,
+                next_state=ConversationStateEnum.QUALIFYING,
+                collected_fields=QualificationMemory.model_validate(context.get("qualification_memory") or {}),
+                next_question_key=next_key,
+                action="ask_next_question",
+            )
+        fallback = "Got it. I can send over the next step when you're ready."
+        if client.booking_url:
+            fallback = "Got it. I can send over the booking link when you're ready."
+        return AgentResponse(
+            reply_text=fallback,
+            next_state=ConversationStateEnum.QUALIFYING,
+            collected_fields=QualificationMemory.model_validate(context.get("qualification_memory") or {}),
+            action="none",
+        )
+
+
+def _legacy_actions_to_action(actions: Any) -> ActionType:
+    if not isinstance(actions, list) or not actions:
+        return "none"
+    first = actions[0]
+    if not isinstance(first, dict):
+        return "none"
+    action_type = str(first.get("type") or "").strip()
+    if action_type in {"send_booking_link", "offer_calendar_slots"}:
+        return "send_booking_link"
+    if action_type == "request_more_info":
+        return "ask_next_question"
+    if action_type == "handoff_to_human":
+        return "handoff_to_human"
+    return "none"
+
+
+def _action_to_legacy(action: ActionType, next_question_key: QuestionKey | None) -> list[AgentAction]:
+    if action == "send_booking_link":
+        return [AgentAction(type="send_booking_link", payload={})]
+    if action == "ask_next_question":
+        payload = {"question_key": next_question_key} if next_question_key else {}
+        return [AgentAction(type="request_more_info", payload=payload)]
+    if action == "offer_booking":
+        return []
+    if action == "handoff_to_human":
+        return [AgentAction(type="handoff_to_human", payload={})]
+    return []
+
+
+def _serialize_message(message: Message) -> dict[str, Any]:
+    raw_payload = message.raw_payload if isinstance(message.raw_payload, dict) else {}
+    agent_payload = raw_payload.get("agent") if isinstance(raw_payload.get("agent"), dict) else {}
+    return {
+        "direction": message.direction.value if isinstance(message.direction, MessageDirection) else str(message.direction),
+        "body": " ".join(str(message.body or "").split()),
+        "question_key": agent_payload.get("next_question_key"),
+        "agent_action": agent_payload.get("action"),
+    }
+
+
+def _last_outbound_message(history: Sequence[Message]) -> dict[str, Any] | None:
+    for message in reversed(history):
+        if message.direction == MessageDirection.OUTBOUND:
+            return _serialize_message(message)
+    return None
+
+
+def _booking_invite_pending(last_outbound: dict[str, Any] | None) -> bool:
+    if not isinstance(last_outbound, dict):
+        return False
+    if str(last_outbound.get("agent_action") or "").strip() == "send_booking_link":
+        return True
+    body = _normalize_text(last_outbound.get("body") or "")
+    if not body:
+        return False
+    booking_signals = (
+        "interested",
+        "want to schedule",
+        "want me to send",
+        "available times",
+        "book a quick call",
+        "jump on a quick call",
+        "schedule that",
+        "set something up",
+        "next step",
+    )
+    return any(signal in body for signal in booking_signals)
+
+
+def _extract_from_form_answers(answers: dict[str, Any]) -> QualificationMemory:
+    extracted: dict[str, Any] = {}
+    for key, value in answers.items():
+        key_norm = _normalize_text(key)
+        text = " ".join(str(value or "").split()).strip()
+        if not text:
+            continue
+        partial = _extract_from_text(text)
+        extracted.update({k: v for k, v in partial.model_dump(exclude_none=True).items() if v is not None})
+        if any(token in key_norm for token in ("deliverable", "cad", "revit", "bim", "as built")):
+            deliverable = _extract_deliverable_type(text)
+            if deliverable:
+                extracted["deliverable_type"] = deliverable
+        if any(token in key_norm for token in ("location", "building count", "site", "scope")) and "locations_scope" not in extracted:
+            scope = _extract_locations_scope(text)
+            if scope:
+                extracted["locations_scope"] = scope
+        if any(token in key_norm for token in ("building type", "property type", "asset type")) and "building_type" not in extracted:
+            building_type = _extract_building_type(text)
+            if building_type:
+                extracted["building_type"] = building_type
+        if any(token in key_norm for token in ("size", "sqft", "square feet")) and "approximate_size_sqft" not in extracted:
+            size = _extract_size_sqft(text)
+            if size:
+                extracted["approximate_size_sqft"] = size
+        if any(token in key_norm for token in ("decision", "role")) and "decision_maker_role" not in extracted:
+            role = _extract_role(text)
+            if role:
+                extracted["decision_maker_role"] = role
+        if any(token in key_norm for token in ("contact", "email", "phone", "text")) and "preferred_contact_method" not in extracted:
+            method = _extract_contact_method(text)
+            if method:
+                extracted["preferred_contact_method"] = method
+    return QualificationMemory.model_validate(extracted)
+
+
+def _extract_from_messages(history: Sequence[Message]) -> QualificationMemory:
+    extracted: dict[str, Any] = {}
+    for message in history:
+        if message.direction != MessageDirection.INBOUND:
+            continue
+        partial = _extract_from_text(message.body)
+        extracted.update({k: v for k, v in partial.model_dump(exclude_none=True).items() if v is not None})
+    return QualificationMemory.model_validate(extracted)
+
+
+def _extract_from_text(text: str) -> QualificationMemory:
+    raw = " ".join(str(text or "").split()).strip()
+    normalized = _normalize_text(raw)
+    if not normalized or "?" in raw:
+        return QualificationMemory()
+
+    extracted: dict[str, Any] = {}
+
+    scope = _extract_locations_scope(raw)
+    if scope:
+        extracted["locations_scope"] = scope
+
+    timeline = _extract_timeline(raw)
+    if timeline:
+        extracted["timeline"] = timeline
+
+    deliverable = _extract_deliverable_type(raw)
+    if deliverable:
+        extracted["deliverable_type"] = deliverable
+
+    building_type = _extract_building_type(raw)
+    if building_type:
+        extracted["building_type"] = building_type
+
+    size = _extract_size_sqft(raw)
+    if size:
+        extracted["approximate_size_sqft"] = size
+
+    role = _extract_role(raw)
+    if role:
+        extracted["decision_maker_role"] = role
+
+    contact_method = _extract_contact_method(raw)
+    if contact_method:
+        extracted["preferred_contact_method"] = contact_method
+
+    return QualificationMemory.model_validate(extracted)
+
+
+def _extract_locations_scope(text: str) -> str | None:
+    normalized = _normalize_text(text)
+    if re.search(r"\b(one|single)\s+(?:[a-z]+\s+){0,2}(building|site|location|property|space|office|warehouse|store)\b", normalized):
+        return "one building"
+    if re.search(r"\b(multiple|multi|several|many|\d+\s+)\s+(buildings|sites|locations|properties)\b", normalized):
+        return "multiple locations"
+    if "multiple sites" in normalized or "multiple locations" in normalized:
+        return "multiple locations"
+    return None
+
+
+def _extract_timeline(text: str) -> str | None:
+    match = _TIMELINE_PATTERN.search(text)
+    if not match:
+        return None
+    return " ".join(match.group(0).split())
+
+
+def _extract_deliverable_type(text: str) -> str | None:
+    normalized = _normalize_text(text)
+    cad = bool(re.search(r"\b(cad|as builts?|as-builts?)\b", normalized))
+    revit = bool(re.search(r"\b(revit|bim)\b", normalized))
+    if cad and revit:
+        return "CAD as-builts and Revit/BIM"
+    if cad:
+        return "CAD as-builts"
+    if revit:
+        return "Revit/BIM"
+    return None
+
+
+def _extract_building_type(text: str) -> str | None:
+    normalized = _normalize_text(text)
+    for candidate in _BUILDING_TYPES:
+        if candidate in normalized:
+            return candidate
+    match = re.search(r"\b(?:for|it's|it is|its)\s+(?:a|an)?\s*([a-z][a-z\- ]{3,30})\b", normalized)
+    if match:
+        snippet = match.group(1).strip()
+        if any(token in snippet for token in ("building", "office", "retail", "warehouse", "school", "site", "space")):
+            return snippet
+    return None
+
+
+def _extract_size_sqft(text: str) -> int | None:
+    match = _SIZE_PATTERN.search(text)
+    if not match:
+        return None
+    value = match.group("size").replace(",", "")
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _extract_role(text: str) -> str | None:
+    match = _ROLE_PATTERN.search(text)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _extract_contact_method(text: str) -> str | None:
+    normalized = _normalize_text(text)
+    if "email" in normalized:
+        return "email"
+    if "call" in normalized or "phone" in normalized:
+        return "call"
+    if "text" in normalized or "sms" in normalized:
+        return "text"
+    return None
+
+
+def _merge_memory(*memories: QualificationMemory) -> QualificationMemory:
+    merged: dict[str, Any] = {}
+    for memory in memories:
+        for key, value in memory.model_dump(exclude_none=True).items():
+            if value is None:
+                continue
+            merged[key] = value
+    return QualificationMemory.model_validate(merged)
+
+
+def _memory_has_value(memory: QualificationMemory, key: QuestionKey) -> bool:
+    value = getattr(memory, key)
+    return value is not None and value != ""
+
+
+def _booking_threshold(
+    *,
+    memory: QualificationMemory,
+) -> tuple[bool, list[str]]:
+    scope_ready = any(
+        _memory_has_value(memory, key)
+        for key in ("locations_scope", "deliverable_type", "building_type", "approximate_size_sqft")
+    )
+    coordination_ready = any(
+        _memory_has_value(memory, key)
+        for key in ("timeline", "decision_maker_role", "preferred_contact_method")
+    )
+    known_fields = memory.known_fields()
+    booking_ready = scope_ready and coordination_ready and len(known_fields) >= 3
+
+    missing: list[str] = []
+    if not scope_ready:
+        missing.append("project_scope")
+    if not coordination_ready:
+        missing.append("coordination_signal")
+    if len(known_fields) < 3:
+        missing.append("project_detail")
+    return booking_ready, missing
+
+
+def _extract_asked_question_keys(history: Sequence[Message]) -> list[QuestionKey]:
+    keys: list[QuestionKey] = []
+    for message in history:
+        if message.direction != MessageDirection.OUTBOUND:
+            continue
+        raw_payload = message.raw_payload if isinstance(message.raw_payload, dict) else {}
+        agent_payload = raw_payload.get("agent") if isinstance(raw_payload.get("agent"), dict) else {}
+        stored_key = agent_payload.get("next_question_key")
+        if stored_key in _QUESTION_SPEC_BY_KEY:
+            keys.append(stored_key)
+            continue
+        guessed = _infer_question_key_from_text(message.body or "")
+        if guessed:
+            keys.append(guessed)
+    return keys
+
+
+def _infer_question_key_from_text(text: str) -> QuestionKey | None:
+    normalized = _normalize_text(text)
+    if "one building" in normalized or "multiple locations" in normalized:
+        return "locations_scope"
+    if "timeline" in normalized or "working with" in normalized or "how soon" in normalized:
+        return "timeline"
+    if "cad as-builts" in normalized or "revit" in normalized or "bim" in normalized:
+        return "deliverable_type"
+    if "kind of building" in normalized or "building type" in normalized:
+        return "building_type"
+    if "square feet" in normalized or "sqft" in normalized or "sq ft" in normalized:
+        return "approximate_size_sqft"
+    if "decision-maker" in normalized or "decision maker" in normalized:
+        return "decision_maker_role"
+    if "text, email, or a quick call" in normalized or "prefer text" in normalized:
+        return "preferred_contact_method"
+    return None
+
+
+def _recommended_next_question_key(
+    *,
+    memory: QualificationMemory,
+    asked_question_keys: Sequence[str],
+) -> QuestionKey | None:
+    asked = {str(key) for key in asked_question_keys}
+    for key in _QUESTION_ORDER:
+        if key in asked:
+            continue
+        if _memory_has_value(memory, key):
+            continue
+        return key
+    return None
 
 
 def _normalize_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
-    cleaned = re.sub(r"[^a-z0-9$@+\-:/?.\s]", " ", cleaned)
+    cleaned = re.sub(r"[^a-z0-9@+:/?.,\- ]", " ", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def _normalize_question(text: str) -> str:
-    candidate = _normalize_text(text)
-    if not candidate:
-        return ""
-    candidate = candidate.rstrip("?").strip()
-    return candidate
-
-
-def _is_short_reply(text: str) -> bool:
+def _reply_mentions_booking(text: str) -> bool:
     normalized = _normalize_text(text)
     if not normalized:
         return False
-    if normalized in _SHORT_REPLY_MARKERS:
-        return True
-    return len(normalized.split()) <= 3
+    return bool(_BOOKING_REPLY_PATTERN.search(normalized))
 
 
-def _extract_primary_question(text: str) -> str:
-    raw = " ".join(str(text or "").split()).strip()
-    raw = re.sub(r"https?://\S+", " ", raw)
-    if not raw or "?" not in raw:
-        return ""
-    match = re.search(r"([^?]{4,}\?)", raw)
-    if not match:
-        return ""
-    question = match.group(1).strip()
-    if "." in question:
-        tail = question.rsplit(".", 1)[-1].strip()
-        if tail:
-            question = tail if tail.endswith("?") else f"{tail}?"
-    return question
-
-
-def _is_system_seed_inbound(text: str) -> bool:
+def is_affirmative_reply(text: str) -> bool:
     normalized = _normalize_text(text)
-    return normalized.startswith("new lead submitted from meta lead ads")
-
-
-def _extract_outbound_questions(messages: Sequence[dict[str, Any]]) -> list[str]:
-    output: list[str] = []
-    for message in messages:
-        if str(message.get("direction", "")).upper() != "OUTBOUND":
-            continue
-        body = str(message.get("body", "")).strip()
-        body = re.sub(r"https?://\S+", " ", body)
-        if not body or "?" not in body:
-            continue
-        for chunk in re.findall(r"([^?]{4,}\?)", body):
-            question = chunk.strip()
-            if "." in question:
-                tail = question.rsplit(".", 1)[-1].strip()
-                if tail:
-                    question = tail if tail.endswith("?") else f"{tail}?"
-            if question:
-                output.append(question)
-    return output
-
-
-def _last_outbound_question(messages: Sequence[dict[str, Any]]) -> str:
-    questions = _extract_outbound_questions(messages)
-    return questions[-1] if questions else ""
-
-
-def _extract_facts(
-    *,
-    normalized_answers: dict[str, Any],
-    recent_messages: Sequence[dict[str, Any]],
-    inbound_text: str,
-) -> dict[str, str]:
-    facts = {
-        "goal": "",
-        "timeline": "",
-        "budget": "",
-        "audience": "",
-        "geography": "",
-        "offer": "",
-        "close_rate": "",
-        "funnel": "",
-        "ad_platform": "",
-        "business_type": "",
+    if not normalized:
+        return False
+    exact_phrases = {
+        "yes",
+        "yeah",
+        "yea",
+        "yep",
+        "sure",
+        "absolutely",
+        "definitely",
+        "sounds good",
+        "that works",
+        "works for me",
+        "ok",
+        "okay",
+        "go ahead",
+        "lets do it",
+        "let s do it",
+        "please do",
+        "yea sure",
+        "yeah sure",
+        "yes sure",
     }
-
-    for key, value in normalized_answers.items():
-        key_norm = _normalize_text(key)
-        value_text = " ".join(str(value).split()).strip()
-        if not value_text:
-            continue
-        if any(token in key_norm for token in ("goal", "challenge", "problem", "result", "need")):
-            facts["goal"] = facts["goal"] or value_text
-        if any(token in key_norm for token in ("timeline", "when", "start", "availability")):
-            facts["timeline"] = facts["timeline"] or value_text
-        if any(token in key_norm for token in ("budget", "spend", "cost", "price")):
-            facts["budget"] = facts["budget"] or value_text
-        if any(token in key_norm for token in ("ideal", "audience", "customer", "avatar")):
-            facts["audience"] = facts["audience"] or value_text
-        if any(token in key_norm for token in ("city", "area", "geo", "location", "market")):
-            facts["geography"] = facts["geography"] or value_text
-        if any(token in key_norm for token in ("offer", "service", "package", "product", "industry", "business_type")):
-            facts["offer"] = facts["offer"] or value_text
-        if any(token in key_norm for token in ("industry", "business type", "niche", "vertical")):
-            facts["business_type"] = facts["business_type"] or value_text
-        if any(token in key_norm for token in ("running ads", "ad platform", "platform", "channel", "traffic source")):
-            facts["ad_platform"] = facts["ad_platform"] or value_text
-        if any(token in key_norm for token in ("close", "conversion", "win_rate")):
-            facts["close_rate"] = facts["close_rate"] or value_text
-        if any(token in key_norm for token in ("landing page", "lead form", "funnel", "tracking", "crm")):
-            facts["funnel"] = facts["funnel"] or value_text
-
-    inbound_bodies = [
-        _normalize_text(message.get("body", ""))
-        for message in recent_messages
-        if str(message.get("direction", "")).upper() == "INBOUND"
-    ]
-    inbound_bodies.append(_normalize_text(inbound_text))
-
-    budget_matcher = re.compile(r"\$\s?\d[\d,]*(?:\s?(?:/|per)?\s?(?:mo|month|monthly))?")
-    geography_matcher = re.compile(
-        r"\b("
-        r"us|u\.s\.|usa|u\.s\.a\.|united states|canada|nationwide|statewide|worldwide|"
-        r"north america|europe|uk|united kingdom|australia"
-        r")\b"
-    )
-    offer_matcher = re.compile(
-        r"\b(custom software|software development|web development|app development|saas|roofing|plumbing|hvac|marketing)\b"
-    )
-
-    for body in inbound_bodies:
-        if not body:
-            continue
-        if not facts["budget"]:
-            budget_hit = budget_matcher.search(body)
-            if budget_hit:
-                facts["budget"] = budget_hit.group(0)
-            elif any(token in body for token in ("budget", "spending", "cost", "price")):
-                facts["budget"] = body
-        if not facts["timeline"] and (
-            any(token in body for token in ("asap", "immediately", "soon", "this week", "next week"))
-            or bool(re.search(r"\b\d{1,2}\s?(am|pm)\b", body))
-            or any(day in body for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"))
-        ):
-            facts["timeline"] = body
-        if not facts["goal"] and any(
-            token in body
-            for token in (
-                "lead",
-                "qualified",
-                "unqualified",
-                "problem",
-                "issue",
-                "trying to",
-                "looking to",
-                "want",
-                "need",
-            )
-        ):
-            facts["goal"] = body
-        if not facts["audience"] and any(token in body for token in ("ideal customer", "target audience", "avatar")):
-            facts["audience"] = body
-        if not facts["geography"] and any(token in body for token in ("city", "area", "location", "market")):
-            facts["geography"] = body
-        if not facts["geography"] and geography_matcher.search(body):
-            facts["geography"] = body
-        if not facts["offer"] and any(token in body for token in ("offer", "service", "package", "program")):
-            facts["offer"] = body
-        if not facts["offer"]:
-            offer_hit = offer_matcher.search(body)
-            if offer_hit:
-                facts["offer"] = offer_hit.group(1)
-        if not facts["offer"]:
-            business_match = re.search(r"\bmy\s+([a-z0-9\- ]{2,30})\s+business\b", body)
-            if business_match:
-                facts["offer"] = business_match.group(1).strip()
-        if not facts["business_type"] and any(token in body for token in ("software", "technology", "saas", "roofing", "agency")):
-            facts["business_type"] = body
-        if not facts["ad_platform"] and any(
-            token in body
-            for token in ("google ads", "ppc", "search ads", "facebook ads", "meta ads", "instagram ads", "linkedin ads")
-        ):
-            facts["ad_platform"] = body
-        if not facts["close_rate"] and any(token in body for token in ("close rate", "conversion", "closing")):
-            facts["close_rate"] = body
-        if not facts["funnel"] and any(token in body for token in ("landing page", "lead form", "funnel", "tracking", "crm")):
-            facts["funnel"] = body
-
-    return facts
-
-
-def _domain_for_question(question: str) -> str:
-    normalized = _normalize_text(question)
-    if any(token in normalized for token in ("budget", "spend", "cost", "price")):
-        return "budget"
-    if any(token in normalized for token in ("timeline", "when", "start", "availability")):
-        return "timeline"
-    if any(token in normalized for token in ("ideal", "audience", "customer", "avatar")):
-        return "audience"
-    if any(token in normalized for token in ("city", "area", "location", "market", "geo")):
-        return "geography"
-    if any(token in normalized for token in ("offer", "service", "package", "product")):
-        return "offer"
-    if any(token in normalized for token in ("close", "conversion", "closing")):
-        return "close_rate"
-    if any(token in normalized for token in ("landing page", "lead form", "funnel", "tracking", "crm")):
-        return "funnel"
-    return "goal"
-
-
-def _question_answered(
-    *,
-    question: str,
-    facts: dict[str, str],
-    normalized_answers: dict[str, Any],
-    recent_messages: Sequence[dict[str, Any]],
-) -> bool:
-    domain = _domain_for_question(question)
-    if facts.get(domain):
+    if normalized in exact_phrases:
         return True
-
-    if domain == "goal":
-        inbound_bodies = [
-            _normalize_text(message.get("body", ""))
-            for message in recent_messages
-            if str(message.get("direction", "")).upper() == "INBOUND"
-        ]
-        return any(len(body.split()) >= 3 for body in inbound_bodies)
-
-    if normalized_answers:
-        return False
-
-    return False
-
-
-def _derive_missing_qualifiers(
-    *,
-    qualification_questions: Sequence[str],
-    facts: dict[str, str],
-    normalized_answers: dict[str, Any],
-    recent_messages: Sequence[dict[str, Any]],
-) -> list[str]:
-    missing: list[str] = []
-    for question in qualification_questions:
-        clean = str(question).strip()
-        if not clean:
-            continue
-        if _question_answered(
-            question=clean,
-            facts=facts,
-            normalized_answers=normalized_answers,
-            recent_messages=recent_messages,
-        ):
-            continue
-        missing.append(clean)
-    return missing
-
-
-def _shows_booking_intent(inbound: str) -> bool:
-    if re.search(r"\bbook(?:ing)?\b", inbound):
-        return True
-    if any(phrase in inbound for phrase in ("schedule", "available times", "appointment", "meeting", "consult", "calendar")):
-        return True
-    call_phrases = (
-        "schedule a call",
-        "book a call",
-        "set up a call",
-        "hop on a call",
-        "quick call",
-        "available for a call",
-        "call this week",
-        "call tomorrow",
-        "talk this week",
-    )
-    return any(phrase in inbound for phrase in call_phrases)
-
-
-def _shows_start_intent(inbound: str) -> bool:
-    return any(phrase in inbound for phrase in _START_INTENT_PHRASES)
-
-
-def _looks_like_time_proposal(inbound: str) -> bool:
-    if not inbound:
-        return False
-    if bool(re.search(r"\b\d{1,2}\s?(am|pm)\b", inbound)):
-        return True
-    if any(day in inbound for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")):
-        return True
-    if any(token in inbound for token in ("tomorrow", "tonight", "this week", "next week")):
+    tokens = [token for token in normalized.split(" ") if token]
+    if 0 < len(tokens) <= 3 and all(token in {"yes", "yeah", "yea", "yep", "sure", "ok", "okay"} for token in tokens):
         return True
     return False
 
 
-def _is_gratitude_closing(inbound: str) -> bool:
-    if not inbound:
-        return False
-    if inbound in _CLOSING_GRATITUDE_MARKERS:
-        return True
-    if inbound.startswith("thanks") or inbound.startswith("thank you"):
-        return True
-    return len(inbound.split()) <= 3 and inbound in _CLOSING_GRATITUDE_MARKERS
-
-
-def _shows_handoff_intent(inbound: str) -> bool:
-    return any(keyword in inbound for keyword in _HANDOFF_KEYWORDS)
-
-
-def _shows_booked_confirmation(inbound: str) -> bool:
-    return any(keyword in inbound for keyword in _BOOKED_KEYWORDS)
-
-
-def _booking_action(*, context: dict[str, Any]) -> AgentAction:
-    if bool(context.get("automated_booking_enabled")):
-        return AgentAction(type="offer_calendar_slots", payload={})
-    return AgentAction(type="send_booking_link", payload={})
-
-
-def _contains_booking_cue(text: str) -> bool:
-    normalized = _normalize_text(text)
-    if re.search(r"\bbook(?:ing)?\b", normalized):
-        return True
-    if any(
-        phrase in normalized
-        for phrase in ("schedule", "available times", "appointment", "meeting", "consult", "calendar", "set a time", "good time")
-    ):
-        return True
-    return any(
-        phrase in normalized
-        for phrase in (
-            "schedule a call",
-            "book a call",
-            "set up a call",
-            "set a time",
-            "quick call",
-            "available for a call",
-            "call this week",
-        )
-    )
-
-
-def _booking_link_sent_recently(*, recent_messages: Sequence[dict[str, Any]], booking_url: str, lookback: int = 3) -> bool:
-    outbound = [
-        str(message.get("body", "")).strip()
-        for message in recent_messages
-        if str(message.get("direction", "")).upper() == "OUTBOUND"
-    ][-lookback:]
-    if not outbound:
-        return False
-    booking_url_norm = str(booking_url or "").strip().lower()
-    for body in outbound:
-        body_norm = body.lower()
-        if booking_url_norm and booking_url_norm in body_norm:
-            return True
-        if "book here" in body_norm and re.search(r"https?://\S+", body_norm):
-            return True
-    return False
-
-
-def _strip_booking_links(text: str, *, booking_url: str, keep_link: bool = False) -> str:
-    if keep_link:
-        return " ".join(str(text or "").split()).strip()
-    cleaned = str(text or "")
-    if booking_url:
-        cleaned = cleaned.replace(booking_url, " ")
-        cleaned = cleaned.replace(booking_url.rstrip("/"), " ")
-    cleaned = re.sub(r"https?://\S+", " ", cleaned)
-    cleaned = re.sub(r"\b(book here|booking link|here's the booking link|pick a time here)\b[:]?", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b(here(?:'s| is)\s+(?:my\s+)?calendar(?:\s+to\s+pick\s+a\s+time[^.?!]*)?)[:.]?", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b(let'?s\s+book\s+(?:a\s+)?(?:quick\s+)?call)\b[:.]?", " ", cleaned, flags=re.IGNORECASE)
+def _strip_urls(text: str) -> str:
+    cleaned = re.sub(r"https?://\S+", " ", str(text or ""))
     cleaned = re.sub(r"\s+([,.:;!?])", r"\1", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
-    return cleaned
-
-
-def _ensure_booking_url_present(text: str, booking_url: str) -> str:
-    clean = " ".join(str(text or "").split()).strip()
-    if not booking_url:
-        return clean
-    if booking_url in clean:
-        return clean
-    if clean.endswith(":"):
-        return f"{clean} {booking_url}"
-    if clean:
-        return f"{clean} Book here: {booking_url}"
-    return f"Book here: {booking_url}"
-
-
-def _remove_questions(text: str) -> str:
-    cleaned = str(text or "").replace("?", ".")
-    cleaned = re.sub(r"\.\s*\.", ".", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip(" ")
 
 
-def _booking_nudge_reply() -> str:
-    return "I already sent the booking link. Want me to send a couple times that could work?"
-
-
-def _token_overlap_ratio(reply: str, inbound: str) -> float:
-    reply_tokens = [token for token in _normalize_text(reply).split() if len(token) > 2]
-    inbound_tokens = {token for token in _normalize_text(inbound).split() if len(token) > 2}
-    if not reply_tokens or not inbound_tokens:
-        return 0.0
-    overlap = sum(1 for token in reply_tokens if token in inbound_tokens)
-    return overlap / len(reply_tokens)
-
-
-def _is_parroting_reply(reply: str, inbound: str, threshold: float = 0.70) -> bool:
-    if not reply.strip() or not inbound.strip():
-        return False
-    return _token_overlap_ratio(reply, inbound) >= threshold
-
-
-def _deparrot_reply(reply_text: str) -> str:
-    question = _extract_primary_question(reply_text)
-    if question:
-        return f"Got it. {question}"
-    return "Got it."
-
-
-def _drop_booking_sentences(text: str) -> str:
-    chunks = [chunk.strip() for chunk in re.split(r"(?:\n+|(?<=[.!?])\s+)", str(text or "")) if chunk.strip()]
-    kept: list[str] = []
-    for chunk in chunks:
-        normalized = _normalize_text(chunk)
-        if _contains_booking_cue(normalized):
-            continue
-        if "reply with" in normalized:
-            continue
-        if re.search(r"https?://\S+", chunk):
-            continue
-        kept.append(chunk)
-    return " ".join(kept).strip()
-
-
-def _next_unasked_question(*, context: dict[str, Any]) -> str:
-    asked_norm = {
-        _normalize_question(question)
-        for question in context.get("asked_questions_normalized", [])
-        if _normalize_question(question)
-    }
-
-    for question in context.get("missing_qualifiers", []) or []:
-        normalized = _normalize_question(str(question))
-        if normalized and normalized not in asked_norm:
-            return _ensure_question_mark(str(question).strip())
-
-    for question in context.get("qualification_questions", []) or []:
-        normalized = _normalize_question(str(question))
-        if normalized and normalized not in asked_norm:
-            return _ensure_question_mark(str(question).strip())
-
-    return ""
-
-
-def _replace_primary_question(text: str, replacement_question: str) -> str:
-    clean = " ".join(str(text or "").split()).strip()
-    replacement = _ensure_question_mark(replacement_question)
-    if not clean:
-        return replacement
-    if "?" not in clean:
-        return _append_question(clean, replacement)
-    first_question = _extract_primary_question(clean)
-    if not first_question:
-        return _append_question(clean, replacement)
-    return clean.replace(first_question, replacement, 1).strip()
-
-
 def _append_question(text: str, question: str) -> str:
-    clean_text = " ".join(str(text or "").split()).strip().rstrip(".")
-    clean_question = _ensure_question_mark(question)
-    if not clean_text:
-        return clean_question
-    if clean_text.endswith("?"):
-        return clean_text
-    return f"{clean_text}. {clean_question}".strip()
+    base = " ".join(str(text or "").split()).strip()
+    question = question.strip()
+    if not base:
+        return question
+    if base.endswith("?"):
+        return base
+    if base.endswith("."):
+        return f"{base} {question}"
+    return f"{base} {question}"
 
 
-def _ensure_question_mark(question: str) -> str:
-    clean = " ".join(str(question or "").split()).strip()
-    if not clean:
-        return ""
-    return clean if clean.endswith("?") else f"{clean}?"
+def _replace_question(text: str, question: str) -> str:
+    base = " ".join(str(text or "").split()).strip()
+    if "?" not in base:
+        return _append_question(base, question)
+    prefix = base.split("?", 1)[0]
+    if "." in prefix:
+        prefix = prefix.rsplit(".", 1)[0].strip()
+    prefix = prefix.rstrip(" .")
+    if prefix:
+        return f"{prefix}. {question}"
+    return question
+
+
+def _trim_sms_text(text: str) -> str:
+    clean = " ".join(str(text or "").split()).strip()
+    if len(clean) <= 320:
+        return clean
+    return clean[:317].rstrip() + "..."
 
 
 def _ensure_single_question(text: str) -> str:
@@ -990,18 +963,14 @@ def _ensure_single_question(text: str) -> str:
     if clean.count("?") <= 1:
         return clean
     first = clean.find("?")
-    head = clean[: first + 1]
-    tail = clean[first + 1 :].replace("?", ".")
-    return f"{head} {tail}".strip()
+    return f"{clean[: first + 1]} {clean[first + 1 :].replace('?', '.')}".strip()
 
 
-def _trim_sms_text(text: str) -> str:
-    lines = [" ".join(line.split()).strip() for line in str(text or "").splitlines() if line.strip()]
-    if not lines:
-        return ""
-    lines = lines[:2]
-    lines = [line[:320].strip() for line in lines]
-    return "\n".join(line for line in lines if line)
+def _finalize_response(response: AgentResponse) -> AgentResponse:
+    response.reply_text = _trim_sms_text(_ensure_single_question(response.reply_text))
+    if response.action != "ask_next_question":
+        response.next_question_key = None
+    return response
 
 
 def build_llm_agent(settings: Settings, runtime_overrides: dict[str, str] | None = None) -> LLMAgentV2:
@@ -1021,7 +990,6 @@ def build_llm_agent(settings: Settings, runtime_overrides: dict[str, str] | None
     return LLMAgentV2(provider=provider)
 
 
-# Backward-compatible alias for existing imports.
 LLMAgent = LLMAgentV2
 
 
@@ -1032,5 +1000,7 @@ __all__ = [
     "LLMAgentV2",
     "LLMProvider",
     "OpenAIProvider",
+    "QualificationMemory",
     "build_llm_agent",
+    "is_affirmative_reply",
 ]
