@@ -141,6 +141,7 @@
         min-height: 24px;
         padding: 3px 8px;
         font-size: 11px;
+        margin: 3px 0;
       }
 
       button.icon-btn,
@@ -369,6 +370,26 @@
         font-size: 11px;
         font-weight: 600;
         white-space: nowrap;
+      }
+
+      .tag .tag-remove-btn {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        min-height: 0;
+        padding: 0;
+        margin: 0 0 0 2px;
+        border-radius: 0;
+        font: 700 11px/1 var(--font-ui);
+        opacity: 0.85;
+        cursor: pointer;
+      }
+
+      .tag .tag-remove-btn:hover {
+        background: transparent;
+        border: 0;
+        opacity: 1;
       }
 
       .ok {
@@ -645,7 +666,6 @@
       .detail-card,
       .empty-state {
         min-width: 0;
-        background: var(--surface);
         border: 1px solid var(--line);
         border-radius: var(--radius-lg);
         box-shadow:
@@ -1090,6 +1110,11 @@
         overflow-wrap: anywhere;
       }
 
+        .lead-form-section .summary-line:first-child {
+        padding-top: 0;
+        margin-top: 0;
+      }
+
       .summary-line-label {
         color: var(--text-dim);
         text-transform: uppercase;
@@ -1259,30 +1284,31 @@
         padding: 12px;
         display: flex;
         flex-direction: column;
-        gap: 10px;
+        gap: 12px;
         overflow: auto;
         min-height: 0;
       }
 
       .bubble-row {
         display: flex;
+        margin: 3px 0;
       }
 
       .bubble-row.outbound { justify-content: flex-end; }
       .bubble-row.inbound { justify-content: flex-start; }
 
       .bubble {
-        max-width: 86%;
+        max-width: min(80%, 860px);
         padding: 10px 12px;
-        border-radius: 12px;
-        border: 1px solid var(--line);
-        background: var(--surface-2);
+        border-radius: 18px;
+        border: 0;
+        background: #1B2430;
         overflow-wrap: anywhere;
       }
 
       .bubble.outbound {
-        background: rgba(47, 129, 247, 0.12);
-        border-color: rgba(47, 129, 247, 0.28);
+        background: #3C82F6;
+        color: #f7fbff;
       }
 
       .bubble-meta {
@@ -1290,9 +1316,13 @@
         gap: 8px;
         flex-wrap: wrap;
         margin-top: 6px;
-        color: var(--text-dim);
+        color: rgba(174, 190, 210, 0.9);
         font-size: 10px;
         font-family: var(--font-mono);
+      }
+
+      .bubble.outbound .bubble-meta {
+        color: rgba(236, 244, 255, 0.94);
       }
 
       .timeline-event {
@@ -1353,9 +1383,61 @@
       .composer {
         border-top: 1px solid var(--line);
         padding: 10px;
+      }
+
+      .composer-field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .composer-combo {
+        width: 100%;
+      }
+
+      .composer-combo textarea {
+        min-height: 56px;
+        max-height: 150px;
+        padding: 10px 11px;
+        resize: vertical;
+      }
+
+      .composer-send-btn {
+        width: 46px;
+        min-width: 46px;
+        min-height: 0;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        border-left: 1px solid var(--line);
+        border-radius: 0;
+        background: rgba(26, 34, 44, 0.78);
+        color: var(--text-soft);
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 10px;
+        place-items: center;
+      }
+
+      .composer-send-btn svg {
+        width: 16px;
+        height: 16px;
+      }
+
+      .composer-send-btn:hover {
+        border-left-color: var(--line);
+        background: rgba(33, 42, 53, 0.95);
+        color: var(--text);
+      }
+
+      .composer-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-height: 16px;
+      }
+
+      .composer-foot .meta-text {
+        margin: 0;
       }
 
       .inbox-pane,
@@ -1400,6 +1482,7 @@
         padding: 14px;
         color: var(--text-dim);
         border-style: dashed;
+        margin: 8px 0;
       }
 
       body[data-density="compact"] {
@@ -1560,7 +1643,7 @@
       .crm-message-list {
         display: flex;
         flex-direction: column;
-        gap: 10px;
+        gap: 12px;
         max-height: 360px;
         overflow: auto;
         padding: 12px;
@@ -1572,6 +1655,7 @@
       .crm-message-row {
         display: flex;
         align-items: flex-end;
+        margin: 2px 0;
       }
 
       .crm-message-row.outbound {
@@ -1583,16 +1667,15 @@
       }
 
       .crm-message-bubble {
-        max-width: min(86%, 520px);
+        max-width: min(80%, 480px);
         padding: 8px 11px 10px;
-        border-radius: 14px;
-        border: 1px solid var(--line);
-        background: var(--surface-2);
+        border-radius: 18px;
+        border: 0;
+        background: #1B2430;
       }
 
       .crm-message-row.outbound .crm-message-bubble {
-        background: rgba(47, 129, 247, 0.12);
-        border-color: rgba(47, 129, 247, 0.3);
+        background: #3C82F6;
       }
 
       .crm-message-body {
@@ -1612,16 +1695,25 @@
       }
 
       .crm-message-author {
-        color: var(--text-soft);
+        color: rgba(177, 193, 213, 0.92);
         font: 600 10px var(--font-mono);
         letter-spacing: 0.04em;
         text-transform: uppercase;
       }
 
       .crm-message-time {
-        color: var(--text-dim);
+        color: rgba(161, 179, 202, 0.9);
         font: 500 10px var(--font-mono);
         white-space: nowrap;
+      }
+
+      .crm-message-row.outbound .crm-message-author,
+      .crm-message-row.outbound .crm-message-time {
+        color: rgba(236, 244, 255, 0.94);
+      }
+
+      .crm-message-row.outbound .crm-message-body {
+        color: #f7fbff;
       }
 
       .crm-message-meta {
@@ -1714,6 +1806,11 @@
         min-width: 0;
       }
 
+      .lead-record-main.stack,
+      .lead-record-side.stack {
+        gap: 8px;
+      }
+
       .lead-hero-card {
         padding: 10px 0 8px;
         border: 0;
@@ -1742,18 +1839,18 @@
         border-radius: 0;
         background: transparent;
         box-shadow: none;
-        padding: 9px 0 7px;
+        padding: 8px;
       }
 
       .lead-section .title {
-        margin: 6px 0 !important;
-        font-size: 15px;
+        margin: 0 0 6px !important;
+        font-size: 13px;
         font-weight: 500;
       }
 
       .lead-section:first-child {
         border-top: 0;
-        padding-top: 0;
+        padding: 8px;
       }
 
       .lead-section .actions {
@@ -1779,12 +1876,15 @@
       }
 
       .lead-form-section .summary-list {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 6px 12px;
+        display: inline-block;
+        width: auto;
+        max-width: 100%;
+        justify-content: start;
+        justify-items: start;
       }
 
       .lead-form-section .summary-line {
-        padding: 4px 0 0 0;
+        padding: 12px 0 0 4px;
         border: 0;
         background: transparent;
       }
@@ -1801,42 +1901,140 @@
       }
 
       .lead-stage-card .item-title-row {
-        margin-bottom: 4px;
+        margin-bottom: 2px;
         align-items: center;
+      }
+
+      .lead-stage-card,
+      .lead-tags-card,
+      .lead-tasks-card,
+      .lead-notes-card {
+        padding: 8px;
       }
 
       .lead-stage-card .actions {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
-        gap: 6px;
+        gap: 4px;
         align-items: center;
       }
 
       .lead-stage-card #crmLeadStageHint {
-        margin-top: 4px;
+        margin-top: 2px;
+      }
+
+      .lead-combo-control {
+        display: flex;
+        align-items: stretch;
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--input);
+        overflow: hidden;
+      }
+
+      .lead-combo-control > input,
+      .lead-combo-control > select,
+      .lead-combo-control > textarea {
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        box-shadow: none;
+        margin: 0;
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
+      .lead-combo-control > select {
+        appearance: none;
+        -webkit-appearance: none;
+        -moz-appearance: none;
+        padding-right: 30px;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%238a98a9' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.4' d='m2.5 4.5 3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 10px center;
+        background-size: 12px 12px;
+      }
+
+      .lead-combo-control > textarea {
+        resize: vertical;
+        min-height: 52px;
+      }
+
+      .lead-combo-control > input:focus,
+      .lead-combo-control > select:focus,
+      .lead-combo-control > textarea:focus {
+        box-shadow: none;
+      }
+
+      .lead-combo-control:focus-within {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(78, 150, 216, 0.14);
+      }
+
+      .lead-combo-control .combo-action {
+        border: 0;
+        border-left: 1px solid var(--line);
+        border-radius: 0;
+        background: rgba(26, 34, 44, 0.78);
+        min-height: auto;
+        margin: 0;
+        padding: 0 10px;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .lead-combo-control .combo-action:hover {
+        border-left-color: var(--line);
+        background: rgba(33, 42, 53, 0.95);
+      }
+
+      .util-inline-combo {
+        max-width: 440px;
+      }
+
+      .lead-stage-control {
+        max-width: 320px;
       }
 
       .lead-tags-card #crmLeadTags {
         min-height: 22px;
+        margin: 0;
       }
 
-      .lead-tags-card .actions {
-        margin-top: 4px;
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+      .lead-tags-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .lead-tags-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 0;
+        flex-wrap: nowrap;
+      }
+
+      .lead-tag-control {
+        width: 190px;
+      }
+
+      .lead-tag-control input {
+        width: 100%;
       }
 
       .lead-inline-disclosure {
-        margin: 0;
         border: 1px dashed var(--line);
         border-radius: 7px;
-        background: rgba(26, 34, 44, 0.5);
+    
       }
 
       .lead-inline-disclosure > summary {
         list-style: none;
         cursor: pointer;
-        padding: 6px 8px;
+        padding: 4px 7px;
         color: var(--text-dim);
         font: 600 10px var(--font-mono);
         letter-spacing: 0.045em;
@@ -1852,15 +2050,15 @@
       }
 
       .lead-inline-disclosure-body {
-        padding: 7px 8px 8px;
+        padding: 6px 7px 7px;
       }
 
       .lead-inline-disclosure .form-grid-2 {
-        gap: 7px;
+        gap: 6px;
       }
 
       .lead-inline-disclosure textarea {
-        min-height: 58px;
+        min-height: 52px;
       }
 
       .lead-task-list,
@@ -1873,7 +2071,7 @@
         border-bottom: 1px solid rgba(52, 64, 77, 0.75);
         border-radius: 0;
         background: transparent;
-        padding: 5px 0 6px;
+        padding: 4px 2px 5px;
       }
 
       .lead-task-list .crm-task-item:last-child {
@@ -1890,11 +2088,15 @@
       }
 
       .lead-task-list .item-meta-row {
-        margin-top: 3px;
+        margin-top: 2px;
       }
 
       .lead-notes-card textarea {
-        min-height: 68px;
+        min-height: 56px;
+      }
+
+      .lead-note-control {
+        margin-top: 4px;
       }
 
       .lead-note-list .note-item {
@@ -1902,7 +2104,7 @@
         border-bottom: 1px solid rgba(52, 64, 77, 0.75);
         border-radius: 0;
         background: transparent;
-        padding: 5px 0 6px;
+        padding: 4px 2px 5px;
       }
 
       .lead-note-list .note-item:last-child {
@@ -1911,6 +2113,149 @@
 
       .lead-notes-card .actions {
         justify-content: flex-end;
+      }
+
+      .lead-messages-card {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .lead-messages-card .crm-message-list {
+        flex: 1 1 auto;
+        max-height: min(70vh, 760px);
+      }
+
+      .lead-section.detail-disclosure > summary {
+        padding: 8px 8px 7px;
+      }
+
+      .lead-section.detail-disclosure .detail-disclosure-body {
+        padding: 0 8px 8px;
+      }
+
+      .thread-lead-header .lead-overview-name {
+        font-size: 18px;
+      }
+
+      .thread-stage-card .lead-stage-control {
+        max-width: 100%;
+      }
+
+      .thread-form-section .form-answer-list {
+        margin-top: 6px;
+        gap: 6px;
+      }
+
+      .thread-form-section .form-answer-item {
+        padding: 5px 0;
+        border: 0;
+        border-bottom: 1px solid rgba(52, 64, 77, 0.75);
+        border-radius: 0;
+        background: transparent;
+      }
+
+      .thread-form-section .form-answer-item:last-child {
+        border-bottom: 0;
+      }
+
+      .lead-detail-pane .pane-header {
+        align-items: flex-start;
+      }
+
+      .lead-detail-header {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+      }
+
+      .lead-detail-title-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .lead-detail-title-row h3 {
+        margin: 6px 3px 6px 0;
+        font-size: 20px;
+        line-height: 1.2;
+      }
+
+      .lead-detail-subline {
+        color: var(--text-soft);
+        font-size: 12px;
+        line-height: 1.35;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 4px;
+        overflow-wrap: anywhere;
+      }
+
+      .lead-detail-meta {
+        color: var(--text-dim);
+        font-size: 11px;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+      }
+
+      .lead-detail-sep {
+        color: var(--text-dim);
+        font-size: 11px;
+        margin: 0 1px;
+      }
+
+      .copy-inline {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: var(--text-soft);
+        border-radius: 6px;
+        padding: 1px 3px;
+        margin: 0;
+        font: inherit;
+        line-height: 1.35;
+        cursor: copy;
+        display: inline-flex;
+        align-items: center;
+        gap: 0;
+        position: relative;
+        transition: background 120ms ease, color 120ms ease, transform 80ms ease;
+      }
+
+      .copy-inline:hover {
+        background: rgba(230, 237, 243, 0.04);
+        color: var(--text);
+      }
+
+      .copy-inline:active {
+        transform: translateY(1px);
+      }
+
+      .copy-inline-hint {
+        color: var(--text-dim);
+        font: 600 9px var(--font-mono);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        opacity: 0;
+        position: absolute;
+        left: 50%;
+        bottom: 100%;
+        transform: translate(-50%, -2px);
+        margin-bottom: 2px;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: rgba(26, 34, 44, 0.92);
+        border: 1px solid rgba(52, 64, 77, 0.8);
+        white-space: nowrap;
+        pointer-events: none;
+        transition: opacity 120ms ease, transform 120ms ease;
+      }
+
+      .copy-inline:hover .copy-inline-hint {
+        opacity: 1;
+        transform: translate(-50%, -4px);
       }
 
       .lead-stage-card .title,
@@ -2277,6 +2622,7 @@
         .lead-detail-facts,
         .lead-form-section .summary-list {
           grid-template-columns: 1fr;
+          max-width: 100%;
         }
 
         .toolbar-left {
@@ -2878,14 +3224,26 @@
                   </div>
                   <div id="threadTimeline" class="timeline"></div>
                   <div class="composer">
-                    <div class="stack">
-                      <label id="threadManualMessageLabel" for="threadManualMessage">Manual outbound message</label>
-                      <textarea id="threadManualMessage" placeholder="Type a direct outbound message to this lead."></textarea>
-                      <div id="threadComposerHint" class="meta-text"></div>
-                    </div>
-                    <div class="stack" style="align-items: stretch;">
-                      <button id="threadSendManualButton" class="primary">Send</button>
-                      <div id="threadManualStatus" class="meta-text"></div>
+                    <div class="composer-field">
+                      <div class="composer-combo lead-combo-control">
+                        <textarea id="threadManualMessage" placeholder="Type a direct outbound message to this lead."></textarea>
+                        <button
+                          id="threadSendManualButton"
+                          class="combo-action composer-send-btn"
+                          type="button"
+                          aria-label="Send message"
+                          title="Send message"
+                        >
+                          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                            <path d="M2 8 13.5 2.7 11 13.3 7.2 9.5 2 8Z" fill="currentColor"/>
+                            <path d="M7.2 9.5 13.5 2.7" stroke="rgba(4,8,14,0.26)" stroke-width="1.1" stroke-linecap="round"/>
+                          </svg>
+                        </button>
+                      </div>
+                      <div class="composer-foot">
+                        <div id="threadComposerHint" class="meta-text"></div>
+                        <div id="threadManualStatus" class="meta-text"></div>
+                      </div>
                     </div>
                   </div>
                 </section>
@@ -2900,22 +3258,29 @@
                     </div>
                   </div>
                   <div class="pane-body stack">
-                    <div id="threadActionHint" class="meta-text"></div>
+                    <div id="threadActionHint" class="meta-text hidden"></div>
                     <div id="threadEmpty" class="empty-state">Select a conversation to inspect the thread and actions.</div>
-                    <div id="threadDetails" class="stack hidden">
-                      <div class="detail-card lead-overview">
-                        <div class="lead-overview-top">
-                          <div>
-                            <div id="threadLeadOverviewName" class="lead-overview-name"></div>
-                            <div id="threadLeadOverviewSubtitle" class="lead-overview-subtitle"></div>
-                          </div>
+                    <div id="threadDetails" class="stack lead-record-main hidden">
+                      <div class="detail-card lead-section thread-lead-header">
+                        <div class="lead-detail-title-row">
+                          <div id="threadLeadOverviewName" class="lead-overview-name"></div>
+                          <div id="threadLeadHeaderStageBadge" class="chip-row"></div>
                         </div>
-                        <div id="threadLeadFactGrid" class="lead-fact-grid"></div>
-                        <div id="threadTagList" class="chip-row"></div>
+                        <div id="threadLeadOverviewSubtitle" class="lead-detail-subline"></div>
+                        <div id="threadLeadHeaderMeta" class="lead-detail-meta"></div>
+                        <div id="threadLeadFactGrid" class="lead-fact-grid hidden"></div>
                       </div>
-                      <div class="detail-card stack">
-                        <div class="title">CRM stage</div>
-                        <div class="actions">
+                      <div class="detail-card lead-section lead-summary-card lead-form-section thread-form-section">
+                        <div class="title">Form answers</div>
+                        <div id="threadLeadSummaryList" class="summary-list hidden"></div>
+                        <div id="threadFormAnswers" class="form-answer-list hidden"></div>
+                        <div id="threadLeadSummary" class="meta-text hidden"></div>
+                      </div>
+                      <div class="detail-card lead-section lead-stage-card thread-stage-card">
+                        <div class="item-title-row">
+                          <div class="title">Stage</div>
+                        </div>
+                        <div class="lead-combo-control lead-stage-control">
                           <select id="threadCrmStageSelect">
                             <option value="New Lead">New Lead</option>
                             <option value="Contacted">Contacted</option>
@@ -2925,35 +3290,32 @@
                             <option value="Won">Won</option>
                             <option value="Lost">Lost</option>
                           </select>
-                          <button id="threadCrmStageSaveButton" class="small">Update</button>
+                          <button id="threadCrmStageSaveButton" class="combo-action">Update</button>
                         </div>
                         <div id="threadCrmStageStatus" class="meta-text"></div>
                       </div>
-                      <details class="detail-card detail-disclosure">
-                        <summary>Project summary</summary>
-                        <div class="detail-disclosure-body stack">
-                          <div id="threadLeadSummary" class="meta-text"></div>
-                          <div id="threadLeadSummaryList" class="summary-list hidden"></div>
-                        </div>
-                      </details>
-                      <details class="detail-card detail-disclosure">
-                        <summary>Form answers</summary>
-                        <div class="detail-disclosure-body">
-                          <div id="threadFormAnswers" class="form-answer-list"></div>
-                        </div>
-                      </details>
-                      <details class="detail-card detail-disclosure">
-                        <summary id="threadNotesSummary">Internal notes</summary>
-                        <div class="detail-disclosure-body stack">
-                          <div id="threadNotes" class="compact-list"></div>
-                          <textarea id="threadNoteInput" placeholder="Add an internal note."></textarea>
-                          <div class="actions">
-                            <button id="threadAddNoteButton" class="small">Add note</button>
-                            <div id="threadNoteStatus" class="meta-text"></div>
+                      <div class="detail-card lead-section lead-tags-card thread-tags-card">
+                        <div class="title">Tags</div>
+                        <div class="lead-tags-row">
+                          <div id="threadTagList" class="chip-row"></div>
+                          <div class="lead-tags-actions">
+                            <div class="lead-combo-control lead-tag-control">
+                              <input id="threadTagInput" placeholder="add tag" />
+                              <button id="threadTagAddButton" class="combo-action">Add</button>
+                            </div>
                           </div>
                         </div>
-                      </details>
-                      <details class="detail-card detail-disclosure">
+                      </div>
+                      <div class="detail-card lead-section lead-notes-card thread-notes-card">
+                        <div id="threadNotesSummary" class="title">Internal notes</div>
+                        <div id="threadNotes" class="compact-list lead-note-list"></div>
+                        <div class="lead-combo-control lead-note-control">
+                          <textarea id="threadNoteInput" placeholder="Add an internal note."></textarea>
+                          <button id="threadAddNoteButton" class="combo-action">Add</button>
+                        </div>
+                        <div id="threadNoteStatus" class="meta-text"></div>
+                      </div>
+                      <details class="detail-card detail-disclosure lead-section">
                         <summary id="threadAuditSummary">Activity</summary>
                         <div class="detail-disclosure-body">
                           <div id="threadAuditEvents" class="compact-list"></div>
@@ -3017,9 +3379,16 @@
                     <div id="crmLeadList" class="compact-list"></div>
                   </div>
                 </aside>
-                <section class="pane focus-surface">
+                <section class="pane focus-surface lead-detail-pane">
                   <div class="pane-header">
-                    <div class="pane-title"><h3 id="crmLeadTitle">Lead record</h3></div>
+                    <div class="pane-title lead-detail-header">
+                        <div class="lead-detail-title-row">
+                          <h3 id="crmLeadTitle">Lead record</h3>
+                          <div id="crmLeadHeaderStageBadge" class="chip-row"></div>
+                        </div>
+                        <div id="crmLeadHeaderLinePrimary" class="lead-detail-subline"></div>
+                        <div id="crmLeadHeaderLineSecondary" class="lead-detail-meta"></div>
+                    </div>
                     <div class="actions">
                       <button id="crmLeadBackButton" class="small ghost hidden">Back to pipeline</button>
                       <button id="crmLeadArchiveButton" class="small ghost hidden">Archive</button>
@@ -3028,40 +3397,18 @@
                   <div class="pane-body stack">
                     <div id="crmLeadEmpty" class="empty-state">Select a lead to view CRM details.</div>
                     <div id="crmLeadDetail" class="lead-record hidden">
-                      <div class="detail-card lead-overview lead-hero-card">
-                        <div class="lead-overview-top">
-                          <div>
-                            <div id="crmLeadHeroName" class="lead-overview-name"></div>
-                            <div id="crmLeadHeroSubtitle" class="lead-overview-subtitle"></div>
-                          </div>
-                          <div id="crmLeadHeroPills" class="chip-row"></div>
-                        </div>
-                        <div id="crmLeadHeroMeta" class="lead-hero-meta"></div>
-                      </div>
                       <div class="lead-record-layout">
                         <div class="lead-record-main stack">
                           <div class="detail-card lead-section lead-summary-card lead-form-section">
                             <div class="title">Form answers</div>
                             <div id="crmLeadSummaryList" class="summary-list"></div>
                           </div>
-                          <div class="detail-card lead-section">
-                            <div class="title">Recent messages</div>
-                            <div id="crmLeadMessages" class="crm-message-list"></div>
-                          </div>
-                          <details class="detail-card detail-disclosure lead-section">
-                            <summary>Activity history</summary>
-                            <div class="detail-disclosure-body">
-                              <div id="crmLeadTimeline" class="compact-list"></div>
-                            </div>
-                          </details>
-                        </div>
-                        <div class="lead-record-side stack">
                           <div class="detail-card lead-section lead-stage-card">
                             <div class="item-title-row">
                               <div class="title">Stage</div>
                               <div id="crmLeadStagePills" class="chip-row"></div>
                             </div>
-                            <div class="actions">
+                            <div class="lead-combo-control lead-stage-control">
                               <select id="crmLeadStageSelect">
                                 <option value="New Lead">New Lead</option>
                                 <option value="Contacted">Contacted</option>
@@ -3071,16 +3418,20 @@
                                 <option value="Won">Won</option>
                                 <option value="Lost">Lost</option>
                               </select>
-                              <button id="crmLeadStageSaveButton" class="small">Update stage</button>
+                              <button id="crmLeadStageSaveButton" class="combo-action">Update</button>
                             </div>
                             <div id="crmLeadStageHint" class="meta-text"></div>
                           </div>
                           <div class="detail-card lead-section lead-tags-card">
                             <div class="title">Tags</div>
-                            <div id="crmLeadTags" class="chip-row"></div>
-                            <div class="actions">
-                              <input id="crmTagInput" placeholder="add tag (e.g., hot)" />
-                              <button id="crmTagAddButton" class="small">Add tag</button>
+                            <div class="lead-tags-row">
+                              <div id="crmLeadTags" class="chip-row"></div>
+                              <div class="lead-tags-actions">
+                                <div class="lead-combo-control lead-tag-control">
+                                  <input id="crmTagInput" placeholder="add tag" />
+                                  <button id="crmTagAddButton" class="combo-action">Add</button>
+                                </div>
+                              </div>
                             </div>
                           </div>
                           <div class="detail-card lead-section lead-tasks-card">
@@ -3114,10 +3465,22 @@
                           <div class="detail-card lead-section lead-notes-card">
                             <div id="crmLeadNotesTitle" class="title">Internal notes</div>
                             <div id="crmLeadNotes" class="compact-list lead-note-list"></div>
-                            <textarea id="crmLeadNoteInput" placeholder="Add an internal note."></textarea>
-                            <div class="actions">
-                              <button id="crmLeadNoteAddButton" class="small">Add note</button>
+                            <div class="lead-combo-control lead-note-control">
+                              <textarea id="crmLeadNoteInput" placeholder="Add an internal note."></textarea>
+                              <button id="crmLeadNoteAddButton" class="combo-action">Add</button>
                             </div>
+                          </div>
+                          <details class="detail-card detail-disclosure lead-section">
+                            <summary>Activity history</summary>
+                            <div class="detail-disclosure-body">
+                              <div id="crmLeadTimeline" class="compact-list"></div>
+                            </div>
+                          </details>
+                        </div>
+                        <div class="lead-record-side stack">
+                          <div class="detail-card lead-section lead-messages-card">
+                            <div class="title">Recent messages</div>
+                            <div id="crmLeadMessages" class="crm-message-list"></div>
                           </div>
                         </div>
                       </div>
@@ -3473,10 +3836,10 @@
                     <div id="settingsLeadTestHelper" class="meta-text">Uses the selected business's current AI, SMS provider, and a business-matched Peter Lead profile so you can demo the live conversation flow quickly.</div>
                     <div>
                       <label for="settingsPeterLeadPhone">Your phone number</label>
-                      <input id="settingsPeterLeadPhone" class="mono" placeholder="+15551234567" />
-                    </div>
-                    <div class="actions">
-                      <button id="settingsStartPeterLeadTest" class="primary">Send test lead to my phone</button>
+                      <div class="lead-combo-control util-inline-combo">
+                        <input id="settingsPeterLeadPhone" class="mono" placeholder="+15551234567" />
+                        <button id="settingsStartPeterLeadTest" class="combo-action">Send test lead</button>
+                      </div>
                     </div>
                     <div id="settingsPeterLeadStatus" class="meta-text"></div>
                   </div>
@@ -3537,18 +3900,22 @@
                     </div>
                     <div>
                       <label for="labPeterLeadPhone">Your phone number</label>
-                      <input id="labPeterLeadPhone" class="mono" placeholder="+15551234567" />
+                      <div class="lead-combo-control util-inline-combo">
+                        <input id="labPeterLeadPhone" class="mono" placeholder="+15551234567" />
+                        <button id="labStartPeterLeadTest" class="combo-action">Send test lead</button>
+                      </div>
                     </div>
                     <div class="actions">
-                      <button id="labStartPeterLeadTest" class="primary">Send Peter Lead Test</button>
                       <button id="labCopyWebhook" class="ghost">Copy inbound webhook</button>
                     </div>
                     <div>
                       <label for="labZapierWebhook">Zapier POST URL</label>
-                      <input id="labZapierWebhook" class="mono" readonly />
+                      <div class="lead-combo-control util-inline-combo">
+                        <input id="labZapierWebhook" class="mono" readonly />
+                        <button id="labCopyZapierWebhook" class="combo-action">Copy URL</button>
+                      </div>
                     </div>
                     <div class="actions">
-                      <button id="labCopyZapierWebhook" class="ghost">Copy Zapier URL</button>
                       <button id="labRefreshZapierConsole" class="ghost">Refresh Zapier console</button>
                     </div>
                     <div id="labStartStatus" class="meta-text"></div>
@@ -3953,6 +4320,22 @@
         }).format(date);
       }
 
+      function formatPhoneNumber(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return "-";
+        const digits = raw.replace(/\D/g, "");
+        if (digits.length === 11 && digits.startsWith("1")) {
+          return `+1 (${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+        }
+        if (digits.length === 10) {
+          return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+        }
+        if (raw.startsWith("+") && digits.length > 10) {
+          return `+${digits}`;
+        }
+        return raw;
+      }
+
       function stateTone(value) {
         if (["BOOKED", "BOOKING_SENT"].includes(value)) return "ok";
         if (["HANDOFF", "OPTED_OUT"].includes(value)) return "warn";
@@ -4309,6 +4692,59 @@
         return text.length <= maxLen ? text : `${text.slice(0, maxLen - 1).trim()}...`;
       }
 
+      function isDuplicateLeadNameSummaryLine(line, leadName = "") {
+        const label = String(line?.label || "").trim().toLowerCase();
+        const value = String(line?.value || "").trim().toLowerCase();
+        const normalizedLeadName = String(leadName || "").trim().toLowerCase();
+        const compactLabel = label.replace(/\s+/g, " ");
+        const isNameLabel = compactLabel.includes("name") || compactLabel === "lead" || compactLabel === "contact";
+        if (!isNameLabel) return false;
+        if (!normalizedLeadName) return true;
+        const normalizedValue = value.replace(/\s+/g, " ").trim();
+        return normalizedValue === normalizedLeadName || normalizedValue.includes(normalizedLeadName);
+      }
+
+      function summaryRowsFromFormAnswers(formAnswers = {}, leadName = "") {
+        const excludedKeys = new Set(["created_from", "source"]);
+        return Object.entries(formAnswers || {})
+          .filter(([key, value]) => {
+            if (excludedKeys.has(String(key || "").trim().toLowerCase())) return false;
+            if (value == null) return false;
+            if (typeof value === "string" && !value.trim()) return false;
+            return true;
+          })
+          .map(([key, value]) => ({ label: formatFormKey(key), value: formatFormValue(value) }))
+          .filter((line) => !isDuplicateLeadNameSummaryLine(line, leadName));
+      }
+
+      function mergeSummaryRows(summaryLines = [], formAnswers = {}, leadName = "") {
+        const normalizedLabel = (value) => String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+        const normalizedSummaryRows = (summaryLines || [])
+          .filter((line) => !isDuplicateLeadNameSummaryLine(line, leadName))
+          .filter((line) => String(line?.value || "").trim() !== "");
+        const normalizedFormRows = summaryRowsFromFormAnswers(formAnswers, leadName);
+
+        if (!normalizedFormRows.length) {
+          return normalizedSummaryRows;
+        }
+
+        const seenLabels = new Set(normalizedFormRows.map((row) => normalizedLabel(row.label)));
+        const supplementalSummaryRows = normalizedSummaryRows.filter((row) => {
+          const key = normalizedLabel(row.label);
+          if (!key || seenLabels.has(key)) return false;
+          seenLabels.add(key);
+          return true;
+        });
+        return [...normalizedFormRows, ...supplementalSummaryRows];
+      }
+
+      function renderCopyableHeaderValue(displayValue, copyValue, label = "value") {
+        const visible = String(displayValue || "").trim();
+        const rawCopy = String(copyValue || "").trim();
+        if (!visible || !rawCopy) return escapeHtml(visible || "");
+        return `<button type="button" class="copy-inline" data-action="copy" data-copy="${escapeHtml(rawCopy)}">${escapeHtml(visible)}<span class="copy-inline-hint">Copy</span></button>`;
+      }
+
       function renderSummaryFacts(lines) {
         return (lines || []).map((line) => `
           <div class="summary-line">
@@ -4483,7 +4919,12 @@
         setText("threadAuditSummary", isAdmin ? "Activity" : "Technical details");
         setText("threadDetailsTitle", isAdmin ? "Lead" : "Lead details");
         setText("threadHandoffButton", isAdmin ? "Handoff" : "Need help");
-        setText("threadSendManualButton", isAdmin ? "Send" : "Send reply");
+        const threadSendButton = document.getElementById("threadSendManualButton");
+        if (threadSendButton) {
+          const sendLabel = isAdmin ? "Send message" : "Send reply";
+          threadSendButton.setAttribute("aria-label", sendLabel);
+          threadSendButton.setAttribute("title", sendLabel);
+        }
         if (!isAdmin) {
           const clientAllowedViews = new Set(["conversations", "crm", "leads", "calendar", "tasks", "settings"]);
           if (!clientAllowedViews.has(state.activeView)) {
@@ -5003,6 +5444,9 @@
 
         if (!state.crmLeadDetail) {
           setText("crmLeadTitle", "Lead details");
+          document.getElementById("crmLeadHeaderStageBadge").innerHTML = "";
+          document.getElementById("crmLeadHeaderLinePrimary").innerHTML = "";
+          setText("crmLeadHeaderLineSecondary", "");
           document.getElementById("crmLeadArchiveButton").textContent = "Archive";
           document.getElementById("crmLeadArchiveButton").disabled = true;
           document.getElementById("crmLeadEmpty").classList.remove("hidden");
@@ -5013,31 +5457,31 @@
         const payload = state.crmLeadDetail;
         const archived = leadHasTag(payload.tags || payload.lead.tags || [], "archived");
         const leadName = payload.lead.display_name || payload.lead.phone || "Lead";
-        const leadSubtitle = [payload.lead.phone || "", payload.lead.email || ""].filter(Boolean).join(" · ") || "No contact details captured yet.";
         const stage = payload.lead.crm_stage || "New Lead";
         const currentConversationState = payload.lead.conversation_state || payload.lead.current_state || "";
-        const visibleFacts = [
-          ["Phone", payload.lead.phone || "-"],
-          ["Email", payload.lead.email || "-"],
-          ["Source", formatLeadSourceLabel(payload.lead.source || "-")],
-          ["Last activity", formatLongDateTime(payload.lead.last_activity_at)],
-          !isClientRole() ? ["Owner", payload.lead.owner || "-"] : null,
-          !isClientRole() ? ["Client", payload.client?.business_name || "-"] : null,
-        ].filter(Boolean);
         setText("crmLeadTitle", leadName);
-        setText("crmLeadHeroName", leadName);
-        setText("crmLeadHeroSubtitle", leadSubtitle);
-        setText(
-          "crmLeadHeroMeta",
-          [
-            `Source: ${formatLeadSourceLabel(payload.lead.source || "-")}`,
-            `Last activity: ${formatDateTime(payload.lead.last_activity_at)}`,
-          ].join(" · ")
-        );
-        document.getElementById("crmLeadHeroPills").innerHTML = [
+        document.getElementById("crmLeadHeaderStageBadge").innerHTML = [
           renderBadge(stage, crmStageTone(stage)),
           !isClientRole() ? maybeRenderConversationState(stage, currentConversationState) : "",
         ].filter(Boolean).join("");
+        const phoneDisplay = formatPhoneNumber(payload.lead.phone);
+        const emailDisplay = String(payload.lead.email || "").trim();
+        const headerPrimaryParts = [];
+        if (phoneDisplay && phoneDisplay !== "-" && payload.lead.phone) {
+          headerPrimaryParts.push(renderCopyableHeaderValue(phoneDisplay, payload.lead.phone, "phone number"));
+        }
+        if (emailDisplay) {
+          headerPrimaryParts.push(renderCopyableHeaderValue(emailDisplay, emailDisplay, "email"));
+        }
+        const headerPrimary = headerPrimaryParts.join('<span class="lead-detail-sep">·</span>');
+        const headerSecondary = [
+          formatLeadSourceLabel(payload.lead.source || "-"),
+          formatLongDateTime(payload.lead.last_activity_at),
+          !isClientRole() && payload.lead.owner ? payload.lead.owner : "",
+          !isClientRole() && payload.client?.business_name ? payload.client.business_name : "",
+        ].filter(Boolean).join(" · ");
+        document.getElementById("crmLeadHeaderLinePrimary").innerHTML = headerPrimary || "No contact details captured yet.";
+        setText("crmLeadHeaderLineSecondary", headerSecondary || "");
         document.getElementById("crmLeadArchiveButton").textContent = archived ? "Restore to inbox" : "Archive";
         document.getElementById("crmLeadArchiveButton").disabled = false;
         document.getElementById("crmLeadEmpty").classList.add("hidden");
@@ -5057,9 +5501,7 @@
             ? "Update this only when the lead has clearly moved forward or is no longer active."
             : "Keep the pipeline stage aligned with the latest conversation."
         );
-        const leadSummaryLines = payload.lead.summary_lines || [];
-        const leadSummaryText = summarizeText(payload.lead.summary || "", leadSummaryLines.length ? 160 : 240);
-        setText("crmLeadSummary", leadSummaryText || "No summary captured yet.");
+        const leadSummaryLines = mergeSummaryRows(payload.lead.summary_lines || [], payload.lead.form_answers || {}, leadName);
         setText("crmLeadNotesTitle", isClientRole() ? "Private notes" : "Internal notes");
         document.getElementById("crmLeadNoteInput").placeholder = isClientRole() ? "Add a private note for your team." : "Add an internal note.";
         const crmSummaryList = document.getElementById("crmLeadSummaryList");
@@ -5068,7 +5510,7 @@
 
         const visibleDetailTags = (payload.tags || []).filter((tag) => !isDeprecatedUiTag(tag));
         document.getElementById("crmLeadTags").innerHTML = visibleDetailTags.length
-          ? visibleDetailTags.map((tag) => `<span class="tag ${tagTone(tag)}">${escapeHtml(formatTagLabel(tag))}${leadHasTag([tag], "archived") ? "" : ` <button class="small ghost" data-action="crm-remove-tag" data-tag="${escapeHtml(tag)}">x</button>`}</span>`).join("")
+          ? visibleDetailTags.map((tag) => `<span class="tag ${tagTone(tag)}">${escapeHtml(formatTagLabel(tag))}${leadHasTag([tag], "archived") ? "" : ` <button type="button" class="tag-remove-btn" data-action="crm-remove-tag" data-tag="${escapeHtml(tag)}" aria-label="Remove tag">&times;</button>`}</span>`).join("")
           : '<span class="meta-text">No tags yet.</span>';
 
         document.getElementById("crmLeadNotes").innerHTML = payload.notes?.length
@@ -5719,28 +6161,34 @@
       function renderThread() {
         if (!state.thread) {
           setText("threadTitle", "Thread");
-          setText("threadManualMessageLabel", isClientRole() ? "Reply to lead" : "Manual outbound message");
           document.getElementById("threadManualMessage").placeholder = isClientRole()
             ? "Send a direct reply to this lead."
             : "Type a direct outbound message to this lead.";
           setText("threadComposerHint", isClientRole() ? "Your reply sends as the business's current SMS delivery mode." : "");
-          setText("threadActionHint", isClientRole() ? "Archive keeps the record in Pipeline and removes it from the active inbox." : "");
+          const threadActionHintEl = document.getElementById("threadActionHint");
+          threadActionHintEl.textContent = "";
+          threadActionHintEl.classList.add("hidden");
           document.getElementById("threadArchiveButton").textContent = "Archive";
           document.getElementById("threadArchiveButton").disabled = true;
           document.getElementById("threadHandoffButton").disabled = true;
+          document.getElementById("threadHeaderPills").classList.add("hidden");
           document.getElementById("threadHeaderPills").innerHTML = "";
           document.getElementById("threadTimeline").innerHTML = '<div class="empty-state">Open a conversation from the left pane.</div>';
           document.getElementById("threadCrmStageSelect").value = "New Lead";
           document.getElementById("threadNoteInput").placeholder = isClientRole() ? "Add a private note for your team." : "Add an internal note.";
           setText("threadCrmStageStatus", "");
           setText("threadLeadOverviewName", "");
-          setText("threadLeadOverviewSubtitle", "");
+          document.getElementById("threadLeadOverviewSubtitle").innerHTML = "";
+          setText("threadLeadHeaderMeta", "");
+          document.getElementById("threadLeadHeaderStageBadge").innerHTML = "";
           document.getElementById("threadLeadFactGrid").innerHTML = "";
           setText("threadLeadSummary", "");
           const summaryList = document.getElementById("threadLeadSummaryList");
           summaryList.innerHTML = "";
           summaryList.classList.add("hidden");
           document.getElementById("threadTagList").innerHTML = "";
+          const emptyThreadTagInput = document.getElementById("threadTagInput");
+          if (emptyThreadTagInput) emptyThreadTagInput.value = "";
           document.getElementById("threadFormAnswers").innerHTML = "";
           document.getElementById("threadNotes").innerHTML = "";
           document.getElementById("threadAuditEvents").innerHTML = "";
@@ -5752,31 +6200,18 @@
         const payload = state.thread;
         const archived = leadHasTag(payload.lead.tags || [], "archived");
         setText("threadTitle", payload.lead.display_name || payload.lead.phone || "Thread");
-        setText("threadManualMessageLabel", isClientRole() ? "Reply to lead" : "Manual outbound message");
         document.getElementById("threadManualMessage").placeholder = isClientRole()
           ? "Send a direct reply to this lead."
           : "Type a direct outbound message to this lead.";
-        setText("threadComposerHint", isClientRole() ? `Replies use ${formatDeliveryModeLabel(state.ownerWorkspace?.delivery_mode || "mock")}.` : "");
-        setText(
-          "threadActionHint",
-          isClientRole()
-            ? (archived
-                ? "This lead is archived. Restore it to put it back in the active inbox."
-                : "Archive keeps the record in Pipeline and removes it from the active inbox. Use Need help when you want team follow-up.")
-            : ""
-        );
+        const threadActionHintEl = document.getElementById("threadActionHint");
+        threadActionHintEl.textContent = "";
+        threadActionHintEl.classList.add("hidden");
         document.getElementById("threadArchiveButton").textContent = archived ? "Restore" : "Archive";
         document.getElementById("threadArchiveButton").disabled = false;
         document.getElementById("threadHandoffButton").disabled = false;
         const threadHeaderPills = document.getElementById("threadHeaderPills");
-        threadHeaderPills.classList.toggle("hidden", isClientRole());
-        threadHeaderPills.innerHTML = isClientRole()
-          ? ""
-          : [
-              payload.lead.crm_stage ? renderBadge(payload.lead.crm_stage, "info") : "",
-              renderStatePill(payload.lead.current_state, stateTone(payload.lead.current_state)),
-              payload.lead.opted_out ? renderBadge("Opted Out", "warn") : "",
-            ].join("");
+        threadHeaderPills.classList.add("hidden");
+        threadHeaderPills.innerHTML = "";
         document.getElementById("threadTimeline").innerHTML = payload.timeline.length
           ? payload.timeline.map((item) => {
               if (item.type === "message") {
@@ -5819,43 +6254,49 @@
 
         document.getElementById("threadEmpty").classList.add("hidden");
         document.getElementById("threadDetails").classList.remove("hidden");
-        setText("threadLeadOverviewName", payload.lead.display_name || payload.lead.phone || "Lead");
+        const threadLeadName = payload.lead.display_name || payload.lead.phone || "Lead";
+        const threadLeadStage = payload.lead.crm_stage || "New Lead";
+        const threadState = payload.lead.current_state || "";
+        setText("threadLeadOverviewName", threadLeadName);
+        const threadPhoneDisplay = formatPhoneNumber(payload.lead.phone);
+        const threadEmailDisplay = String(payload.lead.email || "").trim();
+        const threadHeaderPrimaryParts = [];
+        if (threadPhoneDisplay && threadPhoneDisplay !== "-" && payload.lead.phone) {
+          threadHeaderPrimaryParts.push(renderCopyableHeaderValue(threadPhoneDisplay, payload.lead.phone, "phone number"));
+        }
+        if (threadEmailDisplay) {
+          threadHeaderPrimaryParts.push(renderCopyableHeaderValue(threadEmailDisplay, threadEmailDisplay, "email"));
+        }
+        const threadHeaderPrimary = threadHeaderPrimaryParts.join('<span class="lead-detail-sep">·</span>');
+        document.getElementById("threadLeadOverviewSubtitle").innerHTML = threadHeaderPrimary || "No lead contact details yet.";
         setText(
-          "threadLeadOverviewSubtitle",
-          [payload.lead.phone, payload.lead.email, formatLeadSourceLabel(payload.lead.source), isClientRole() ? "" : payload.client.business_name].filter(Boolean).join(" · ") || "No lead contact details yet."
+          "threadLeadHeaderMeta",
+          [
+            formatLeadSourceLabel(payload.lead.source || "-"),
+            payload.lead.last_activity_at ? formatLongDateTime(payload.lead.last_activity_at) : "",
+            !isClientRole() ? payload.client.business_name : "",
+          ].filter(Boolean).join(" · ")
         );
-        document.getElementById("threadLeadFactGrid").innerHTML = [
-          ["CRM stage", payload.lead.crm_stage || "New Lead"],
-          !isClientRole() ? ["Conversation", formatConversationStateLabel(payload.lead.current_state || "-")] : null,
-          payload.lead.city ? ["City", payload.lead.city] : null,
-          payload.lead.last_activity_at ? ["Last activity", formatDateTime(payload.lead.last_activity_at)] : null,
-        ].filter(Boolean).map(([label, value]) => `
-          <div class="lead-fact">
-            <div class="lead-fact-label">${escapeHtml(label)}</div>
-            <div class="lead-fact-value">${escapeHtml(value)}</div>
-          </div>
-        `).join("");
+        document.getElementById("threadLeadHeaderStageBadge").innerHTML = [
+          renderBadge(threadLeadStage, crmStageTone(threadLeadStage)),
+          !isClientRole() ? maybeRenderConversationState(threadLeadStage, threadState) : "",
+        ].filter(Boolean).join("");
+        document.getElementById("threadLeadFactGrid").innerHTML = "";
         document.getElementById("threadCrmStageSelect").value = payload.lead.crm_stage || "New Lead";
         document.getElementById("threadNoteInput").placeholder = isClientRole() ? "Add a private note for your team." : "Add an internal note.";
         setText("threadCrmStageStatus", "");
-        setText("threadLeadSummary", payload.lead.summary || "No qualification details captured yet.");
-        const summaryLines = payload.lead.summary_lines || [];
+        setText("threadLeadSummary", "");
+        const summaryLines = mergeSummaryRows(payload.lead.summary_lines || [], payload.lead.form_answers || {}, threadLeadName);
         const summaryList = document.getElementById("threadLeadSummaryList");
         summaryList.innerHTML = renderSummaryFacts(summaryLines);
         summaryList.classList.toggle("hidden", !summaryLines.length);
-        const formAnswers = Object.entries(payload.lead.form_answers || {});
-        document.getElementById("threadFormAnswers").innerHTML = formAnswers.length
-          ? formAnswers.map(([k, v]) => `
-              <div class="form-answer-item">
-                <div class="form-answer-label">${escapeHtml(formatFormKey(k))}</div>
-                <div class="form-answer-value">${escapeHtml(formatFormValue(v))}</div>
-              </div>
-            `).join("")
-          : '<div class="meta-text">No captured form answers.</div>';
+        document.getElementById("threadFormAnswers").innerHTML = "";
         const visibleThreadTags = (payload.lead.tags || []).filter((tag) => !isDeprecatedUiTag(tag));
         document.getElementById("threadTagList").innerHTML = visibleThreadTags.length
-          ? visibleThreadTags.map((tag) => renderTag(tag)).join("")
+          ? visibleThreadTags.map((tag) => `<span class="tag ${tagTone(tag)}">${escapeHtml(formatTagLabel(tag))}${leadHasTag([tag], "archived") ? "" : ` <button type="button" class="tag-remove-btn" data-action="crm-remove-tag" data-tag="${escapeHtml(tag)}" aria-label="Remove tag">&times;</button>`}</span>`).join("")
           : '<span class="meta-text">No tags</span>';
+        const threadTagInput = document.getElementById("threadTagInput");
+        if (threadTagInput) threadTagInput.value = "";
         document.getElementById("threadNotes").innerHTML = payload.notes.length
           ? payload.notes.map((note) => `<div class="note-item"><div class="item-title-row"><div class="item-title mono">${escapeHtml(note.actor || "note")}</div><div class="meta-text">${escapeHtml(formatDateTime(note.created_at))}</div></div><div class="item-snippet">${escapeHtml(note.body)}</div></div>`).join("")
           : `<div class="empty-state">${isClientRole() ? "No private notes." : "No internal notes."}</div>`;
@@ -5988,7 +6429,7 @@
             ? "Uses the selected business's current AI, SMS provider, and a business-matched Peter Lead profile so you can demo the live conversation flow quickly."
             : "Uses your current AI assistant, SMS provider, and business profile so you can preview the real conversation experience."
         );
-        setText("settingsStartPeterLeadTest", isAdmin ? "Send test lead to my phone" : "Send me a test lead");
+        setText("settingsStartPeterLeadTest", "Send test lead");
         document.getElementById("settingsAiContextInput").placeholder = isAdmin
           ? "Example:\n- We help local service businesses run paid ads and AI follow-up.\n- Prioritize qualified booked calls over raw lead count.\n- Never guarantee exact lead numbers.\n- Ask one focused question at a time.\n- Tone: concise, direct, practical."
           : "Example:\n- Sound warm, confident, and practical.\n- Qualify for budget, timeline, and service area before offering times.\n- Never promise exact results or fixed pricing over text.\n- Escalate to a human if a lead asks for custom pricing or sounds upset.";
@@ -6366,26 +6807,30 @@
         }
       }
 
-      async function addCrmTag() {
-        if (!state.activeCrmLeadId) return;
-        const tag = document.getElementById("crmTagInput").value.trim();
+      async function addCrmTag(source = "") {
+        const leadId = Number(state.activeCrmLeadId || state.activeLeadId || 0) || 0;
+        if (!leadId) return;
+        const crmTagInput = document.getElementById("crmTagInput");
+        const threadTagInput = document.getElementById("threadTagInput");
+        const selectedInput = source === "thread" ? threadTagInput : source === "crm" ? crmTagInput : (crmTagInput?.value ? crmTagInput : threadTagInput);
+        const tag = (selectedInput?.value || "").trim();
         if (!tag) {
           setText("crmLeadStatus", "Tag is required.");
           return;
         }
         try {
-          await apiJson(`/ui/api/crm/leads/${state.activeCrmLeadId}/tags`, {
+          await apiJson(`/ui/api/crm/leads/${leadId}/tags`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tag }),
           });
-          document.getElementById("crmTagInput").value = "";
+          if (selectedInput) selectedInput.value = "";
           await Promise.all([
             loadCrmLeads(),
             loadConversations(),
-            loadCrmLeadDetail(state.activeCrmLeadId),
+            state.activeCrmLeadId ? loadCrmLeadDetail(state.activeCrmLeadId) : Promise.resolve(),
           ]);
-          if (state.activeLeadId === state.activeCrmLeadId) {
+          if (state.activeLeadId) {
             await openThread(state.activeLeadId);
           }
           showNotice("Tag added.", "ok");
@@ -6396,17 +6841,18 @@
       }
 
       async function removeCrmTag(tag) {
-        if (!state.activeCrmLeadId) return;
+        const leadId = Number(state.activeCrmLeadId || state.activeLeadId || 0) || 0;
+        if (!leadId) return;
         try {
-          await apiJson(`/ui/api/crm/leads/${state.activeCrmLeadId}/tags/${encodeURIComponent(tag)}`, {
+          await apiJson(`/ui/api/crm/leads/${leadId}/tags/${encodeURIComponent(tag)}`, {
             method: "DELETE",
           });
           await Promise.all([
             loadCrmLeads(),
             loadConversations(),
-            loadCrmLeadDetail(state.activeCrmLeadId),
+            state.activeCrmLeadId ? loadCrmLeadDetail(state.activeCrmLeadId) : Promise.resolve(),
           ]);
-          if (state.activeLeadId === state.activeCrmLeadId) {
+          if (state.activeLeadId) {
             await openThread(state.activeLeadId);
           }
           showNotice("Tag removed.", "ok");
@@ -7089,6 +7535,7 @@
         });
         document.getElementById("threadDeleteButton").addEventListener("click", deleteConversation);
         document.getElementById("threadCrmStageSaveButton").addEventListener("click", updateThreadCrmStage);
+        document.getElementById("threadTagAddButton").addEventListener("click", () => addCrmTag("thread"));
         ["crmClientFilter", "crmStageFilter"].forEach((id) => {
           document.getElementById(id).addEventListener("change", async () => {
             applyCrmFilterInputs();
@@ -7107,7 +7554,7 @@
           const archived = leadHasTag(state.crmLeadDetail?.tags || state.crmLeadDetail?.lead?.tags || [], "archived");
           return setConversationArchived(state.activeCrmLeadId, !archived);
         });
-        document.getElementById("crmTagAddButton").addEventListener("click", addCrmTag);
+        document.getElementById("crmTagAddButton").addEventListener("click", () => addCrmTag("crm"));
         document.getElementById("crmLeadNoteAddButton").addEventListener("click", addCrmNote);
         document.getElementById("crmTaskCreateButton").addEventListener("click", createCrmTask);
         document.getElementById("saveRuntimeButton").addEventListener("click", saveRuntimeSettings);
