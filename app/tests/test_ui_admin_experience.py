@@ -51,6 +51,37 @@ def test_dashboard_omits_stringified_none_for_ai_error(test_context):
     assert all(value != "None" for value in runtime.values() if isinstance(value, str))
 
 
+def test_dashboard_returns_breakdowns_for_admin_and_client_scope(test_context):
+    seed = test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
+    assert seed.status_code == 200
+
+    admin_dashboard = test_context.client.get("/ui/api/dashboard", headers=_admin_headers())
+    assert admin_dashboard.status_code == 200
+    admin_payload = admin_dashboard.json()
+    assert admin_payload["scope"]["role"] == "admin"
+    assert admin_payload["source_breakdown"]
+    assert admin_payload["stage_breakdown"]
+    assert len(admin_payload["lead_trend"]) == 6
+    assert "new_last_24_hours" in admin_payload["stats"]
+    assert isinstance(admin_payload["recent_leads"], list)
+
+    login = test_context.client.post(
+        "/ui/api/login/client",
+        json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
+    )
+    assert login.status_code == 200
+    token = login.json()["token"]
+
+    client_dashboard = test_context.client.get("/ui/api/dashboard", headers=_portal_headers(token))
+    assert client_dashboard.status_code == 200
+    client_payload = client_dashboard.json()
+    assert client_payload["scope"]["role"] == "client"
+    assert client_payload["scope"]["client_key"] == "demo-roofing"
+    assert client_payload["stats"]["clients_total"] == 1
+    assert isinstance(client_payload["recent_leads"], list)
+    assert all(item["client_name"] in {"", "Northwind Roofing Co."} for item in client_payload["upcoming"]["meetings"])
+
+
 def test_demo_seed_populates_inbox_and_client_detail(test_context):
     seed = test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
     assert seed.status_code == 200

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1004,6 +1004,109 @@ def _owner_workspace_payload(db: Session, settings: Settings, client: Client) ->
     }
 
 
+def _dashboard_breakdown_rows(
+    counter: Counter[str],
+    *,
+    ordered_keys: list[str] | tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    total = sum(counter.values())
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for key in ordered_keys or []:
+        count = counter.get(key, 0)
+        if count <= 0:
+            continue
+        rows.append({"key": key, "count": count, "share": (count / total) if total else 0})
+        seen.add(key)
+
+    for key, count in counter.most_common():
+        if key in seen or count <= 0:
+            continue
+        rows.append({"key": key, "count": count, "share": (count / total) if total else 0})
+
+    return rows
+
+
+def _dashboard_open_tasks(
+    db: Session,
+    actor: UIActor,
+    *,
+    limit: int = 5,
+) -> tuple[list[LeadTask], list[dict[str, Any]]]:
+    stmt = (
+        select(LeadTask)
+        .join(Lead, LeadTask.lead_id == Lead.id)
+        .join(Client, LeadTask.client_id == Client.id)
+        .options(selectinload(LeadTask.lead).selectinload(Lead.client))
+        .where(LeadTask.status == TASK_STATUS_OPEN)
+    )
+    if actor.role == "client" and actor.client:
+        stmt = stmt.where(LeadTask.client_id == actor.client.id)
+
+    tasks = db.scalars(stmt).unique().all()
+    tasks.sort(key=lambda task: (task.due_date is None, task.due_date or date.max, task.created_at))
+
+    items: list[dict[str, Any]] = []
+    for task in tasks[:limit]:
+        lead = task.lead
+        item = _serialize_task(task)
+        item.update(
+            {
+                "lead_name": _lead_display_name(lead) if lead else "",
+                "lead_phone": lead.phone if lead else "",
+                "client_name": lead.client.business_name if lead and lead.client else "",
+                "crm_stage": normalize_crm_stage(lead.crm_stage) if lead else "",
+            }
+        )
+        items.append(item)
+    return tasks, items
+
+
+def _dashboard_upcoming_meetings(
+    db: Session,
+    actor: UIActor,
+    *,
+    now: datetime,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    stmt = (
+        select(CalendarBooking, Lead, Client)
+        .join(Client, CalendarBooking.client_id == Client.id)
+        .outerjoin(Lead, Lead.id == CalendarBooking.lead_id)
+        .where(CalendarBooking.status == "scheduled", CalendarBooking.end_at >= now)
+        .order_by(CalendarBooking.start_at.asc(), CalendarBooking.id.asc())
+    )
+    if actor.role == "client" and actor.client:
+        stmt = stmt.where(CalendarBooking.client_id == actor.client.id)
+
+    rows = db.execute(stmt).all()
+    items = [
+        {
+            "id": booking.id,
+            "lead_id": booking.lead_id,
+            "lead_name": _lead_display_name(lead) if lead else "",
+            "phone": lead.phone if lead else "",
+            "email": lead.email if lead else "",
+            "client_name": client.business_name if client else "",
+            "start_at": booking.start_at.isoformat(),
+            "end_at": booking.end_at.isoformat(),
+            "timezone": booking.timezone,
+            "title": booking.title,
+            "provider": booking.provider,
+            "source": booking.source,
+        }
+        for booking, lead, client in rows
+    ]
+    return items, items[:limit]
+
+
+def _as_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 @router.get("/ui/api/session")
 def ui_session(
     db: Session = Depends(get_db),
@@ -1060,74 +1163,223 @@ def ui_dashboard(
     portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
 ) -> dict[str, Any]:
     actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
-    _require_admin_actor(actor)
-    runtime = _runtime_summary(settings, db)
-    clients = db.scalars(select(Client).order_by(Client.business_name.asc())).all()
-    leads = db.scalars(select(Lead).options(selectinload(Lead.client))).all()
+    scoped_client = actor.client if actor.role == "client" else None
+    runtime = _runtime_summary(settings, db, client=scoped_client)
+    clients = [scoped_client] if scoped_client else db.scalars(select(Client).order_by(Client.business_name.asc())).all()
+
+    leads_stmt = select(Lead).options(selectinload(Lead.client))
+    if scoped_client is not None:
+        leads_stmt = leads_stmt.where(Lead.client_id == scoped_client.id)
+    leads = db.scalars(leads_stmt.order_by(desc(Lead.updated_at), desc(Lead.created_at))).unique().all()
     recent_conversations = _build_conversation_items(db, leads, limit=8)
-    last_webhook = db.scalar(
-        select(AuditLog)
-        .where(AuditLog.event_type.in_(_WEBHOOK_EVENT_TYPES))
-        .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
-        .limit(1)
-    )
-    last_inbound = db.scalar(
-        select(Message)
-        .where(Message.direction == MessageDirection.INBOUND)
-        .order_by(desc(Message.created_at), desc(Message.id))
-        .limit(1)
-    )
-    last_outbound = db.scalar(
-        select(Message)
-        .where(Message.direction == MessageDirection.OUTBOUND)
-        .order_by(desc(Message.created_at), desc(Message.id))
-        .limit(1)
-    )
-    last_ai_decision = db.scalar(
-        select(AuditLog)
-        .where(AuditLog.event_type.in_(["agent_decision", "admin_test_ai_decision"]))
-        .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
-        .limit(1)
-    )
-    onboarding = [
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    seven_days_ago = today - timedelta(days=6)
+    thirty_days_ago = today - timedelta(days=29)
+    one_day_ago = now - timedelta(days=1)
+    scoped_client_ids = [client.id for client in clients if client is not None]
+
+    last_webhook_query = select(AuditLog).where(AuditLog.event_type.in_(_WEBHOOK_EVENT_TYPES))
+    last_inbound_query = select(Message).where(Message.direction == MessageDirection.INBOUND)
+    last_outbound_query = select(Message).where(Message.direction == MessageDirection.OUTBOUND)
+    last_ai_decision_query = select(AuditLog).where(AuditLog.event_type.in_(["agent_decision", "admin_test_ai_decision"]))
+    if scoped_client_ids:
+        last_webhook_query = last_webhook_query.where(AuditLog.client_id.in_(scoped_client_ids))
+        last_inbound_query = last_inbound_query.where(Message.client_id.in_(scoped_client_ids))
+        last_outbound_query = last_outbound_query.where(Message.client_id.in_(scoped_client_ids))
+        last_ai_decision_query = last_ai_decision_query.where(AuditLog.client_id.in_(scoped_client_ids))
+
+    last_webhook = db.scalar(last_webhook_query.order_by(desc(AuditLog.created_at), desc(AuditLog.id)).limit(1))
+    last_inbound = db.scalar(last_inbound_query.order_by(desc(Message.created_at), desc(Message.id)).limit(1))
+    last_outbound = db.scalar(last_outbound_query.order_by(desc(Message.created_at), desc(Message.id)).limit(1))
+    last_ai_decision = db.scalar(last_ai_decision_query.order_by(desc(AuditLog.created_at), desc(AuditLog.id)).limit(1))
+
+    if actor.role == "client" and scoped_client is not None:
+        onboarding = [
+            {
+                "label": "SMS delivery ready",
+                "done": runtime["twilio_configured"],
+                "detail": runtime["twilio_from_number"] or "Add Twilio credentials to send live SMS replies.",
+            },
+            {
+                "label": "AI assistant ready",
+                "done": runtime["ai_configured"],
+                "detail": runtime["openai_model"] if runtime["ai_configured"] else "OpenAI key missing; AI replies are unavailable.",
+            },
+            {
+                "label": "Booking availability ready",
+                "done": automated_booking_enabled(scoped_client),
+                "detail": _booking_ready_detail(scoped_client),
+            },
+            {
+                "label": "Lead intake active",
+                "done": bool(leads) or last_webhook is not None,
+                "detail": last_webhook.created_at.isoformat() if last_webhook else "No webhook traffic recorded yet.",
+            },
+        ]
+    else:
+        onboarding = [
+            {
+                "label": "Configure Twilio",
+                "done": runtime["twilio_configured"],
+                "detail": runtime["twilio_from_number"] or "Required for real SMS sends.",
+            },
+            {
+                "label": "Configure AI",
+                "done": runtime["ai_configured"],
+                "detail": runtime["openai_model"] if runtime["ai_configured"] else "OpenAI key missing; AI replies are unavailable.",
+            },
+            {
+                "label": "Create or seed clients",
+                "done": bool(clients),
+                "detail": f"{len(clients)} client(s) available.",
+            },
+            {
+                "label": "Seed demo data",
+                "done": demo_data_present(db),
+                "detail": "Available in dev for populated onboarding." if can_seed_demo(settings) else "Disabled outside dev unless feature flag is enabled.",
+            },
+            {
+                "label": "Receive a real webhook",
+                "done": last_webhook is not None,
+                "detail": last_webhook.created_at.isoformat() if last_webhook else "No webhook traffic recorded yet.",
+            },
+        ]
+
+    latest_messages = _latest_messages_by_lead(db, [lead.id for lead in leads])
+    recent_leads = [
         {
-            "label": "Configure Twilio",
-            "done": runtime["twilio_configured"],
-            "detail": runtime["twilio_from_number"] or "Required for real SMS sends.",
-        },
-        {
-            "label": "Configure AI",
-            "done": runtime["ai_configured"],
-            "detail": runtime["openai_model"] if runtime["ai_configured"] else "OpenAI key missing; AI replies are unavailable.",
-        },
-        {
-            "label": "Create or seed clients",
-            "done": bool(clients),
-            "detail": f"{len(clients)} client(s) available.",
-        },
-        {
-            "label": "Seed demo data",
-            "done": demo_data_present(db),
-            "detail": "Available in dev for populated onboarding." if can_seed_demo(settings) else "Disabled outside dev unless feature flag is enabled.",
-        },
-        {
-            "label": "Receive a real webhook",
-            "done": last_webhook is not None,
-            "detail": last_webhook.created_at.isoformat() if last_webhook else "No webhook traffic recorded yet.",
-        },
+            "lead_id": lead.id,
+            "lead_name": _lead_display_name(lead),
+            "phone": lead.phone,
+            "email": lead.email,
+            "source": lead.source.value,
+            "client_key": lead.client.client_key if lead.client else "",
+            "client_name": lead.client.business_name if lead.client else "",
+            "crm_stage": normalize_crm_stage(lead.crm_stage),
+            "conversation_state": lead.conversation_state.value,
+            "created_at": lead.created_at.isoformat(),
+            "last_message_snippet": _snippet(latest_messages.get(lead.id).body if latest_messages.get(lead.id) else "No messages yet."),
+        }
+        for lead in sorted(leads, key=lambda item: (item.created_at, item.id), reverse=True)[:8]
     ]
+    source_counts = Counter(lead.source.value for lead in leads)
+    stage_counts = Counter(normalize_crm_stage(lead.crm_stage) for lead in leads)
+    open_tasks, upcoming_tasks = _dashboard_open_tasks(db, actor, limit=5)
+    upcoming_meetings_all, upcoming_meetings = _dashboard_upcoming_meetings(db, actor, now=now, limit=5)
+
+    lead_trend: list[dict[str, Any]] = []
+    current_week_start = today - timedelta(days=today.weekday())
+    for offset in range(5, -1, -1):
+        week_start = current_week_start - timedelta(days=offset * 7)
+        week_end = week_start + timedelta(days=6)
+        lead_trend.append(
+            {
+                "week_start": week_start.isoformat(),
+                "week_end": week_end.isoformat(),
+                "count": sum(1 for lead in leads if week_start <= lead.created_at.date() <= week_end),
+            }
+        )
+
+    top_clients: list[dict[str, Any]] = []
+    if actor.role == "admin":
+        leads_by_client: dict[int, list[Lead]] = defaultdict(list)
+        for lead in leads:
+            leads_by_client[lead.client_id].append(lead)
+        for client in clients:
+            client_leads = leads_by_client.get(client.id, [])
+            last_activity = max(
+                (_last_activity_at(lead, latest_messages.get(lead.id)) for lead in client_leads),
+                default=client.updated_at,
+            )
+            top_clients.append(
+                {
+                    "client_key": client.client_key,
+                    "business_name": client.business_name,
+                    "lead_count": len(client_leads),
+                    "open_conversations": sum(
+                        1 for lead in client_leads if lead.conversation_state not in _CLOSED_STATES
+                    ),
+                    "booked_total": sum(
+                        1 for lead in client_leads if lead.conversation_state == ConversationStateEnum.BOOKED
+                    ),
+                    "last_activity_at": last_activity.isoformat() if last_activity else None,
+                    "is_active": client.is_active,
+                }
+            )
+        top_clients.sort(
+            key=lambda item: (
+                item["lead_count"],
+                item["open_conversations"],
+                item["last_activity_at"] or "",
+            ),
+            reverse=True,
+        )
+        top_clients = top_clients[:5]
+
     attention_count = sum(1 for lead in leads if lead.conversation_state not in _CLOSED_STATES)
+    conversations_total = len(leads)
+    booked_total = sum(1 for lead in leads if lead.conversation_state == ConversationStateEnum.BOOKED)
+    won_total = sum(1 for lead in leads if normalize_crm_stage(lead.crm_stage) == "Won")
+    overdue_tasks = sum(1 for task in open_tasks if task.due_date and task.due_date < today)
+    due_today_tasks = sum(1 for task in open_tasks if task.due_date == today)
+    upcoming_meetings_7d = sum(
+        1
+        for item in upcoming_meetings_all
+        if today <= datetime.fromisoformat(item["start_at"]).date() <= (today + timedelta(days=7))
+    )
     return {
+        "scope": {
+            "role": actor.role,
+            "client_key": scoped_client.client_key if scoped_client else None,
+            "client_name": scoped_client.business_name if scoped_client else None,
+            "title": scoped_client.business_name if scoped_client else "Lead portfolio",
+        },
         "runtime": runtime,
         "stats": {
             "clients_total": len(clients),
             "active_clients": sum(1 for client in clients if client.is_active),
-            "conversations_total": len(leads),
+            "conversations_total": conversations_total,
+            "total_leads": conversations_total,
             "attention_needed": attention_count,
-            "booked_total": sum(1 for lead in leads if lead.conversation_state == ConversationStateEnum.BOOKED),
+            "booked_total": booked_total,
             "handoff_total": sum(1 for lead in leads if lead.conversation_state == ConversationStateEnum.HANDOFF),
+            "won_total": won_total,
+            "new_last_24_hours": sum(1 for lead in leads if _as_utc_datetime(lead.created_at) >= one_day_ago),
+            "new_last_7_days": sum(1 for lead in leads if lead.created_at.date() >= seven_days_ago),
+            "new_last_30_days": sum(1 for lead in leads if lead.created_at.date() >= thirty_days_ago),
+            "open_pipeline_total": sum(
+                1
+                for lead in leads
+                if normalize_crm_stage(lead.crm_stage) not in {"Won", "Lost"}
+                and lead.conversation_state != ConversationStateEnum.OPTED_OUT
+            ),
+            "open_tasks_total": len(open_tasks),
+            "overdue_tasks_total": overdue_tasks,
+            "due_today_tasks": due_today_tasks,
+            "upcoming_meetings_total": len(upcoming_meetings_all),
+            "upcoming_meetings_7d": upcoming_meetings_7d,
+            "booked_rate": (booked_total / conversations_total) if conversations_total else 0,
+            "won_rate": (won_total / conversations_total) if conversations_total else 0,
         },
+        "lead_trend": lead_trend,
+        "source_breakdown": _dashboard_breakdown_rows(
+            source_counts,
+            ordered_keys=[
+                LeadSource.META.value,
+                LeadSource.LINKEDIN.value,
+                LeadSource.SMS.value,
+                LeadSource.MANUAL.value,
+            ],
+        ),
+        "stage_breakdown": _dashboard_breakdown_rows(stage_counts, ordered_keys=CRM_STAGES),
         "onboarding": onboarding,
+        "top_clients": top_clients,
+        "upcoming": {
+            "tasks": upcoming_tasks,
+            "meetings": upcoming_meetings,
+        },
+        "recent_leads": recent_leads,
         "recent_conversations": recent_conversations,
         "latest_activity": {
             "last_webhook_received_at": last_webhook.created_at.isoformat() if last_webhook else None,
