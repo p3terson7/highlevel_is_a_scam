@@ -75,15 +75,17 @@ def test_meta_webhook_fetches_leadgen_details_and_sends_ai_initial_sms(test_cont
     monkeypatch.setattr("app.services.lead_intake.httpx.get", fake_meta_get)
 
     headers = {"X-Admin-Token": "test-admin-token"}
-    runtime_update = test_context.client.put(
-        "/admin/runtime-config",
+    client_update = test_context.client.patch(
+        f"/admin/clients/{test_context.client_key}",
         headers=headers,
         json={
-            "meta_access_token": "meta-token-for-tests",
-            "meta_graph_api_version": "v22.0",
+            "provider_config": {
+                "meta_access_token": "meta-token-for-tests",
+                "meta_graph_api_version": "v22.0",
+            }
         },
     )
-    assert runtime_update.status_code == 200
+    assert client_update.status_code == 200
 
     payload = {
         "entry": [
@@ -168,6 +170,32 @@ def test_zapier_webhook_accepts_flat_payload_and_processes_meta_flow(test_contex
             )
         ).all()
         assert len(outbound_messages) >= 1
+
+
+def test_zapier_webhook_uses_client_scoped_secret_when_configured(test_context):
+    headers = {"X-Admin-Token": "test-admin-token"}
+    patch = test_context.client.patch(
+        f"/admin/clients/{test_context.client_key}",
+        headers=headers,
+        json={"provider_config": {"zapier_webhook_secret": "zapier-secret-123"}},
+    )
+    assert patch.status_code == 200
+
+    payload = {
+        "id": "zap-secret-lead-001",
+        "full_name": "Secret Zap Prospect",
+        "phone_number": "+1 (555) 888-1313",
+    }
+
+    rejected = test_context.client.post(f"/webhooks/zapier/{test_context.client_key}", json=payload)
+    assert rejected.status_code == 403
+
+    accepted = test_context.client.post(
+        f"/webhooks/zapier/{test_context.client_key}",
+        headers={"X-Zapier-Webhook-Secret": "zapier-secret-123"},
+        json=payload,
+    )
+    assert accepted.status_code == 202
 
 
 def test_zapier_webhook_parses_blob_payload_into_context_fields(test_context):

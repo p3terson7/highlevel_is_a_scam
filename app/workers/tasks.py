@@ -327,6 +327,17 @@ def send_initial_sms_task(lead_id: int) -> dict[str, Any]:
                 qualification_memory["pending_step"] = pending_step
             else:
                 qualification_memory.pop("pending_step", None)
+            for key in (
+                "cta_state",
+                "intent_level",
+                "intent_score",
+                "intent_reasons",
+                "important_missing_fields",
+                "lead_summary",
+                "recommended_follow_up",
+            ):
+                if key in (ai_response.runtime_payload or {}):
+                    qualification_memory[key] = ai_response.runtime_payload[key]
             lead.raw_payload = qualification_memory
             outbound_payload = {
                 "reason": reason,
@@ -338,6 +349,10 @@ def send_initial_sms_task(lead_id: int) -> dict[str, Any]:
                     "collected_fields": ai_response.collected_fields.model_dump(exclude_none=True),
                     "provider": ai_response.provider,
                     "provider_error": ai_response.provider_error,
+                    "intent_level": (ai_response.runtime_payload or {}).get("intent_level"),
+                    "intent_score": (ai_response.runtime_payload or {}).get("intent_score"),
+                    "cta_state": (ai_response.runtime_payload or {}).get("cta_state"),
+                    "lead_summary": (ai_response.runtime_payload or {}).get("lead_summary"),
                 },
                 "actions": [action.model_dump() for action in ai_response.actions],
                 "seed_context": ai_seed,

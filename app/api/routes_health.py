@@ -26,11 +26,11 @@ from app.db.session import get_db
 from app.services.llm_agent import build_llm_agent
 from app.services.portal_auth import hash_portal_password
 from app.services.runtime_config import (
-    RUNTIME_KEYS,
-    SECRET_KEYS,
+    GLOBAL_SECRET_KEYS,
     get_effective_runtime_map,
     get_effective_runtime_map_for_client,
     load_runtime_overrides,
+    normalize_client_provider_config,
     upsert_runtime_values,
 )
 from app.services.sms_service import build_sms_service
@@ -170,37 +170,16 @@ class AdminMessageOut(BaseModel):
 
 
 class RuntimeConfigUpdateRequest(BaseModel):
-    twilio_account_sid: str | None = None
-    twilio_auth_token: str | None = None
-    twilio_from_number: str | None = None
-    public_base_url: str | None = None
     openai_api_key: str | None = None
     openai_model: str | None = None
     ai_provider_mode: str | None = None
-    meta_verify_token: str | None = None
-    meta_access_token: str | None = None
-    meta_graph_api_version: str | None = None
-    linkedin_verify_token: str | None = None
 
 
 class RuntimeConfigStatusOut(BaseModel):
-    twilio_account_sid_configured: bool
-    twilio_auth_token_configured: bool
-    twilio_account_sid: str
-    twilio_auth_token: str
-    twilio_from_number: str
-    public_base_url: str
     openai_api_key_configured: bool
     openai_api_key: str
     openai_model: str
     ai_provider_mode: str
-    meta_verify_token_configured: bool
-    meta_verify_token: str
-    meta_access_token_configured: bool
-    meta_access_token: str
-    meta_graph_api_version: str
-    linkedin_verify_token_configured: bool
-    linkedin_verify_token: str
 
 
 class RuntimeConfigUpdateResponse(BaseModel):
@@ -257,17 +236,14 @@ def _effective_runtime_config(settings: Settings, db: Session) -> dict[str, str]
 
 
 def _normalize_provider_config(raw: dict[str, Any] | None) -> dict[str, str]:
-    if not isinstance(raw, dict):
-        return {}
-    output: dict[str, str] = {}
-    for key in RUNTIME_KEYS:
-        value = raw.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            output[key] = text
-    return output
+    return normalize_client_provider_config(raw)
+
+
+def _drop_client_disallowed_provider_keys(provider_config: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(provider_config or {})
+    for key in ("openai_api_key", "openai_model", "ai_provider_mode"):
+        cleaned.pop(key, None)
+    return cleaned
 
 
 @router.get("/health")
@@ -409,7 +385,7 @@ def update_client(
     portal_password = changes.pop("portal_password", None)
     for key, value in changes.items():
         if key == "provider_config":
-            merged = dict(client.provider_config or {})
+            merged = _drop_client_disallowed_provider_keys(dict(client.provider_config or {}))
             merged.update(_normalize_provider_config(value))
             value = merged
         if key == "portal_email" and value is not None:
@@ -535,23 +511,10 @@ def runtime_config_status(
     _require_admin(settings, admin_token)
     effective = _effective_runtime_config(settings, db)
     return RuntimeConfigStatusOut(
-        twilio_account_sid_configured=bool(effective["twilio_account_sid"]),
-        twilio_auth_token_configured=bool(effective["twilio_auth_token"]),
-        twilio_account_sid=effective["twilio_account_sid"],
-        twilio_auth_token=effective["twilio_auth_token"],
-        twilio_from_number=effective["twilio_from_number"],
-        public_base_url=effective["public_base_url"],
         openai_api_key_configured=bool(effective["openai_api_key"]),
         openai_api_key=effective["openai_api_key"],
         openai_model=effective["openai_model"],
         ai_provider_mode=effective["ai_provider_mode"],
-        meta_verify_token_configured=bool(effective["meta_verify_token"]),
-        meta_verify_token=effective["meta_verify_token"],
-        meta_access_token_configured=bool(effective["meta_access_token"]),
-        meta_access_token=effective["meta_access_token"],
-        meta_graph_api_version=effective["meta_graph_api_version"],
-        linkedin_verify_token_configured=bool(effective["linkedin_verify_token"]),
-        linkedin_verify_token=effective["linkedin_verify_token"],
     )
 
 
@@ -569,7 +532,7 @@ def update_runtime_config(
     clear_dependency_caches()
 
     updated_keys = sorted(updates.keys())
-    secret_keys_updated = sorted([key for key in updates.keys() if key in SECRET_KEYS])
+    secret_keys_updated = sorted([key for key in updates.keys() if key in GLOBAL_SECRET_KEYS])
     return RuntimeConfigUpdateResponse(updated_keys=updated_keys, secret_keys_updated=secret_keys_updated)
 
 

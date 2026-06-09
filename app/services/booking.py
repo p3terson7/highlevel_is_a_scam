@@ -353,11 +353,13 @@ class BookingService:
 
         mode = booking_mode_label(client)
         provider = "calendly"
+        expanded_limit = max(limit * 12, 96)
         if mode in _INTERNAL_MODE_ALIASES:
             provider = _INTERNAL_PROVIDER
-            slots = self._list_internal_slots(client=client, limit=limit, db=db)
+            slots = self._list_internal_slots(client=client, limit=expanded_limit, db=db)
         else:
-            slots = self._list_calendly_slots(client=client, limit=limit)
+            slots = self._list_calendly_slots(client=client, limit=expanded_limit)
+        all_available_slots = list(slots)
         if not slots:
             fallback = "I am not seeing open times right now. Share a day and time window and I can check alternatives."
             return SlotOffer(
@@ -366,12 +368,28 @@ class BookingService:
                 raw_payload={"booking_offer": {"provider": provider, "slots": []}},
             )
 
+        slots = _spread_first_offer_slots(
+            slots=slots,
+            limit=max(1, min(limit, len(slots))),
+            timezone_name=client.timezone or "UTC",
+        )
+        slots = _reindex_slots(slots)
+        coverage_summary = _availability_coverage_summary(
+            slots=all_available_slots,
+            timezone_name=client.timezone or "UTC",
+            day_limit=3,
+        )
         timezone_label = self._timezone_abbreviation(client.timezone)
-        lines = [
-            "I can book this directly. Here are the next available times:",
-            *[f"{slot.index}) {slot.display_time}" for slot in slots],
-            f"Reply with 1, 2, or 3, or send the exact time you want. Times shown in {timezone_label}.",
-        ]
+        lines = ["I can book a call directly."]
+        if coverage_summary:
+            lines.append(f"I have call openings including {coverage_summary}.")
+        lines.extend(
+            [
+                "Here are a few call times to lock in now:",
+                *[f"{slot.index}) {slot.display_time}" for slot in slots],
+                f"{_slot_selection_prompt(slots)} Times shown in {timezone_label}.",
+            ]
+        )
         raw_payload = {
             "booking_offer": {
                 "provider": provider,
@@ -402,13 +420,14 @@ class BookingService:
         mode = booking_mode_label(client)
         provider = _INTERNAL_PROVIDER if mode in _INTERNAL_MODE_ALIASES else "calendly"
         specific_request = bool(preferred_day or avoid_day or preferred_period or exact_time or range_start or range_end)
-        expanded_limit = max(limit * 4, 12)
+        expanded_limit = max(limit * 12, 96)
         if specific_request:
             expanded_limit = max(expanded_limit, 96)
         if provider == _INTERNAL_PROVIDER:
             slots = self._list_internal_slots(client=client, limit=expanded_limit, db=db)
         else:
             slots = self._list_calendly_slots(client=client, limit=expanded_limit)
+        all_available_slots = list(slots)
 
         filtered = _filter_slots(
             slots=slots,
@@ -440,7 +459,11 @@ class BookingService:
                 slots = slots[: max(1, min(limit, len(slots)))]
                 match_mode = "closest_alternative"
         else:
-            slots = slots[: max(1, min(limit, len(slots)))]
+            slots = _spread_first_offer_slots(
+                slots=slots,
+                limit=max(1, min(limit, len(slots))),
+                timezone_name=client.timezone or "UTC",
+            )
             match_mode = "exact"
 
         if not slots:
@@ -464,15 +487,24 @@ class BookingService:
                 },
             )
 
+        slots = _reindex_slots(slots)
         timezone_label = self._timezone_abbreviation(client.timezone)
-        intro = "I found a few times that should work:"
-        if preferred_day:
-            intro = f"I found a few {preferred_day.strip().title()} options:"
+        intro = "I found a few call times that should work:"
+        if not specific_request:
+            coverage_summary = _availability_coverage_summary(
+                slots=all_available_slots,
+                timezone_name=client.timezone or "UTC",
+                day_limit=3,
+            )
+            if coverage_summary:
+                intro = f"I have call openings including {coverage_summary}."
+        elif preferred_day:
+            intro = f"I found a few {preferred_day.strip().title()} call options:"
             if not matched_preference:
                 if match_mode == "same_day_alternative":
-                    intro = f"I found {preferred_day.strip().title()} openings, but not in that exact window. Here are the closest {preferred_day.strip().title()} times:"
+                    intro = f"I found {preferred_day.strip().title()} call openings, but not in that exact window. Here are the closest {preferred_day.strip().title()} times:"
                 else:
-                    intro = f"I’m not seeing {preferred_day.strip().title()} openings that match that request, but here are the next closest times:"
+                    intro = f"I’m not seeing {preferred_day.strip().title()} call openings that match that request, but here are the next closest times:"
         elif avoid_day and not matched_preference:
             intro = f"I skipped {avoid_day.strip().title()} and found the next closest times:"
         elif (preferred_period or range_start or range_end) and not matched_preference:
@@ -482,7 +514,7 @@ class BookingService:
         lines = [
             intro,
             *[f"{slot.index}) {slot.display_time}" for slot in slots],
-            f"Reply with 1, 2, or 3, or send the exact time you want. Times shown in {timezone_label}.",
+            f"{_slot_selection_prompt(slots)} Times shown in {timezone_label}.",
         ]
         return SlotOffer(
             reply_text="\n".join(lines),
@@ -538,7 +570,7 @@ class BookingService:
 
         if matched is None:
             return {
-                "reply_text": "I couldn’t match that to one of the current options. I can send a fresh set of times.",
+                "reply_text": "I couldn’t match that to one of the current call options. I can check that time and send fresh call times.",
                 "slots": slots,
                 "runtime_payload": {
                     "booking_offer": latest_offer or {},
@@ -553,7 +585,7 @@ class BookingService:
             booking = self._book_calendly_slot(client=client, lead=lead, slot=matched)
 
         return {
-            "reply_text": f"Booked. You are set for {matched.get('display_time')}.",
+            "reply_text": f"Booked. Your call is set for {matched.get('display_time')}.",
             "booking": booking,
             "runtime_payload": {
                 "calendar_booking": {
@@ -584,18 +616,19 @@ class BookingService:
         matched = self._match_slot(inbound_text, slots)
         if matched is None:
             timezone_label = self._timezone_abbreviation(client.timezone)
+            indexed_slots = _reindex_dict_slots(slots)
             lines = [
                 "I did not catch which slot you want.",
-                *[f"{slot.get('index')}) {slot.get('display_time')}" for slot in slots],
-                f"Reply with 1, 2, or 3. Times shown in {timezone_label}.",
+                *[f"{slot.get('index')}) {slot.get('display_time')}" for slot in indexed_slots],
+                f"{_slot_selection_prompt_from_dict_slots(indexed_slots, allow_exact_time=False)} Times shown in {timezone_label}.",
             ]
             return BookingSelectionResult(
                 handled=True,
                 reply_text="\n".join(lines),
                 next_state=ConversationStateEnum.BOOKING_SENT,
-                raw_payload={"booking_offer": latest_offer},
+                raw_payload={"booking_offer": {**latest_offer, "slots": indexed_slots}},
                 audit_event_type="calendar_booking_offer_repeated",
-                audit_decision={"inbound": inbound_text, "slots": slots},
+                audit_decision={"inbound": inbound_text, "slots": indexed_slots},
                 transition_reason="calendar_booking_offer_repeated",
             )
 
@@ -617,7 +650,7 @@ class BookingService:
         else:
             booking = self._book_calendly_slot(client=client, lead=lead, slot=matched)
         confirmation = [
-            f"Booked. You are set for {matched.get('display_time')}.",
+            f"Booked. Your call is set for {matched.get('display_time')}.",
         ]
         if lead.email.strip():
             confirmation.append(f"Confirmation will be sent to {lead.email}.")
@@ -1062,3 +1095,232 @@ def _time_text_to_minutes(raw: str | None) -> int | None:
     if meridiem == "am" and hour == 12:
         hour = 0
     return hour * 60 + minute
+
+
+def _spread_first_offer_slots(
+    *,
+    slots: Sequence[BookingSlot],
+    limit: int,
+    timezone_name: str,
+) -> list[BookingSlot]:
+    if not slots:
+        return []
+    ordered = sorted(list(slots), key=_slot_sort_key)
+    target = max(1, min(limit, len(ordered)))
+    if len(ordered) <= target:
+        return ordered[:target]
+
+    day_anchors: list[BookingSlot] = []
+    seen_days: set[str] = set()
+    for slot in ordered:
+        local_dt = _slot_local_start(slot, timezone_name)
+        day_key = local_dt.date().isoformat() if local_dt is not None else str(slot.start_time)[:10]
+        if day_key in seen_days:
+            continue
+        seen_days.add(day_key)
+        day_anchors.append(slot)
+
+    selected = _evenly_spaced_select(day_anchors, target)
+    if len(selected) < target:
+        remaining = [slot for slot in ordered if slot not in selected]
+        selected.extend(_evenly_spaced_select(remaining, target - len(selected)))
+    return sorted(selected, key=_slot_sort_key)[:target]
+
+
+def _reindex_slots(slots: Sequence[BookingSlot]) -> list[BookingSlot]:
+    normalized: list[BookingSlot] = []
+    for idx, slot in enumerate(slots, start=1):
+        normalized.append(
+            BookingSlot(
+                index=idx,
+                start_time=slot.start_time,
+                end_time=slot.end_time,
+                display_time=slot.display_time,
+                display_hint=slot.display_hint,
+                search_blob=slot.search_blob,
+            )
+        )
+    return normalized
+
+
+def _reindex_dict_slots(slots: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for idx, slot in enumerate(slots, start=1):
+        item = dict(slot or {})
+        item["index"] = idx
+        normalized.append(item)
+    return normalized
+
+
+def _availability_coverage_summary(
+    *,
+    slots: Sequence[BookingSlot],
+    timezone_name: str,
+    day_limit: int = 3,
+) -> str:
+    if not slots:
+        return ""
+    ordered = sorted(list(slots), key=_slot_sort_key)
+    day_periods: dict[str, dict[str, Any]] = {}
+    for slot in ordered:
+        local_dt = _slot_local_start(slot, timezone_name)
+        if local_dt is None:
+            continue
+        day_key = local_dt.date().isoformat()
+        period = _time_period(local_dt)
+        payload = day_periods.setdefault(
+            day_key,
+            {
+                "date": local_dt.date(),
+                "day_name": local_dt.strftime("%A"),
+                "periods": [],
+            },
+        )
+        periods = payload["periods"]
+        if period not in periods:
+            periods.append(period)
+
+    if not day_periods:
+        return ""
+
+    limit = max(1, day_limit)
+    day_summaries: list[str] = []
+    for payload in sorted(day_periods.values(), key=lambda item: item["date"])[:limit]:
+        periods = [str(item) for item in payload.get("periods", [])]
+        period_phrase = _period_coverage_phrase(periods)
+        if period_phrase:
+            day_summaries.append(f"{payload['day_name']} {period_phrase}")
+        else:
+            day_summaries.append(str(payload["day_name"]))
+    return _join_with_and(day_summaries)
+
+
+def _slot_selection_prompt(slots: Sequence[BookingSlot]) -> str:
+    return _slot_selection_prompt_from_indices([slot.index for slot in slots], allow_exact_time=True)
+
+
+def _slot_selection_prompt_from_dict_slots(
+    slots: Sequence[dict[str, Any]],
+    *,
+    allow_exact_time: bool,
+) -> str:
+    indexes: list[int] = []
+    for slot in slots:
+        try:
+            indexes.append(int(slot.get("index")))
+        except Exception:
+            continue
+    return _slot_selection_prompt_from_indices(indexes, allow_exact_time=allow_exact_time)
+
+
+def _slot_selection_prompt_from_indices(indices: Sequence[int], *, allow_exact_time: bool) -> str:
+    cleaned_set: set[int] = set()
+    for value in indices:
+        try:
+            parsed = int(value)
+        except Exception:
+            continue
+        if parsed > 0:
+            cleaned_set.add(parsed)
+    cleaned = sorted(cleaned_set)
+    if not cleaned:
+        return "Share a preferred day and time"
+
+    labels = [str(item) for item in cleaned]
+    if len(labels) == 1:
+        choice_part = labels[0]
+    elif len(labels) == 2:
+        choice_part = f"{labels[0]} or {labels[1]}"
+    else:
+        choice_part = f"{', '.join(labels[:-1])}, or {labels[-1]}"
+
+    if allow_exact_time:
+        return f"Reply with {choice_part} to book the call, or send the exact time you want"
+    return f"Reply with {choice_part} to book the call"
+
+
+def _slot_sort_key(slot: BookingSlot) -> tuple[datetime, int]:
+    parsed = _to_utc_datetime(slot.start_time)
+    if parsed is None:
+        parsed = datetime.max.replace(tzinfo=timezone.utc)
+    return parsed, int(slot.index)
+
+
+def _slot_local_start(slot: BookingSlot, timezone_name: str) -> datetime | None:
+    start_at = _to_utc_datetime(slot.start_time)
+    if start_at is None:
+        return None
+    return start_at.astimezone(_tzinfo(timezone_name))
+
+
+def _evenly_spaced_select(items: Sequence[BookingSlot], target: int) -> list[BookingSlot]:
+    if not items or target <= 0:
+        return []
+    if target >= len(items):
+        return list(items)
+    if target == 1:
+        return [items[0]]
+
+    last_index = len(items) - 1
+    step = last_index / (target - 1)
+    chosen_indexes: list[int] = []
+    used: set[int] = set()
+    for i in range(target):
+        candidate = int(round(i * step))
+        candidate = max(0, min(last_index, candidate))
+        while candidate in used and candidate < last_index:
+            candidate += 1
+        if candidate in used:
+            candidate = next((idx for idx in range(last_index + 1) if idx not in used), candidate)
+        if candidate not in used:
+            used.add(candidate)
+            chosen_indexes.append(candidate)
+
+    if len(chosen_indexes) < target:
+        for idx in range(last_index + 1):
+            if idx in used:
+                continue
+            chosen_indexes.append(idx)
+            if len(chosen_indexes) >= target:
+                break
+    chosen_indexes.sort()
+    return [items[idx] for idx in chosen_indexes[:target]]
+
+
+def _time_period(local_dt: datetime) -> str:
+    hour = local_dt.hour
+    if hour < 12:
+        return "morning"
+    if hour < 17:
+        return "afternoon"
+    return "evening"
+
+
+def _period_coverage_phrase(periods: Sequence[str]) -> str:
+    order = {"morning": 0, "afternoon": 1, "evening": 2}
+    unique = [item for item in periods if item in order]
+    if not unique:
+        return ""
+    normalized = sorted(set(unique), key=lambda item: order[item])
+    if len(normalized) == 1:
+        return normalized[0]
+    if len(normalized) == 3:
+        return "morning through evening"
+    if len(normalized) == 2:
+        first_idx = order[normalized[0]]
+        second_idx = order[normalized[1]]
+        if second_idx == first_idx + 1:
+            return f"{normalized[0]} through {normalized[1]}"
+        return f"{normalized[0]} and {normalized[1]}"
+    return _join_with_and(normalized)
+
+
+def _join_with_and(items: Sequence[str]) -> str:
+    cleaned = [str(item).strip() for item in items if str(item).strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"

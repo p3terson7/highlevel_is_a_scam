@@ -6,6 +6,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 import yaml
+from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client as TwilioClient
 
 from app.core.config import Settings
@@ -13,6 +14,13 @@ from app.core.logging import get_logger
 from app.db.models import Client
 
 logger = get_logger(__name__)
+
+
+class SMSDeliveryError(RuntimeError):
+    def __init__(self, detail: str, *, provider_status: int | None = None, provider_code: str | None = None) -> None:
+        super().__init__(detail)
+        self.provider_status = provider_status
+        self.provider_code = provider_code
 
 
 class SMSProvider(Protocol):
@@ -28,6 +36,15 @@ class TwilioSMSProvider:
     def send_sms(self, to_number: str, body: str) -> str:
         message = self._client.messages.create(body=body, from_=self._from_number, to=to_number)
         return str(message.sid)
+
+
+@lru_cache(maxsize=16)
+def _cached_twilio_provider(account_sid: str, auth_token: str, from_number: str) -> TwilioSMSProvider:
+    return TwilioSMSProvider(account_sid=account_sid, auth_token=auth_token, from_number=from_number)
+
+
+def clear_sms_provider_cache() -> None:
+    _cached_twilio_provider.cache_clear()
 
 
 class LoggingSMSProvider:
@@ -61,7 +78,25 @@ class SMSService:
         return template.format(**values).strip()
 
     def send_message(self, to_number: str, body: str) -> str:
-        return self._provider.send_sms(to_number=to_number, body=body)
+        try:
+            return self._provider.send_sms(to_number=to_number, body=body)
+        except SMSDeliveryError:
+            raise
+        except Exception as exc:
+            detail, provider_status, provider_code = _delivery_error_details(exc)
+            logger.warning(
+                "sms_delivery_failed",
+                extra={
+                    "provider_status": provider_status,
+                    "provider_code": provider_code,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise SMSDeliveryError(
+                detail,
+                provider_status=provider_status,
+                provider_code=provider_code,
+            ) from exc
 
 
 @lru_cache
@@ -80,7 +115,7 @@ def build_sms_service(settings: Settings, runtime_overrides: dict[str, str] | No
 
     provider: SMSProvider
     if account_sid and auth_token and from_number:
-        provider = TwilioSMSProvider(
+        provider = _cached_twilio_provider(
             account_sid=account_sid,
             auth_token=auth_token,
             from_number=from_number,
@@ -89,3 +124,24 @@ def build_sms_service(settings: Settings, runtime_overrides: dict[str, str] | No
         provider = LoggingSMSProvider()
 
     return SMSService(provider=provider, templates=load_default_templates())
+
+
+def build_mock_sms_service() -> SMSService:
+    return SMSService(provider=LoggingSMSProvider(), templates=load_default_templates())
+
+
+def _delivery_error_details(exc: Exception) -> tuple[str, int | None, str | None]:
+    if isinstance(exc, TwilioRestException):
+        provider_status = getattr(exc, "status", None)
+        provider_code = str(getattr(exc, "code", "") or "") or None
+        if provider_status in {401, 403}:
+            return (
+                "SMS provider authentication failed. Check the Twilio Account SID/Auth Token for this client or runtime config.",
+                provider_status,
+                provider_code,
+            )
+        message = str(getattr(exc, "msg", "") or "").strip()
+        if not message:
+            message = "Twilio rejected the message."
+        return f"SMS provider rejected the message: {message}", provider_status, provider_code
+    return "SMS provider failed to send the message. Check the SMS provider configuration and logs.", None, None

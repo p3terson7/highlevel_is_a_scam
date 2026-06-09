@@ -35,7 +35,7 @@ from app.services.crm import (
 )
 from app.services.lead_intake import normalize_phone
 from app.services.inbound_sms import process_inbound_turn
-from app.services.llm_agent import LLMAgent, build_llm_agent
+from app.services.llm_agent import LLMAgent
 from app.services.runtime_config import (
     client_runtime_overrides,
     get_effective_runtime_map_for_client,
@@ -172,9 +172,9 @@ async def inbound_sms(
         overrides=runtime_overrides,
         client=client,
     )
-    if client_runtime_overrides(client):
+    provider_overrides = client_runtime_overrides(client)
+    if all(provider_overrides.get(key) for key in ("twilio_account_sid", "twilio_auth_token", "twilio_from_number")):
         sms_service = build_sms_service(settings, runtime_overrides=effective_runtime)
-        llm_agent = build_llm_agent(settings=settings, runtime_overrides=effective_runtime)
 
     if not verify_twilio_signature(request=request, form_data=payload, auth_token=effective_runtime["twilio_auth_token"]):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid Twilio signature")

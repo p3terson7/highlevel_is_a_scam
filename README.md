@@ -347,6 +347,26 @@ python -m app.scripts.seed_demo --reset
 python -m app.scripts.seed_demo --reset-only
 ```
 
+StackLeads showcase seed:
+
+```bash
+python -m app.scripts.seed_stackleads_demo --reset
+python -m app.scripts.seed_stackleads_demo --reset-portal
+```
+
+When running the app through Docker, run those inside the API container:
+
+```bash
+docker compose exec api python -m app.scripts.seed_stackleads_demo --reset
+docker compose exec api python -m app.scripts.seed_stackleads_demo --reset-portal
+```
+
+Default StackLeads portal login after `--reset` or `--reset-portal`:
+- email: `demo@stackleads.local`
+- password: `StackLeadsDemo2026!`
+
+Regular StackLeads reseeds preserve a password changed through the UI. Use `--reset-portal` only when you want to force the known demo login back.
+
 UI controls:
 - Open `/ui`
 - Go to `Settings`

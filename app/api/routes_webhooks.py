@@ -175,8 +175,24 @@ async def zapier_webhook(
     client_key: str,
     request: Request,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
     client = _load_client(db, client_key)
+    effective_runtime = get_effective_runtime_map_for_client(
+        settings=settings,
+        overrides=load_runtime_overrides(db),
+        client=client,
+    )
+    zapier_secret = str(effective_runtime.get("zapier_webhook_secret") or "").strip()
+    if zapier_secret:
+        provided_secret = (
+            request.headers.get("X-Zapier-Webhook-Secret")
+            or request.headers.get("X-Zapier-Token")
+            or request.query_params.get("zapier_secret")
+            or ""
+        ).strip()
+        if provided_secret != zapier_secret:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid Zapier secret")
     try:
         payload = await request.json()
     except Exception as exc:

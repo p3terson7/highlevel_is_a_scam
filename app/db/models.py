@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -111,12 +112,20 @@ class Client(Base, TimestampMixin):
         back_populates="client",
         cascade="all, delete-orphan",
     )
+    knowledge_sources: Mapped[list["KnowledgeSource"]] = relationship(
+        back_populates="client",
+        cascade="all, delete-orphan",
+    )
 
 
 class Lead(Base, TimestampMixin):
     __tablename__ = "leads"
     __table_args__ = (
         UniqueConstraint("client_id", "external_lead_id", name="uq_leads_client_external"),
+        Index("ix_leads_client_updated_created", "client_id", "updated_at", "created_at"),
+        Index("ix_leads_client_state_updated", "client_id", "conversation_state", "updated_at"),
+        Index("ix_leads_client_stage_updated", "client_id", "crm_stage", "updated_at"),
+        Index("ix_leads_created_id", "created_at", "id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -169,6 +178,11 @@ class Lead(Base, TimestampMixin):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_lead_created_id", "lead_id", "created_at", "id"),
+        Index("ix_messages_client_direction_created_id", "client_id", "direction", "created_at", "id"),
+        Index("ix_messages_client_direction_sid", "client_id", "direction", "provider_message_sid"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
@@ -186,6 +200,9 @@ class Message(Base):
 
 class ConversationState(Base):
     __tablename__ = "conversation_states"
+    __table_args__ = (
+        Index("ix_conversation_states_lead_created_id", "lead_id", "created_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
@@ -204,6 +221,11 @@ class ConversationState(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("ix_audit_logs_client_event_created_id", "client_id", "event_type", "created_at", "id"),
+        Index("ix_audit_logs_lead_created_id", "lead_id", "created_at", "id"),
+        Index("ix_audit_logs_lead_event_created_id", "lead_id", "event_type", "created_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_id: Mapped[int | None] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
@@ -250,6 +272,10 @@ class LeadTag(Base):
 
 class LeadTask(Base, TimestampMixin):
     __tablename__ = "lead_tasks"
+    __table_args__ = (
+        Index("ix_lead_tasks_client_status_due_created", "client_id", "status", "due_date", "created_at"),
+        Index("ix_lead_tasks_status_due_created", "status", "due_date", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
@@ -266,6 +292,18 @@ class LeadTask(Base, TimestampMixin):
 
 class CalendarBooking(Base, TimestampMixin):
     __tablename__ = "calendar_bookings"
+    __table_args__ = (
+        Index("ix_calendar_bookings_client_status_start", "client_id", "status", "start_at"),
+        Index("ix_calendar_bookings_status_end_start", "status", "end_at", "start_at"),
+        Index(
+            "ix_calendar_bookings_client_provider_status_start_end",
+            "client_id",
+            "provider",
+            "status",
+            "start_at",
+            "end_at",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
@@ -281,3 +319,46 @@ class CalendarBooking(Base, TimestampMixin):
 
     client: Mapped[Client] = relationship(back_populates="calendar_bookings")
     lead: Mapped[Lead | None] = relationship(back_populates="calendar_bookings")
+
+
+class KnowledgeSource(Base, TimestampMixin):
+    __tablename__ = "knowledge_sources"
+    __table_args__ = (
+        UniqueConstraint("client_id", "normalized_url", name="uq_knowledge_sources_client_url"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    normalized_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    extracted_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    text_excerpt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    client: Mapped[Client] = relationship(back_populates="knowledge_sources")
+    chunks: Mapped[list["KnowledgeChunk"]] = relationship(
+        back_populates="source",
+        cascade="all, delete-orphan",
+        order_by="KnowledgeChunk.chunk_index",
+    )
+
+
+class KnowledgeChunk(Base, TimestampMixin):
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint("source_id", "chunk_index", name="uq_knowledge_chunks_source_index"),
+        Index("ix_knowledge_chunks_client_source_index", "client_id", "source_id", "chunk_index"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("knowledge_sources.id", ondelete="CASCADE"), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    search_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    source: Mapped[KnowledgeSource] = relationship(back_populates="chunks")

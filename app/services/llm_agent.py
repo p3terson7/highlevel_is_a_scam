@@ -14,6 +14,7 @@ from app.services.agent_v3 import (  # noqa: F401
     OpenAIProvider,
     ToolCall,
     build_llm_agent,
+    clear_llm_provider_cache,
 )
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "OpenAIProvider",
     "ToolCall",
     "build_llm_agent",
+    "clear_llm_provider_cache",
 ]

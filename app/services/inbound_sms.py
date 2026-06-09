@@ -16,7 +16,7 @@ from app.db.models import (
     Message,
     MessageDirection,
 )
-from app.services.booking import BookingService, extract_email, handoff_suffix
+from app.services.booking import BookingService, calendar_booking_confirmed, extract_email, handoff_suffix
 from app.services.crm import (
     CRM_STAGE_CONTACTED,
     CRM_STAGE_MEETING_BOOKED,
@@ -35,17 +35,19 @@ def _store_outbound_message(
     body: str,
     provider_sid: str,
     raw_payload: dict[str, Any] | None = None,
+    created_at: datetime | None = None,
 ) -> None:
-    db.add(
-        Message(
-            lead_id=lead.id,
-            client_id=lead.client_id,
-            direction=MessageDirection.OUTBOUND,
-            body=body,
-            provider_message_sid=provider_sid,
-            raw_payload=raw_payload or {},
-        )
-    )
+    values = {
+        "lead_id": lead.id,
+        "client_id": lead.client_id,
+        "direction": MessageDirection.OUTBOUND,
+        "body": body,
+        "provider_message_sid": provider_sid,
+        "raw_payload": raw_payload or {},
+    }
+    if created_at is not None:
+        values["created_at"] = created_at
+    db.add(Message(**values))
 
 
 def _auto_update_crm_stage(
@@ -91,6 +93,7 @@ def _store_agent_memory(
     pending_step: str | None,
 ) -> None:
     payload = dict(lead.raw_payload or {})
+    runtime_payload = dict(agent_response.runtime_payload or {})
     payload["qualification_memory"] = agent_response.collected_fields.model_dump(exclude_none=True)
     if agent_response.next_question_key:
         payload["last_question_key"] = agent_response.next_question_key
@@ -100,6 +103,17 @@ def _store_agent_memory(
         payload[_PENDING_STEP_KEY] = pending_step
     else:
         payload.pop(_PENDING_STEP_KEY, None)
+    for key in (
+        "cta_state",
+        "intent_level",
+        "intent_score",
+        "intent_reasons",
+        "important_missing_fields",
+        "lead_summary",
+        "recommended_follow_up",
+    ):
+        if key in runtime_payload:
+            payload[key] = runtime_payload[key]
     lead.raw_payload = payload
 
 
@@ -169,6 +183,9 @@ def process_inbound_turn(
     action = agent_response.action
     runtime_payload = dict(agent_response.runtime_payload or {})
     next_pending_step: str | None = runtime_payload.get("pending_step", pending_step_before or None)
+    has_calendar_booking = isinstance(runtime_payload.get("calendar_booking"), dict) and bool(runtime_payload.get("calendar_booking"))
+    explicit_booked_confirmation = calendar_booking_confirmed(inbound_text)
+    effective_action = action
 
     if not reply_text:
         reply_text = "I’m still with you. Let me send a fresh set of times."
@@ -192,16 +209,32 @@ def process_inbound_turn(
             )
         )
 
-    if action == "handoff_to_human":
+    if effective_action == "handoff_to_human":
         reply_text = f"{reply_text}{handoff_suffix(client)}".strip()
         next_state = ConversationStateEnum.HANDOFF
         next_pending_step = None
-    elif action == "mark_booked":
-        next_state = ConversationStateEnum.BOOKED
-        next_pending_step = None
+    elif effective_action == "mark_booked":
+        if explicit_booked_confirmation or has_calendar_booking:
+            next_state = ConversationStateEnum.BOOKED
+            next_pending_step = None
+        else:
+            effective_action = "none"
+            if next_state == ConversationStateEnum.BOOKED:
+                if pending_step_before or runtime_payload.get("booking_offer"):
+                    next_state = ConversationStateEnum.BOOKING_SENT
+                else:
+                    next_state = ConversationStateEnum.QUALIFYING
+            if next_pending_step is None and (pending_step_before or runtime_payload.get("booking_offer")):
+                next_pending_step = pending_step_before or "slot_selection_pending"
+            if pending_step_before or runtime_payload.get("booking_offer"):
+                reply_text = "I can lock that in once you pick one of the offered times, or send your exact preferred time."
+            else:
+                reply_text = "I can lock that in as soon as you share your preferred day and time."
     elif lead.conversation_state == ConversationStateEnum.BOOKED and next_state == ConversationStateEnum.QUALIFYING:
         next_state = ConversationStateEnum.BOOKED
 
+    action = effective_action
+    agent_response.action = effective_action
     _store_agent_memory(lead=lead, agent_response=agent_response, pending_step=next_pending_step)
 
     outbound_raw_payload = {
@@ -211,6 +244,10 @@ def process_inbound_turn(
             "collected_fields": agent_response.collected_fields.model_dump(exclude_none=True),
             "provider": agent_response.provider,
             "provider_error": agent_response.provider_error,
+            "intent_level": runtime_payload.get("intent_level"),
+            "intent_score": runtime_payload.get("intent_score"),
+            "cta_state": runtime_payload.get("cta_state"),
+            "lead_summary": runtime_payload.get("lead_summary"),
         },
         "actions": [action_item.model_dump() for action_item in agent_response.actions],
         "pending_step_before": pending_step_before or None,
@@ -230,6 +267,7 @@ def process_inbound_turn(
         body=reply_text,
         provider_sid=sid,
         raw_payload=outbound_raw_payload,
+        created_at=turn_time,
     )
 
     previous_state = lead.conversation_state

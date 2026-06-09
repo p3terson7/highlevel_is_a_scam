@@ -235,12 +235,56 @@
       }
 
       input[type="checkbox"] {
-        width: 16px;
-        height: 16px;
+        appearance: none;
+        -webkit-appearance: none;
+        display: inline-grid;
+        place-content: center;
+        width: 15px;
+        height: 15px;
         margin: 0;
-        accent-color: var(--accent);
+        padding: 0;
+        border: 1px solid var(--line-2);
+        border-radius: 4px;
+        background: var(--input);
+        color: #fff;
         vertical-align: middle;
         flex: none;
+        cursor: pointer;
+        transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+
+      input[type="checkbox"]::after {
+        content: "";
+        width: 4px;
+        height: 8px;
+        margin-top: -1px;
+        border: solid currentColor;
+        border-width: 0 2px 2px 0;
+        opacity: 0;
+        transform: rotate(45deg) scale(0.75);
+        transition: opacity 0.12s ease, transform 0.12s ease;
+      }
+
+      input[type="checkbox"]:checked {
+        border-color: var(--accent);
+        background: var(--accent);
+      }
+
+      input[type="checkbox"]:checked::after {
+        opacity: 1;
+        transform: rotate(45deg) scale(1);
+      }
+
+      input[type="checkbox"]:focus-visible {
+        outline: 0;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+
+      input[type="checkbox"]:disabled {
+        background: var(--surface-2);
+        border-color: var(--line);
+        cursor: not-allowed;
       }
 
       .checkbox-inline {
@@ -251,6 +295,29 @@
         color: var(--text-soft);
         font-size: 12px;
         cursor: pointer;
+      }
+
+      .toolbar-check {
+        min-height: var(--control-height);
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+        background: var(--input);
+        color: var(--text-soft);
+        line-height: 1;
+        transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+      }
+
+      .toolbar-check:hover {
+        border-color: var(--line-2);
+        background: var(--surface-hover);
+        color: var(--text);
+      }
+
+      .toolbar-check:has(input[type="checkbox"]:checked) {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--text);
       }
 
       label {
@@ -609,6 +676,54 @@
         align-items: center;
       }
 
+      .mobile-tabbar {
+        display: none;
+      }
+
+      .mobile-tabbar-inner {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+        gap: 4px;
+      }
+
+      .mobile-tab-item {
+        min-height: 50px;
+        padding: 5px 4px;
+        border-radius: 10px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--text-dim);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+      }
+
+      .mobile-tab-item:hover {
+        border-color: var(--line);
+        background: var(--chip);
+      }
+
+      .mobile-tab-item.active {
+        color: var(--accent);
+        border-color: rgba(78, 150, 216, 0.24);
+        background: var(--accent-soft);
+      }
+
+      .mobile-tab-icon {
+        width: 16px;
+        height: 16px;
+        flex: none;
+      }
+
+      .mobile-tab-label {
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
       .search-wrap {
         position: relative;
         flex: none;
@@ -796,14 +911,14 @@
       .dashboard-shell {
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 10px;
         min-width: 0;
       }
 
       .dashboard-hero {
         position: relative;
         overflow: hidden;
-        padding: 14px;
+        padding: 12px;
         border: 1px solid var(--line);
         border-radius: 12px;
         background:
@@ -823,13 +938,16 @@
       }
 
       .dashboard-hero-grid {
-        grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.95fr);
+        grid-template-columns: minmax(0, 1.55fr) minmax(240px, 0.75fr);
         align-items: stretch;
       }
 
-      .dashboard-main-grid,
+      .dashboard-main-grid {
+        grid-template-columns: minmax(0, 1.28fr) minmax(250px, 0.72fr);
+      }
+
       .dashboard-secondary-grid {
-        grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr);
+        grid-template-columns: minmax(0, 1fr);
       }
 
       .dashboard-hero-main {
@@ -887,6 +1005,18 @@
         gap: 5px;
       }
 
+      .dashboard-kpi-action {
+        width: 100%;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .dashboard-kpi-action:hover {
+        border-color: var(--line-2);
+        background: var(--surface-hover);
+      }
+
       .dashboard-kpi-label {
         font: 600 10px var(--font-mono);
         color: var(--text-dim);
@@ -912,7 +1042,7 @@
 
       .dashboard-trend-card,
       .dashboard-panel {
-        padding: 12px 14px;
+        padding: 10px 12px;
       }
 
       .dashboard-trend {
@@ -938,9 +1068,9 @@
       .dashboard-trend-bars {
         display: grid;
         grid-template-columns: repeat(6, minmax(0, 1fr));
-        gap: 8px;
+        gap: 6px;
         align-items: end;
-        min-height: 150px;
+        min-height: 122px;
       }
 
       .dashboard-trend-column {
@@ -958,7 +1088,7 @@
 
       .dashboard-trend-bar-wrap {
         width: 100%;
-        min-height: 108px;
+        min-height: 90px;
         display: flex;
         align-items: flex-end;
       }
@@ -987,8 +1117,8 @@
 
       .dashboard-chart-shell {
         display: grid;
-        grid-template-columns: minmax(180px, 210px) minmax(0, 1fr);
-        gap: 14px;
+        grid-template-columns: minmax(152px, 170px) minmax(0, 1fr);
+        gap: 10px;
         align-items: center;
       }
 
@@ -1000,13 +1130,13 @@
 
       .dashboard-chart-figure {
         position: relative;
-        width: 184px;
-        height: 184px;
+        width: 156px;
+        height: 156px;
       }
 
       .dashboard-chart-svg {
-        width: 184px;
-        height: 184px;
+        width: 156px;
+        height: 156px;
         display: block;
       }
 
@@ -1032,7 +1162,7 @@
       }
 
       .dashboard-chart-total {
-        font-size: 30px;
+        font-size: 24px;
         font-weight: 700;
         line-height: 1;
         letter-spacing: -0.04em;
@@ -1129,6 +1259,147 @@
         font-size: 12px;
       }
 
+      .dashboard-campaign-card {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .dashboard-campaign-kpis {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 7px;
+      }
+
+      .dashboard-campaign-kpi {
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+        background: var(--surface-2);
+        min-width: 0;
+      }
+
+      .dashboard-campaign-kpi-label {
+        color: var(--text-dim);
+        font: 600 9px var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .dashboard-campaign-kpi-value {
+        margin-top: 4px;
+        font-size: 18px;
+        font-weight: 700;
+        line-height: 1.1;
+      }
+
+      .dashboard-campaign-kpi-meta {
+        margin-top: 3px;
+        color: var(--text-dim);
+        font-size: 11px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .dashboard-campaign-funnel {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+
+      .dashboard-campaign-step {
+        position: relative;
+        overflow: hidden;
+        min-height: 54px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+        background: var(--surface);
+      }
+
+      .dashboard-campaign-step::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: calc(100% - var(--step-fill, 0%));
+        bottom: 0;
+        height: 3px;
+        background: var(--step-color, var(--accent));
+      }
+
+      .dashboard-campaign-step-label {
+        color: var(--text-dim);
+        font: 600 9px var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .dashboard-campaign-step-value {
+        margin-top: 5px;
+        font-size: 16px;
+        font-weight: 700;
+      }
+
+      .dashboard-campaign-list {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .dashboard-campaign-row {
+        padding: 8px 0;
+        border-top: 1px solid var(--line);
+      }
+
+      .dashboard-campaign-row:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      .dashboard-campaign-row-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .dashboard-campaign-name {
+        font-weight: 650;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .dashboard-campaign-metrics {
+        margin-top: 5px;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 6px;
+        color: var(--text-soft);
+        font-size: 11px;
+      }
+
+      .dashboard-campaign-metric strong {
+        display: block;
+        color: var(--text);
+        font-size: 12px;
+      }
+
+      .dashboard-campaign-bar {
+        margin-top: 7px;
+        height: 5px;
+        border-radius: 999px;
+        background: var(--surface-3);
+        overflow: hidden;
+      }
+
+      .dashboard-campaign-bar-fill {
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--accent), #4ac2b7);
+      }
+
       .dashboard-message-list {
         display: flex;
         flex-direction: column;
@@ -1137,7 +1408,7 @@
       .dashboard-stage-chart {
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 8px;
       }
 
       .dashboard-stage-summary {
@@ -1175,7 +1446,7 @@
       }
 
       .dashboard-stage-row {
-        padding: 9px 0;
+        padding: 7px 0;
         border-top: 1px solid var(--line);
       }
 
@@ -1193,8 +1464,8 @@
       }
 
       .dashboard-stage-bar-track {
-        margin-top: 7px;
-        height: 7px;
+        margin-top: 5px;
+        height: 6px;
         border-radius: 999px;
         background: var(--surface-3);
         overflow: hidden;
@@ -1208,24 +1479,22 @@
       .dashboard-lead-list {
         display: flex;
         flex-direction: column;
-        gap: 10px;
+        gap: 8px;
       }
 
       .dashboard-lead-summary {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 10px;
-        margin-bottom: 12px;
+        gap: 8px;
+        margin-bottom: 8px;
       }
 
       .dashboard-lead-stat {
         min-width: 0;
-        padding: 11px 12px;
+        padding: 9px 10px;
         border: 1px solid var(--line);
         border-radius: 10px;
-        background:
-          linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0)),
-          var(--surface-2);
+        background: var(--surface-2);
         display: flex;
         flex-direction: column;
         gap: 4px;
@@ -1266,32 +1535,28 @@
         text-align: left;
         padding: 0;
         border: 1px solid var(--line);
-        border-radius: 12px;
-        background:
-          linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
-          var(--surface-2);
+        border-radius: 10px;
+        background: var(--surface-2);
         overflow: hidden;
       }
 
       .dashboard-lead-row-action:hover {
         border-color: var(--line-2);
-        background:
-          linear-gradient(180deg, rgba(255, 255, 255, 0.038), rgba(255, 255, 255, 0)),
-          var(--surface-hover);
+        background: var(--surface-hover);
       }
 
       .dashboard-lead-card {
         position: relative;
         min-width: 0;
-        padding: 12px 14px 12px 18px;
+        padding: 9px 11px 9px 15px;
       }
 
       .dashboard-lead-card::before {
         content: "";
         position: absolute;
         left: 0;
-        top: 12px;
-        bottom: 12px;
+        top: 9px;
+        bottom: 9px;
         width: 4px;
         border-radius: 999px;
         background: var(--lead-accent, var(--accent));
@@ -1334,9 +1599,8 @@
 
       .dashboard-lead-time {
         flex: 0 0 auto;
-        padding: 6px 9px;
-        border: 1px solid var(--line);
-        border-radius: 999px;
+        padding: 6px 8px;
+        border-radius: 10px;
         background: rgba(255, 255, 255, 0.02);
         text-align: right;
         line-height: 1.2;
@@ -1350,13 +1614,13 @@
       }
 
       .dashboard-lead-snippet {
-        margin-top: 6px;
-        padding: 10px 12px;
+        margin-top: 4px;
+        padding: 8px 10px;
         border-radius: 10px;
         background: rgba(255, 255, 255, 0.026);
         color: var(--text-soft);
-        font-size: 13px;
-        line-height: 1.45;
+        font-size: 12px;
+        line-height: 1.35;
       }
 
       .dashboard-message-row {
@@ -1748,6 +2012,10 @@
         width: 145px;
       }
 
+      .conversation-filters-toggle {
+        display: none;
+      }
+
       #conversationClientFilter {
         width: 200px;
       }
@@ -2071,6 +2339,12 @@
         gap: 0;
       }
 
+      .conversation-mobile-back {
+        display: none;
+        min-height: 24px;
+        padding: 0 8px;
+      }
+
       .drag-handle {
         background: linear-gradient(180deg, transparent, var(--line), transparent);
         cursor: col-resize;
@@ -2082,6 +2356,7 @@
 
       .timeline {
         padding: 12px;
+        flex: 1 1 auto;
         display: flex;
         flex-direction: column;
         gap: 12px;
@@ -2327,6 +2602,20 @@
       .console-output {
         flex: 1 1 auto;
         min-height: 180px;
+        padding: 12px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        color: var(--text-soft);
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font: 12px/1.5 var(--font-mono);
+      }
+
+      .code-output {
+        min-height: 120px;
+        max-height: 320px;
         padding: 12px;
         border-radius: var(--radius-md);
         border: 1px solid var(--line);
@@ -3642,6 +3931,12 @@
           grid-template-columns: 1fr;
         }
 
+        .dashboard-campaign-kpis,
+        .dashboard-campaign-funnel,
+        .dashboard-campaign-metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
         .dashboard-trend-bars {
           min-height: 120px;
         }
@@ -3687,7 +3982,8 @@
         }
 
         .toolbar-left select,
-        .toolbar-left input[type="date"] {
+        .toolbar-left input[type="date"],
+        .toolbar-left .toolbar-check {
           width: 100%;
         }
 
@@ -3695,12 +3991,103 @@
         #conversationStateFilter {
           width: 100%;
         }
+
+        .tab-bar {
+          width: 100%;
+          overflow-x: auto;
+          flex-wrap: nowrap;
+          -webkit-overflow-scrolling: touch;
+          padding-bottom: 2px;
+        }
+
+        .tab-btn {
+          flex: 0 0 auto;
+          white-space: nowrap;
+        }
+
+        .toolbar {
+          padding: 8px 10px;
+        }
+
+        .toolbar::before {
+          left: 10px;
+          right: 10px;
+        }
+
+        .toolbar-left,
+        .toolbar-right {
+          width: 100%;
+        }
+
+        .toolbar-right {
+          justify-content: flex-start;
+        }
+
+        .settings-card {
+          padding: 9px;
+        }
+
+        .settings-calendar-metric {
+          padding: 7px 8px;
+        }
       }
 
       @media (max-width: 920px) {
+        .workspace {
+          padding: 8px;
+          gap: 8px;
+        }
+
+        .view.active {
+          gap: 8px;
+        }
+
+        .surface,
+        .pane,
+        .detail-card,
+        .empty-state {
+          border-radius: 10px;
+        }
+
+        .surface-header,
+        .pane-header {
+          padding: 8px 10px;
+        }
+
+        .pane-header::after,
+        .surface-header::after {
+          left: 10px;
+          right: 10px;
+        }
+
+        .pane-body {
+          padding: 8px;
+        }
+
+        .table-wrap {
+          -webkit-overflow-scrolling: touch;
+        }
+
+        input,
+        select,
+        textarea,
+        button {
+          font-size: 14px;
+        }
+
+        .window-chip,
+        .badge,
+        .pill,
+        .tag,
+        .state-pill {
+          min-height: 20px;
+          padding: 0 8px;
+        }
+
         .window-chrome {
           grid-template-columns: 1fr;
           gap: 8px;
+          padding: 6px 10px;
         }
 
         .settings-calendar-metrics {
@@ -3752,8 +4139,446 @@
           max-width: 220px;
         }
 
+        .dashboard-hero-copy h2 {
+          font-size: 22px;
+        }
+
+        .dashboard-kpi-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .dashboard-kpi-value {
+          font-size: 20px;
+        }
+
+        .dashboard-lead-top {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 8px;
+        }
+
+        .dashboard-lead-time {
+          text-align: left;
+        }
+
+        .conversation-shell {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 8px;
+        }
+
+        .conversation-shell .drag-handle {
+          display: none;
+        }
+
+        .conversation-shell.mobile-list .thread-pane,
+        .conversation-shell.mobile-list .details-pane {
+          display: none;
+        }
+
+        .conversation-shell.mobile-thread .inbox-pane {
+          display: none;
+        }
+
+        .conversation-shell.mobile-list .inbox-pane .pane-body {
+          max-height: none;
+        }
+
+        .conversation-shell.mobile-thread .thread-pane {
+          max-height: 68vh;
+          min-height: 0;
+        }
+
+        .conversation-shell.mobile-thread .details-pane .pane-body {
+          max-height: 30vh;
+        }
+
+        .conversation-shell.mobile-thread #threadTimeline {
+          max-height: 50vh;
+        }
+
+        .conversation-shell.mobile-thread .conversation-mobile-back {
+          display: inline-flex !important;
+          align-items: center;
+        }
+
+        .timeline {
+          padding: 8px;
+          gap: 10px;
+        }
+
+        .bubble {
+          max-width: 92%;
+          padding: 9px 10px;
+        }
+
+        .composer {
+          padding: 8px;
+        }
+
+        .lead-details-shell > aside .pane-body {
+          max-height: 34vh;
+        }
+
+        .lead-detail-header {
+          flex-wrap: wrap;
+          align-items: flex-start;
+        }
+
+        .lead-stage-card .actions {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .item-meta-row {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .inbox-item,
+        .client-item,
+        .lead-list-card {
+          position: relative;
+          padding-right: 26px;
+        }
+
+        .inbox-item::after,
+        .client-item::after,
+        .lead-list-card::after {
+          content: "›";
+          position: absolute;
+          right: 10px;
+          top: 50%;
+          transform: translateY(-50%);
+          color: var(--text-dim);
+          font-size: 18px;
+          line-height: 1;
+          pointer-events: none;
+        }
+
+        .lead-record-layout {
+          gap: 8px;
+        }
+
+        .lead-detail-facts {
+          row-gap: 5px;
+          column-gap: 8px;
+        }
+
+        .detail-card,
+        .settings-card {
+          padding: 8px;
+        }
+
+        .table-wrap table {
+          min-width: 640px;
+        }
+
+        .settings-column {
+          gap: 8px;
+        }
+
+        .surface-title,
+        .pane-title {
+          margin-bottom: 6px;
+        }
+
+        .calendar-month-card {
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        .calendar-weekdays,
+        .calendar-month-grid {
+          min-width: 640px;
+        }
+
+        .calendar-day {
+          aspect-ratio: 1 / 1;
+          min-height: 0;
+        }
+
+        .calendar-day-events {
+          overflow: hidden;
+        }
+
         .lead-fact-grid {
           grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 680px) {
+        html,
+        body {
+          scrollbar-width: none;
+        }
+
+        body::-webkit-scrollbar,
+        .workspace::-webkit-scrollbar {
+          width: 0;
+          height: 0;
+          display: none;
+        }
+
+        .workspace {
+          scrollbar-width: none;
+        }
+
+        .window-frame {
+          padding-bottom: calc(62px + env(safe-area-inset-bottom));
+        }
+
+        .workspace {
+          padding: 6px;
+          gap: 6px;
+        }
+
+        .window-chrome {
+          padding: 6px 8px;
+        }
+
+        .chrome-nav {
+          display: none;
+        }
+
+        .chrome-left {
+          width: 100%;
+          max-width: none;
+        }
+
+        .chrome-subtitle {
+          display: none;
+        }
+
+        .chrome-right {
+          width: 100%;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto auto;
+          gap: 6px;
+        }
+
+        #topClientSelector,
+        #logoutButton {
+          display: none !important;
+        }
+
+        .chrome-nav .top-nav-item {
+          min-height: 26px;
+          padding: 4px 8px;
+          font-size: 10px;
+        }
+
+        .top-client-select {
+          max-width: none;
+          width: 100%;
+        }
+
+        .search-wrap input {
+          min-height: 36px;
+          padding-left: 30px;
+        }
+
+        .conversation-filters-toggle {
+          display: inline-flex;
+        }
+
+        #view-conversations .toolbar-left {
+          display: none;
+        }
+
+        #view-conversations.mobile-filters-open .toolbar-left {
+          display: flex;
+        }
+
+        #view-conversations.mobile-filters-open #conversationCountPills {
+          display: none;
+        }
+
+        #view-conversations.mobile-filters-open .toolbar {
+          gap: 8px;
+        }
+
+        #view-conversations.mobile-filters-open .toolbar-right {
+          width: 100%;
+          justify-content: flex-start;
+        }
+
+        .mobile-tabbar {
+          display: block;
+          position: fixed;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 85;
+          padding: 6px max(8px, env(safe-area-inset-left)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-right));
+          border-top: 1px solid var(--line);
+          background: var(--surface);
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+        }
+
+        .mobile-tabbar .mobile-tab-item {
+          width: 100%;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 3px;
+          min-height: 50px;
+          padding: 5px 3px;
+          border-radius: 10px;
+          border: 1px solid transparent;
+          background: transparent;
+          color: var(--text-dim);
+          text-align: center;
+        }
+
+        .mobile-tabbar .mobile-tab-item.active {
+          color: var(--accent);
+          border-color: rgba(78, 150, 216, 0.24);
+          background: var(--accent-soft);
+        }
+
+        .dashboard-kpi-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .dashboard-chart-figure,
+        .dashboard-chart-svg {
+          width: 132px;
+          height: 132px;
+        }
+
+        .dashboard-chart-total {
+          font-size: 20px;
+        }
+
+        .dashboard-campaign-kpis,
+        .dashboard-campaign-funnel,
+        .dashboard-campaign-metrics {
+          grid-template-columns: 1fr;
+        }
+
+        .dashboard-lead-stat {
+          padding: 8px;
+        }
+
+        .bubble {
+          max-width: 96%;
+        }
+
+        .conversation-shell.mobile-thread .thread-pane {
+          max-height: 72vh;
+        }
+
+        .conversation-shell.mobile-thread #threadTimeline {
+          max-height: 56vh;
+        }
+
+        .toolbar {
+          padding: 7px 8px;
+        }
+
+        .toolbar::before {
+          left: 8px;
+          right: 8px;
+        }
+
+        .surface-header,
+        .pane-header {
+          padding: 7px 8px;
+        }
+
+        .pane-header::after,
+        .surface-header::after {
+          left: 8px;
+          right: 8px;
+        }
+
+        .pane-body {
+          padding: 7px;
+        }
+
+        .toolbar-left select,
+        .toolbar-left input[type="date"],
+        .toolbar-left .toolbar-check,
+        #conversationClientFilter,
+        #conversationStateFilter,
+        #crmClientFilter,
+        #crmStageFilter,
+        #tasksClientFilter,
+        #tasksStatusFilter {
+          width: 100%;
+        }
+
+        button.small {
+          min-height: 30px;
+          padding: 5px 10px;
+          font-size: 12px;
+          margin: 0;
+        }
+
+        button.icon-btn {
+          width: 32px;
+          height: 32px;
+        }
+
+        .lead-combo-control {
+          width: 100%;
+          max-width: 100%;
+        }
+
+        .pane-title h3 {
+          font-size: 13px;
+        }
+
+        .surface-title h2 {
+          font-size: 15px;
+        }
+
+        .surface-title h3 {
+          font-size: 13px;
+        }
+
+        .client-item,
+        .inbox-item,
+        .preview-item {
+          padding: 8px;
+        }
+
+        .inbox-item .actions .small.ghost {
+          width: 100%;
+          justify-content: center;
+        }
+
+        .calendar-day {
+          min-height: 0;
+          padding: 8px;
+          gap: 7px;
+        }
+
+        .calendar-day-number {
+          width: 28px;
+          height: 28px;
+          font-size: 12px;
+        }
+
+        .table-wrap table {
+          min-width: 560px;
+        }
+
+        .calendar-weekdays,
+        .calendar-month-grid {
+          min-width: 720px;
+          gap: 7px;
+        }
+
+        .calendar-month-card {
+          padding: 10px;
+          gap: 10px;
+        }
+
+        .calendar-event {
+          padding: 6px 7px;
         }
       }
     </style>
@@ -3913,6 +4738,7 @@
                         <div class="dashboard-hero-copy">
                           <h2 id="dashboardHeroTitle">Dashboard</h2>
                           <div id="dashboardHeroSubtitle" class="surface-subtitle">Pipeline, sources, tasks, and recent activity in one workspace.</div>
+                          <div id="dashboardHeroPills" class="actions" style="margin-top:8px;"></div>
                         </div>
                       </div>
                       <div id="dashboardKpis" class="dashboard-kpi-grid"></div>
@@ -3943,26 +4769,11 @@
                     <div class="surface dashboard-panel">
                       <div class="surface-title">
                         <div>
-                          <h3>Pipeline snapshot</h3>
-                          <div class="surface-subtitle">Stage distribution across the current lead base.</div>
-                        </div>
-                        <div class="actions">
-                          <button class="small ghost" data-action="set-view" data-view="crm">Open pipeline</button>
+                          <h3>Ad campaign monitor</h3>
+                          <div class="surface-subtitle">Facebook Lead Ads performance imported by Zapier.</div>
                         </div>
                       </div>
-                      <div id="dashboardStageBreakdown" class="dashboard-distribution-list"></div>
-                    </div>
-                  </div>
-
-                  <div class="stack">
-                    <div class="surface dashboard-panel">
-                      <div class="surface-title">
-                        <div>
-                          <h3>Today</h3>
-                          <div class="surface-subtitle">The fastest way to see where attention is needed.</div>
-                        </div>
-                      </div>
-                      <div id="dashboardFocusGrid" class="dashboard-focus-grid"></div>
+                      <div id="dashboardCampaignPerformance" class="dashboard-campaign-card"></div>
                     </div>
                     <div class="surface dashboard-panel">
                       <div class="surface-title">
@@ -3973,19 +4784,6 @@
                       </div>
                       <div id="dashboardUpcoming" class="dashboard-agenda-list"></div>
                     </div>
-                  </div>
-                </div>
-
-                <div class="dashboard-secondary-grid">
-                  <div class="surface dashboard-panel">
-                    <div class="surface-title">
-                      <div>
-                        <h3>Unread messages</h3>
-                        <div class="surface-subtitle">The messages that still need to be seen or answered.</div>
-                      </div>
-                      <div id="dashboardUnreadPills" class="actions"></div>
-                    </div>
-                    <div id="dashboardUnreadMessages" class="dashboard-message-list"></div>
                   </div>
 
                   <div class="surface dashboard-panel">
@@ -4000,6 +4798,21 @@
                     </div>
                     <div id="dashboardLatestLeadsSummary" class="dashboard-lead-summary"></div>
                     <div id="dashboardLatestLeads" class="dashboard-lead-list"></div>
+                  </div>
+                </div>
+
+                <div class="dashboard-secondary-grid">
+                  <div class="surface dashboard-panel">
+                    <div class="surface-title">
+                      <div>
+                        <h3>Pipeline snapshot</h3>
+                        <div class="surface-subtitle">Compact stage distribution across active leads.</div>
+                      </div>
+                      <div class="actions">
+                        <button class="small ghost" data-action="set-view" data-view="crm">Open pipeline</button>
+                      </div>
+                    </div>
+                    <div id="dashboardStageBreakdown" class="dashboard-distribution-list"></div>
                   </div>
                 </div>
               </div>
@@ -4163,7 +4976,7 @@
                       </div>
                       <div class="detail-card stack">
                         <div class="title">Provider credentials (client scoped)</div>
-                        <div class="surface-subtitle">Each business owner can run isolated Twilio/AI/Meta credentials. Global settings act only as fallback defaults.</div>
+                        <div class="surface-subtitle">Each business gets isolated Twilio, Zapier, Meta, and LinkedIn credentials. OpenAI is centralized globally.</div>
                         <div class="meta-text">Leave any field blank to keep the current saved value.</div>
                         <div class="form-grid-3">
                           <div>
@@ -4181,22 +4994,6 @@
                         </div>
                         <div class="form-grid-3">
                           <div>
-                            <label for="clientProviderOpenAiKey">OpenAI key</label>
-                            <input id="clientProviderOpenAiKey" class="mono" placeholder="sk-..." />
-                          </div>
-                          <div>
-                            <label for="clientProviderOpenAiModel">OpenAI model</label>
-                            <input id="clientProviderOpenAiModel" placeholder="gpt-4.1-mini" />
-                          </div>
-                          <div>
-                            <label for="clientProviderAiMode">AI mode</label>
-                            <select id="clientProviderAiMode">
-                              <option value="auto">auto</option>
-                            </select>
-                          </div>
-                        </div>
-                        <div class="form-grid-3">
-                          <div>
                             <label for="clientProviderMetaVerify">Meta verify token</label>
                             <input id="clientProviderMetaVerify" class="mono" placeholder="meta-verify-token" />
                           </div>
@@ -4209,10 +5006,14 @@
                             <input id="clientProviderMetaVersion" class="mono" placeholder="v22.0" />
                           </div>
                         </div>
-                        <div class="form-grid-2">
+                        <div class="form-grid-3">
                           <div>
                             <label for="clientProviderLinkedinVerify">LinkedIn verify token</label>
                             <input id="clientProviderLinkedinVerify" class="mono" placeholder="linkedin-verify-token" />
+                          </div>
+                          <div>
+                            <label for="clientProviderZapierSecret">Zapier webhook secret</label>
+                            <input id="clientProviderZapierSecret" class="mono" placeholder="shared secret" />
                           </div>
                           <div>
                             <label for="clientProviderPublicBaseUrl">Public base URL</label>
@@ -4300,8 +5101,11 @@
                       <div id="conversationViewSubtitle" class="surface-subtitle">Resizable inbox, thread, and details panes. Optimized for daily operator work.</div>
                     </div>
                   </div>
+                  <div class="actions">
+                    <button id="conversationFiltersToggle" class="small ghost conversation-filters-toggle" data-action="toggle-conversation-filters" aria-expanded="false">Filters</button>
+                  </div>
                 </div>
-                <div class="toolbar">
+                <div id="conversationToolbar" class="toolbar">
                   <div class="toolbar-left">
                     <select id="conversationClientFilter"></select>
                     <select id="conversationStateFilter">
@@ -4316,11 +5120,11 @@
                     </select>
                     <input id="conversationDateFrom" type="date" />
                     <input id="conversationDateTo" type="date" />
-                    <label class="checkbox-inline">
+                    <label class="checkbox-inline toolbar-check">
                       <input id="conversationUnreadOnly" type="checkbox" />
                       new on this device
                     </label>
-                    <label id="conversationShowArchivedWrap" class="checkbox-inline hidden">
+                    <label id="conversationShowArchivedWrap" class="checkbox-inline toolbar-check hidden">
                       <input id="conversationShowArchived" type="checkbox" />
                       show archived
                     </label>
@@ -4342,7 +5146,10 @@
                 <div class="drag-handle" data-split="conversations" data-edge="left"></div>
                 <section class="pane thread-pane focus-surface">
                   <div class="pane-header">
-                    <div class="pane-title"><h3 id="threadTitle">Thread</h3></div>
+                    <div class="pane-title">
+                      <button id="conversationMobileBackButton" class="small ghost conversation-mobile-back hidden" data-action="conversation-show-list" aria-label="Back to conversations">Back</button>
+                      <h3 id="threadTitle">Thread</h3>
+                    </div>
                     <div id="threadHeaderPills" class="chip-row"></div>
                   </div>
                   <div id="threadTimeline" class="timeline"></div>
@@ -4525,6 +5332,13 @@
                           <div class="detail-card lead-section lead-summary-card lead-form-section">
                             <div class="title">Form answers</div>
                             <div id="crmLeadSummaryList" class="summary-list"></div>
+                          </div>
+                          <div class="detail-card lead-section">
+                            <div class="item-title-row">
+                              <div class="title">AI intent reasoning</div>
+                              <div id="crmLeadAgentIntentPills" class="chip-row"></div>
+                            </div>
+                            <div id="crmLeadAgentInsights" class="compact-list"></div>
                           </div>
                           <div class="detail-card lead-section lead-stage-card">
                             <div class="item-title-row">
@@ -4776,29 +5590,11 @@
                 <div id="settingsGlobalCard" class="surface stack settings-card admin-only">
                   <div class="surface-title">
                     <div>
-                      <h3>Global provider defaults</h3>
-                      <div class="surface-subtitle">Client-scoped provider credentials are configured inside Clients > Edit.</div>
+                      <h3>Global AI provider</h3>
+                      <div class="surface-subtitle">One centralized OpenAI configuration powers every business account. Channel credentials live inside Clients > Edit.</div>
                     </div>
                   </div>
                   <div class="form-grid-3">
-                    <div>
-                      <label for="settingsTwilioSid">Twilio SID</label>
-                      <input id="settingsTwilioSid" class="mono" placeholder="AC..." />
-                    </div>
-                    <div>
-                      <label for="settingsTwilioToken">Twilio token</label>
-                      <input id="settingsTwilioToken" class="mono" placeholder="token" />
-                    </div>
-                    <div>
-                      <label for="settingsTwilioFrom">Twilio from number</label>
-                      <input id="settingsTwilioFrom" class="mono" placeholder="+15551234567" />
-                    </div>
-                  </div>
-                  <div class="form-grid-3">
-                    <div>
-                      <label for="settingsPublicBaseUrl">Public base URL</label>
-                      <input id="settingsPublicBaseUrl" class="mono" placeholder="https://abc123.ngrok-free.dev" />
-                    </div>
                     <div>
                       <label for="settingsOpenAiKey">OpenAI key</label>
                       <input id="settingsOpenAiKey" class="mono" placeholder="sk-..." />
@@ -4807,36 +5603,15 @@
                       <label for="settingsOpenAiModel">OpenAI model</label>
                       <input id="settingsOpenAiModel" placeholder="gpt-5.4-mini" />
                     </div>
-                  </div>
-                  <div class="form-grid-3">
                     <div>
                       <label for="settingsAiMode">AI mode</label>
                       <select id="settingsAiMode">
                         <option value="auto">auto</option>
                       </select>
                     </div>
-                    <div>
-                      <label for="settingsMetaVerify">Meta verify token</label>
-                      <input id="settingsMetaVerify" class="mono" placeholder="meta-verify-token" />
-                    </div>
-                    <div>
-                      <label for="settingsMetaAccessToken">Meta access token</label>
-                      <input id="settingsMetaAccessToken" class="mono" placeholder="EAAB..." />
-                    </div>
-                  </div>
-                  <div class="form-grid-3">
-                    <div>
-                      <label for="settingsMetaApiVersion">Meta API version</label>
-                      <input id="settingsMetaApiVersion" class="mono" placeholder="v22.0" />
-                    </div>
-                    <div>
-                      <label for="settingsLinkedinVerify">LinkedIn verify token</label>
-                      <input id="settingsLinkedinVerify" class="mono" placeholder="linkedin-verify-token" />
-                    </div>
-                    <div></div>
                   </div>
                   <div class="actions">
-                    <button id="saveRuntimeButton" class="primary">Save runtime settings</button>
+                    <button id="saveRuntimeButton" class="primary">Save AI settings</button>
                   </div>
                   <div id="settingsRuntimeStatus" class="meta-text"></div>
                   <div id="settingsRuntimeSummary" class="chip-row"></div>
@@ -4884,6 +5659,25 @@
                       <button id="saveAiContextButton" class="primary">Save AI context</button>
                     </div>
                     <div id="settingsAiContextStatus" class="meta-text"></div>
+                  </div>
+                  <div class="surface stack settings-card">
+                    <div class="surface-title">
+                      <div>
+                        <h3>Website knowledge</h3>
+                        <div class="surface-subtitle">Add source URLs the assistant can use as factual context. Extraction results appear below for review.</div>
+                      </div>
+                    </div>
+                    <div>
+                      <label for="settingsKnowledgeUrlsInput">Source URLs</label>
+                      <textarea id="settingsKnowledgeUrlsInput" class="mono" placeholder="https://example.com/services&#10;https://example.com/pricing"></textarea>
+                    </div>
+                    <div class="actions">
+                      <button id="ingestKnowledgeButton" class="primary">Ingest URLs</button>
+                      <button id="refreshKnowledgeButton" class="ghost">Refresh extraction</button>
+                    </div>
+                    <div id="settingsKnowledgeStatus" class="meta-text"></div>
+                    <div id="settingsKnowledgeSummary" class="compact-list"></div>
+                    <pre id="settingsKnowledgeExtraction" class="code-output"></pre>
                   </div>
                   <div class="surface stack settings-card settings-calendar-card">
                     <div class="surface-title">
@@ -5121,6 +5915,26 @@
                     </div>
                     <div id="labStartStatus" class="meta-text"></div>
                   </div>
+                  <div class="surface stack" style="padding: 10px;">
+                    <div class="surface-title">
+                      <div>
+                        <h3>AI Sandbox</h3>
+                        <div class="surface-subtitle">Test the agent in-app with no Twilio delivery. Messages are saved to a normal conversation thread.</div>
+                      </div>
+                    </div>
+                    <div class="detail-card">
+                      <div class="title">How it works</div>
+                      <div class="meta-text">Start a Peter Lead sandbox, then use the thread composer to type as the lead. The AI replies in the app using a mock SMS sender, so suspended Twilio accounts do not block testing.</div>
+                    </div>
+                    <div>
+                      <label for="labSandboxName">Sandbox lead name</label>
+                      <div class="lead-combo-control util-inline-combo">
+                        <input id="labSandboxName" placeholder="Peter Lead" />
+                        <button id="labStartAiSandbox" class="combo-action">Start sandbox</button>
+                      </div>
+                    </div>
+                    <div id="labSandboxStatus" class="meta-text"></div>
+                  </div>
                 </div>
 
                 <div class="stack">
@@ -5192,6 +6006,38 @@
           </div>
         </main>
       </div>
+      <nav id="mobileTabbar" class="mobile-tabbar" aria-label="Mobile navigation">
+        <div class="mobile-tabbar-inner">
+          <button id="mobileNavDashboard" class="mobile-tab-item nav-item" data-action="set-view" data-view="dashboard">
+            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg>
+            <span class="mobile-tab-label">Home</span>
+          </button>
+          <button id="mobileNavClients" class="mobile-tab-item nav-item" data-action="set-view" data-view="clients" data-admin-nav="true">
+            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg>
+            <span class="mobile-tab-label">Clients</span>
+          </button>
+          <button id="mobileNavConversations" class="mobile-tab-item nav-item" data-action="set-view" data-view="conversations">
+            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11v7h-6l-3 2v-2h-2z"/></svg>
+            <span class="mobile-tab-label">Inbox</span>
+          </button>
+          <button id="mobileNavCrm" class="mobile-tab-item nav-item" data-action="set-view" data-view="crm">
+            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5" cy="4.5" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="11.5" r="1"/></svg>
+            <span class="mobile-tab-label">Pipeline</span>
+          </button>
+          <button id="mobileNavCalendar" class="mobile-tab-item nav-item" data-action="set-view" data-view="calendar">
+            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/></svg>
+            <span class="mobile-tab-label">Calendar</span>
+          </button>
+          <button id="mobileNavTasks" class="mobile-tab-item nav-item" data-action="set-view" data-view="tasks">
+            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4.5h10v9H3zM5.5 2.5v2M10.5 2.5v2M5.5 8h1.5M5.5 10.5h5"/></svg>
+            <span class="mobile-tab-label">Tasks</span>
+          </button>
+          <button id="mobileNavSettings" class="mobile-tab-item nav-item" data-action="set-view" data-view="settings">
+            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2.5v2M8 11.5v2M3.5 8h-2M14.5 8h-2M4.8 4.8 3.4 3.4M12.6 12.6 11.2 11.2M11.2 4.8l1.4-1.4M3.4 12.6l1.4-1.4"/><circle cx="8" cy="8" r="2.2"/></svg>
+            <span class="mobile-tab-label">Settings</span>
+          </button>
+        </div>
+      </nav>
     </div>
 
     <script>
@@ -5205,6 +6051,7 @@
         logs: [],
         ownerWorkspace: null,
         zapierResults: null,
+        knowledge: null,
         conversations: { items: [], counts: {}, total: 0 },
         crmLeads: { items: [], counts: {}, total: 0, stages: [] },
         crmLeadDetail: null,
@@ -5216,7 +6063,11 @@
         selectedClientKey: localStorage.getItem("lead-ui-selected-client") || "",
         activeLeadId: Number(localStorage.getItem("lead-ui-active-lead") || 0) || null,
         activeCrmLeadId: Number(localStorage.getItem("lead-ui-active-crm-lead") || 0) || null,
+        sandboxLeadId: Number(localStorage.getItem("lead-ui-sandbox-lead") || 0) || null,
         activeView: localStorage.getItem("lead-ui-view") || "dashboard",
+        conversationMobilePanel: localStorage.getItem("lead-ui-conv-mobile-panel") || "list",
+        conversationFiltersExpanded: localStorage.getItem("lead-ui-conv-filters-open") === "true",
+        threadTimelineLeadId: null,
         clientTab: localStorage.getItem("lead-ui-client-tab") || "overview",
         sidebarCollapsed: localStorage.getItem("lead-ui-sidebar-collapsed") === "true",
         theme: localStorage.getItem("lead-ui-theme") || "dark",
@@ -5286,6 +6137,8 @@
         localStorage.setItem("lead-ui-active-lead", state.activeLeadId ? String(state.activeLeadId) : "");
         localStorage.setItem("lead-ui-active-crm-lead", state.activeCrmLeadId ? String(state.activeCrmLeadId) : "");
         localStorage.setItem("lead-ui-view", state.activeView);
+        localStorage.setItem("lead-ui-conv-mobile-panel", state.conversationMobilePanel || "list");
+        localStorage.setItem("lead-ui-conv-filters-open", String(Boolean(state.conversationFiltersExpanded)));
         localStorage.setItem("lead-ui-client-tab", state.clientTab);
         localStorage.setItem("lead-ui-sidebar-collapsed", String(state.sidebarCollapsed));
         localStorage.setItem("lead-ui-theme", state.theme);
@@ -5304,6 +6157,7 @@
         localStorage.setItem("lead-ui-task-status", state.taskFilters.status || "all");
         localStorage.setItem("lead-ui-calendar-month", state.calendarMonth || "");
         localStorage.setItem("lead-ui-calendar-day", state.calendarSelectedDate || "");
+        localStorage.setItem("lead-ui-sandbox-lead", state.sandboxLeadId || "");
         localStorage.setItem("lead-ui-split-conv-left", String(state.split.conversations.left));
         localStorage.setItem("lead-ui-split-conv-right", String(state.split.conversations.right));
         localStorage.setItem("lead-ui-auth-mode", state.authMode);
@@ -5931,8 +6785,7 @@
       function selectedClientPublicBaseUrl() {
         const detailBase = state.clientDetail?.client?.provider_config?.public_base_url || "";
         const ownerBase = state.ownerWorkspace?.client?.provider_config?.public_base_url || "";
-        const globalBase = state.runtime?.public_base_url || "";
-        return detailBase || ownerBase || globalBase;
+        return detailBase || ownerBase;
       }
 
       function absoluteUrl(path, preferredBase = "") {
@@ -6042,6 +6895,65 @@
         `).join("");
       }
 
+      function formatIntentReason(reason) {
+        const labels = {
+          clear_service_or_project_need: "Clear service or project need",
+          specific_form_scope: "Specific scope in form answers",
+          some_form_context: "Some form context",
+          timeline_provided: "Timeline provided",
+          urgent_timeline: "Urgent timeline",
+          decision_path_known: "Decision path known",
+          decision_maker_signal: "Decision-maker signal",
+          location_context: "Location context",
+          meaningful_size_or_scope: "Meaningful size or scope",
+          pricing_question: "Pricing question",
+          scheduling_intent: "Scheduling intent",
+          buying_signal: "Buying signal",
+          low_intent_language: "Low-intent language",
+          generic_question: "Generic question",
+        };
+        return labels[reason] || formatFormKey(reason || "signal");
+      }
+
+      function intentTone(intentLevel) {
+        const level = String(intentLevel || "").toUpperCase();
+        if (level.includes("HIGH")) return "ok";
+        if (level.includes("MEDIUM")) return "info";
+        if (level.includes("LOW")) return "warn";
+        return "";
+      }
+
+      function renderAgentInsights(insights = {}) {
+        const reasons = Array.isArray(insights.intent_reasons) ? insights.intent_reasons : [];
+        const missing = Array.isArray(insights.important_missing_fields) ? insights.important_missing_fields : [];
+        const rows = [];
+        if (insights.intent_score != null && insights.intent_score !== "") {
+          rows.push({ label: "Intent score", value: String(insights.intent_score) });
+        }
+        if (reasons.length) {
+          rows.push({
+            label: "Why this intent",
+            value: reasons.map(formatIntentReason).join(", "),
+          });
+        }
+        if (insights.meeting_status) {
+          rows.push({ label: "Meeting status", value: formatFormKey(insights.meeting_status) });
+        }
+        if (insights.meeting_suggested_count) {
+          rows.push({ label: "Meeting suggestions", value: String(insights.meeting_suggested_count) });
+        }
+        if (missing.length) {
+          rows.push({
+            label: "Useful missing info",
+            value: missing.slice(0, 3).map((item) => item.label || formatFormKey(item.key || "")).filter(Boolean).join(", "),
+          });
+        }
+        if (insights.recommended_follow_up) {
+          rows.push({ label: "Recommended follow-up", value: insights.recommended_follow_up });
+        }
+        return rows.length ? renderSummaryFacts(rows) : '<div class="empty-state">No AI reasoning captured yet.</div>';
+      }
+
       function formatAuditEventLabel(eventType) {
         const labels = {
           agent_decision: "AI response",
@@ -6121,7 +7033,7 @@
       function updateWindowIndicators() {
         const isAdmin = !isClientRole();
         const selectedRuntime = state.clientDetail?.provider_runtime || state.ownerWorkspace?.runtime || state.runtime || {};
-        const twilioOk = Boolean(selectedRuntime.twilio_configured ?? (state.runtime?.twilio_account_sid_configured && state.runtime?.twilio_auth_token_configured && state.runtime?.twilio_from_number));
+        const twilioOk = Boolean(selectedRuntime.twilio_configured);
         const aiOk = Boolean(selectedRuntime.ai_configured ?? state.runtime?.openai_api_key_configured);
 
         const client = selectedClient();
@@ -6170,6 +7082,7 @@
         document.querySelector("#topNavCrm .top-nav-label").textContent = isAdmin ? "CRM" : "Pipeline";
         document.querySelector("#navCrm .nav-label").textContent = isAdmin ? "CRM" : "Pipeline";
         document.querySelector("#navCrm .nav-meta").textContent = isAdmin ? "Pipeline board" : "Lead pipeline and restores";
+        document.querySelector("#mobileNavCrm .mobile-tab-label").textContent = isAdmin ? "CRM" : "Pipeline";
         document.querySelector("#topNavLeads .top-nav-label").textContent = isAdmin ? "Leads" : "Lead Details";
         document.querySelector("#navLeads .nav-label").textContent = isAdmin ? "Leads" : "Lead Details";
         document.querySelector("#navLeads .nav-meta").textContent = isAdmin ? "CRM records" : "Full lead records";
@@ -6177,7 +7090,7 @@
         setText(
           "conversationViewSubtitle",
           isAdmin
-            ? "Resizable inbox, thread, and details panes. Optimized for daily operator work."
+            ? "Inbox-first workflow: resizable three-pane on desktop, tap-to-open thread flow on mobile."
             : "Review messages, reply directly, archive finished leads, and keep private notes for your team."
         );
         setText("crmViewTitle", isAdmin ? "CRM" : "Pipeline");
@@ -6230,10 +7143,74 @@
 
       function setActiveView(view, pushHash = true) {
         state.activeView = view;
+        if (view === "conversations" && isMobileViewport()) {
+          state.conversationMobilePanel = "list";
+        }
         if (pushHash) window.location.hash = view;
         document.querySelectorAll(".view").forEach((node) => node.classList.toggle("active", node.id === `view-${view}`));
         document.querySelectorAll(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === view));
+        if (isMobileViewport()) {
+          const workspace = document.querySelector(".workspace");
+          if (workspace) workspace.scrollTo({ top: 0, left: 0, behavior: "auto" });
+        }
+        updateConversationMobileLayout();
+        updateConversationFilterUi();
         saveLocalState();
+      }
+
+      function isMobileViewport() {
+        return window.matchMedia("(max-width: 920px)").matches;
+      }
+
+      function updateConversationMobileLayout() {
+        const shell = document.getElementById("conversationShell");
+        const backButton = document.getElementById("conversationMobileBackButton");
+        if (!shell || !backButton) return;
+        const mobile = isMobileViewport();
+        shell.classList.remove("mobile-list", "mobile-thread");
+        if (!mobile) {
+          backButton.classList.add("hidden");
+          return;
+        }
+        const panel = state.conversationMobilePanel === "thread" && state.activeLeadId ? "thread" : "list";
+        state.conversationMobilePanel = panel;
+        shell.classList.add(panel === "thread" ? "mobile-thread" : "mobile-list");
+        backButton.classList.toggle("hidden", panel !== "thread");
+      }
+
+      function showConversationListPanel() {
+        state.conversationMobilePanel = "list";
+        updateConversationMobileLayout();
+        saveLocalState();
+      }
+
+      function setConversationFiltersExpanded(expanded) {
+        state.conversationFiltersExpanded = Boolean(expanded);
+        updateConversationFilterUi();
+        saveLocalState();
+      }
+
+      function updateConversationFilterUi() {
+        const view = document.getElementById("view-conversations");
+        const toggle = document.getElementById("conversationFiltersToggle");
+        if (!view || !toggle) return;
+        const mobile = window.matchMedia("(max-width: 680px)").matches;
+        if (!mobile) {
+          view.classList.remove("mobile-filters-open");
+          toggle.classList.add("hidden");
+          toggle.setAttribute("aria-expanded", "false");
+          return;
+        }
+        toggle.classList.remove("hidden");
+        const isOpen = Boolean(state.conversationFiltersExpanded);
+        view.classList.toggle("mobile-filters-open", isOpen);
+        toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+        toggle.textContent = isOpen ? "Hide filters" : "Filters";
+      }
+
+      function isNearBottom(node, threshold = 72) {
+        if (!node) return true;
+        return (node.scrollHeight - node.scrollTop - node.clientHeight) <= threshold;
       }
 
       function routeFromHash() {
@@ -6407,6 +7384,7 @@
         if (!effectiveClientKey) {
           state.ownerWorkspace = null;
           state.zapierResults = null;
+          state.knowledge = null;
           renderTestLab();
           renderZapierResults();
           renderSettings();
@@ -6419,6 +7397,7 @@
         const [ownerWorkspace, zapierResults] = await Promise.all([ownerWorkspacePromise, zapierPromise]);
         state.ownerWorkspace = ownerWorkspace;
         state.zapierResults = zapierResults;
+        state.knowledge = ownerWorkspace?.knowledge || null;
         renderTestLab();
         renderZapierResults();
         renderConversationClientGuide();
@@ -6494,13 +7473,24 @@
         if (!visibleItems.length) {
           state.activeLeadId = null;
           state.thread = null;
+          state.conversationMobilePanel = "list";
           renderThread();
+          updateConversationMobileLayout();
           saveLocalState();
           return;
         }
         const stillVisible = visibleItems.some((item) => item.lead_id === state.activeLeadId);
         if (!stillVisible) {
-          await openThread(visibleItems[0].lead_id);
+          if (isMobileViewport()) {
+            state.activeLeadId = null;
+            state.thread = null;
+            state.conversationMobilePanel = "list";
+            renderThread();
+            updateConversationMobileLayout();
+            saveLocalState();
+          } else {
+            await openThread(visibleItems[0].lead_id);
+          }
         } else {
           renderThread();
         }
@@ -6588,9 +7578,14 @@
           state.viewedMap[leadId] = current.last_activity_at;
           saveLocalState();
         }
+        if (isMobileViewport()) {
+          state.conversationMobilePanel = "thread";
+          saveLocalState();
+        }
         renderConversationList();
         renderDashboard();
         renderThread();
+        updateConversationMobileLayout();
       }
 
       function isUnreadConversation(item) {
@@ -6606,6 +7601,29 @@
         if (!Number.isFinite(percent)) return "0%";
         const rounded = percent >= 10 ? Math.round(percent) : Number(percent.toFixed(1));
         return `${rounded}%`;
+      }
+
+      function formatDashboardNumber(value) {
+        const number = Number(value || 0);
+        if (!Number.isFinite(number)) return "0";
+        return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(number);
+      }
+
+      function formatDashboardMoney(value, options = {}) {
+        const number = Number(value || 0);
+        const maximumFractionDigits = options.compact ? 1 : 2;
+        if (!Number.isFinite(number)) return "$0";
+        if (options.compact && Math.abs(number) >= 1000) {
+          return `$${new Intl.NumberFormat("en-US", {
+            notation: "compact",
+            maximumFractionDigits,
+          }).format(number)}`;
+        }
+        return new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: "USD",
+          maximumFractionDigits,
+        }).format(number);
       }
 
       function dashboardChartColor(kind, key, index) {
@@ -6736,31 +7754,95 @@
         `;
       }
 
-      function renderDashboardUnreadMessages() {
-        const q = state.globalSearch.trim().toLowerCase();
-        const baseItems = (state.conversations.items?.length ? state.conversations.items : (state.dashboard?.recent_conversations || []))
-          .filter((item) => !q || JSON.stringify(item).toLowerCase().includes(q));
-        const unread = baseItems.filter((item) => isUnreadConversation(item)).slice(0, 6);
-        document.getElementById("dashboardUnreadPills").innerHTML = unread.length
-          ? renderBadge(`${unread.length} unread`, "info")
-          : renderBadge("0 unread");
-        document.getElementById("dashboardUnreadMessages").innerHTML = unread.length
-          ? unread.map((item) => `
-              <button type="button" class="dashboard-message-row dashboard-message-row-action" data-action="open-thread" data-lead-id="${item.lead_id}">
-                <div class="dashboard-message-top">
-                  <div>
-                    <div class="dashboard-message-name">${escapeHtml(item.lead_name || item.phone || `Lead ${item.lead_id}`)}</div>
-                    <div class="dashboard-message-meta">${escapeHtml([item.phone || "-", !isClientRole() ? (item.client_name || "") : ""].filter(Boolean).join(" · "))}</div>
-                  </div>
-                  <div class="actions">
-                    ${renderBadge("new", "info")}
-                    <div class="dashboard-message-meta">${escapeHtml(formatDateTime(item.last_activity_at))}</div>
-                  </div>
-                </div>
-                <div class="dashboard-message-snippet">${escapeHtml(item.last_message_snippet || "No messages yet.")}</div>
-              </button>
-            `).join("")
-          : '<div class="dashboard-empty">No unread messages right now.</div>';
+      function renderDashboardCampaignPerformance(performance) {
+        const campaigns = Array.isArray(performance?.campaigns) ? performance.campaigns : [];
+        const totals = performance?.totals || {};
+        if (!campaigns.length) {
+          return '<div class="dashboard-empty">No ad campaign report imported yet.</div>';
+        }
+        const maxConversions = Math.max(...campaigns.map((item) => Number(item.conversions || 0)), 1);
+        const funnelSteps = [
+          {
+            label: "Impressions",
+            value: formatDashboardNumber(totals.impressions),
+            fill: 100,
+            color: "var(--accent)",
+          },
+          {
+            label: "Clicks",
+            value: formatDashboardNumber(totals.clicks),
+            fill: Math.max(8, Math.round(Number(totals.ctr || 0) * 1000)),
+            color: "#4ac2b7",
+          },
+          {
+            label: "Leads",
+            value: formatDashboardNumber(totals.conversions),
+            fill: Math.max(8, Math.round(Number(totals.conversion_rate || 0) * 100)),
+            color: "var(--success)",
+          },
+        ];
+        const kpis = [
+          {
+            label: "Spend",
+            value: formatDashboardMoney(totals.spend, { compact: true }),
+            meta: `${formatDashboardNumber(totals.campaigns)} campaigns`,
+          },
+          {
+            label: "CPC",
+            value: formatDashboardMoney(totals.cpc),
+            meta: `${formatDashboardPercent(totals.ctr)} CTR`,
+          },
+          {
+            label: "Cost / lead",
+            value: formatDashboardMoney(totals.cost_per_conversion),
+            meta: `${formatDashboardNumber(totals.conversions)} conversions`,
+          },
+          {
+            label: "Reach",
+            value: formatDashboardNumber(totals.reach),
+            meta: performance.report_range || "Last 30 days",
+          },
+        ];
+        const campaignRows = campaigns.slice(0, 3).map((campaign) => {
+          const width = Math.max(5, Math.round((Number(campaign.conversions || 0) / maxConversions) * 100));
+          return `
+            <div class="dashboard-campaign-row">
+              <div class="dashboard-campaign-row-head">
+                <div class="dashboard-campaign-name">${escapeHtml(campaign.campaign_name || "Untitled campaign")}</div>
+                ${renderBadge(campaign.status || "active", campaign.status === "learning" ? "warn" : "ok")}
+              </div>
+              <div class="dashboard-campaign-metrics">
+                <div class="dashboard-campaign-metric"><strong>${escapeHtml(formatDashboardNumber(campaign.conversions))}</strong> leads</div>
+                <div class="dashboard-campaign-metric"><strong>${escapeHtml(formatDashboardMoney(campaign.cost_per_conversion))}</strong> cost / lead</div>
+                <div class="dashboard-campaign-metric"><strong>${escapeHtml(formatDashboardMoney(campaign.cpc))}</strong> CPC</div>
+                <div class="dashboard-campaign-metric"><strong>${escapeHtml(formatDashboardNumber(campaign.clicks))}</strong> clicks</div>
+              </div>
+              <div class="dashboard-campaign-bar" aria-hidden="true">
+                <div class="dashboard-campaign-bar-fill" style="width:${width}%"></div>
+              </div>
+            </div>
+          `;
+        }).join("");
+        return `
+          <div class="dashboard-campaign-kpis">
+            ${kpis.map((item) => `
+              <div class="dashboard-campaign-kpi">
+                <div class="dashboard-campaign-kpi-label">${escapeHtml(item.label)}</div>
+                <div class="dashboard-campaign-kpi-value">${escapeHtml(item.value)}</div>
+                <div class="dashboard-campaign-kpi-meta">${escapeHtml(item.meta)}</div>
+              </div>
+            `).join("")}
+          </div>
+          <div class="dashboard-campaign-funnel" aria-label="Ad campaign funnel">
+            ${funnelSteps.map((item) => `
+              <div class="dashboard-campaign-step" style="--step-fill:${item.fill}%;--step-color:${item.color}">
+                <div class="dashboard-campaign-step-label">${escapeHtml(item.label)}</div>
+                <div class="dashboard-campaign-step-value">${escapeHtml(item.value)}</div>
+              </div>
+            `).join("")}
+          </div>
+          <div class="dashboard-campaign-list">${campaignRows}</div>
+        `;
       }
 
       function renderDashboardStageChart(items) {
@@ -6846,7 +7928,9 @@
           </div>
         `).join("");
         const q = state.globalSearch.trim().toLowerCase();
-        const filtered = items.filter((item) => !q || JSON.stringify(item).toLowerCase().includes(q));
+        const filtered = items
+          .filter((item) => !q || JSON.stringify(item).toLowerCase().includes(q))
+          .slice(0, 5);
         document.getElementById("dashboardLatestLeads").innerHTML = filtered.length
           ? filtered.map((item) => `
               <button type="button" class="dashboard-lead-row dashboard-lead-row-action" data-action="open-thread" data-lead-id="${item.lead_id}">
@@ -6854,13 +7938,12 @@
                   <div class="dashboard-lead-top">
                     <div style="min-width:0;">
                       <div class="dashboard-lead-context">
-                        ${renderBadge(formatLeadSourceLabel(item.source), "")}
                         ${item.crm_stage ? renderBadge(item.crm_stage, crmStageTone(item.crm_stage)) : ""}
                         ${new Date(item.created_at).getTime() >= (Date.now() - (24 * 60 * 60 * 1000)) ? renderBadge("new", "info") : ""}
                       </div>
                       <div class="dashboard-lead-name">${escapeHtml(item.lead_name || item.phone || `Lead ${item.lead_id}`)}</div>
                       <div class="dashboard-lead-meta">
-                        ${escapeHtml([item.phone || "", !isClientRole() ? (item.client_name || "") : ""].filter(Boolean).join(" · ") || "No contact details")}
+                        ${escapeHtml([formatLeadSourceLabel(item.source), item.phone || "", !isClientRole() ? (item.client_name || "") : ""].filter(Boolean).join(" · ") || "No contact details")}
                       </div>
                     </div>
                     <div class="dashboard-lead-time">
@@ -6868,47 +7951,10 @@
                       <strong>${escapeHtml(formatDateTime(item.created_at))}</strong>
                     </div>
                   </div>
-                  <div class="dashboard-lead-snippet">${escapeHtml(item.last_message_snippet || "No messages yet.")}</div>
                 </div>
               </button>
             `).join("")
           : '<div class="dashboard-empty">No leads match the current search.</div>';
-      }
-
-      function renderDashboardFocus(stats) {
-        const items = [
-          {
-            label: "Needs attention",
-            value: stats.attention_needed || 0,
-            detail: isClientRole() ? "Active leads still moving through the pipeline." : "Open conversations that still need human review.",
-            view: "conversations",
-          },
-          {
-            label: "Open tasks",
-            value: stats.open_tasks_total || 0,
-            detail: stats.overdue_tasks_total ? `${stats.overdue_tasks_total} overdue follow-up${stats.overdue_tasks_total === 1 ? "" : "s"}.` : "No overdue follow-ups.",
-            view: "tasks",
-          },
-          {
-            label: "Due today",
-            value: stats.due_today_tasks || 0,
-            detail: stats.due_today_tasks ? "Tasks scheduled for today." : "Nothing is due today.",
-            view: "tasks",
-          },
-          {
-            label: "Next 7 days",
-            value: stats.upcoming_meetings_7d || 0,
-            detail: "Scheduled meetings coming up soon.",
-            view: "calendar",
-          },
-        ];
-        return items.map((item) => `
-          <button type="button" class="dashboard-focus-card" data-action="set-view" data-view="${escapeHtml(item.view)}">
-            <div class="dashboard-focus-label">${escapeHtml(item.label)}</div>
-            <div class="dashboard-focus-value">${escapeHtml(String(item.value))}</div>
-            <div class="dashboard-focus-detail">${escapeHtml(item.detail)}</div>
-          </button>
-        `).join("");
       }
 
       function renderDashboardUpcoming(upcoming) {
@@ -6953,64 +7999,53 @@
         setText(
           "dashboardHeroSubtitle",
           isAdmin
-            ? "A clean operating view of lead generation, pipeline health, recent conversations, and next actions across the workspace."
+            ? "A clean operating view of new leads first, then immediate actions and pipeline health."
             : "A single place to track incoming leads, source mix, next meetings, and the follow-ups your business needs to handle."
         );
 
-        document.getElementById("dashboardKpis").innerHTML = [
+        const kpis = [
           {
             label: "Total leads",
             value: stats.total_leads || stats.conversations_total || 0,
             meta: `${stats.new_last_30_days || 0} in the last 30 days`,
             foot: `${stats.new_last_7_days || 0} added this week`,
+            view: "leads",
           },
-          isAdmin
-            ? {
-                label: "Active clients",
-                value: stats.active_clients || 0,
-                meta: `${stats.clients_total || 0} total client accounts`,
-                foot: `${stats.attention_needed || 0} leads currently need attention`,
-              }
-            : {
-                label: "Open pipeline",
-                value: stats.open_pipeline_total || 0,
-                meta: `${stats.attention_needed || 0} active conversations`,
-                foot: `${stats.booked_total || 0} already booked`,
-              },
           {
             label: "New last 24h",
             value: stats.new_last_24_hours || 0,
             meta: `${stats.new_last_7_days || 0} in the last 7 days`,
             foot: `${stats.new_last_30_days || 0} in the last 30 days`,
+            view: "leads",
           },
           {
             label: "Open tasks",
             value: stats.open_tasks_total || 0,
             meta: `${stats.overdue_tasks_total || 0} overdue`,
             foot: `${stats.upcoming_meetings_7d || 0} meetings in the next 7 days`,
+            view: "tasks",
           },
-        ].map((item) => `
-          <div class="dashboard-kpi-card">
+        ];
+        document.getElementById("dashboardKpis").innerHTML = kpis.map((item) => `
+          <button type="button" class="dashboard-kpi-card dashboard-kpi-action" data-action="set-view" data-view="${escapeHtml(item.view)}">
             <div class="dashboard-kpi-label">${escapeHtml(item.label)}</div>
             <div class="dashboard-kpi-value">${escapeHtml(String(item.value))}</div>
             <div class="dashboard-kpi-meta">${escapeHtml(item.meta)}</div>
             <div class="dashboard-kpi-foot">${escapeHtml(item.foot)}</div>
-          </div>
+          </button>
         `).join("");
 
-        const pills = [
-          renderBadge(state.dashboard.runtime.twilio_configured ? "Twilio ready" : "Twilio incomplete", state.dashboard.runtime.twilio_configured ? "ok" : "warn"),
-          renderBadge(state.dashboard.runtime.ai_configured ? `AI ${state.dashboard.runtime.openai_model}` : "AI offline", state.dashboard.runtime.ai_configured ? "ok" : "warn"),
-          isAdmin
-            ? renderBadge(state.session?.demo_data_present ? "demo data loaded" : "demo data empty", state.session?.demo_data_present ? "info" : "warn")
-            : renderBadge("client scope", "info"),
-        ].join("");
+        document.getElementById("dashboardHeroPills").innerHTML = [
+          { label: "Open leads", view: "leads" },
+          { label: "Pipeline", view: "crm" },
+          { label: "Tasks", view: "tasks" },
+          { label: "Calendar", view: "calendar" },
+        ].map((item) => `<button type="button" class="small ghost" data-action="set-view" data-view="${item.view}">${escapeHtml(item.label)}</button>`).join("");
         document.getElementById("dashboardTrend").innerHTML = renderDashboardTrend(state.dashboard.lead_trend || []);
         document.getElementById("dashboardSourceBreakdown").innerHTML = renderDashboardGraph(state.dashboard.source_breakdown || [], "source");
+        document.getElementById("dashboardCampaignPerformance").innerHTML = renderDashboardCampaignPerformance(state.dashboard.campaign_performance || {});
         document.getElementById("dashboardStageBreakdown").innerHTML = renderDashboardStageChart(state.dashboard.stage_breakdown || []);
-        document.getElementById("dashboardFocusGrid").innerHTML = renderDashboardFocus(stats);
         document.getElementById("dashboardUpcoming").innerHTML = renderDashboardUpcoming(state.dashboard.upcoming || {});
-        renderDashboardUnreadMessages();
         renderDashboardLatestLeads(state.dashboard.recent_leads || [], stats);
       }
 
@@ -7178,6 +8213,12 @@
         const crmSummaryList = document.getElementById("crmLeadSummaryList");
         crmSummaryList.innerHTML = renderSummaryFacts(leadSummaryLines);
         crmSummaryList.classList.toggle("hidden", !leadSummaryLines.length);
+        const agentInsights = payload.lead.agent_insights || {};
+        document.getElementById("crmLeadAgentIntentPills").innerHTML = [
+          agentInsights.intent_level ? renderBadge(agentInsights.intent_level, intentTone(agentInsights.intent_level)) : "",
+          agentInsights.qualification_level ? renderBadge(formatFormKey(agentInsights.qualification_level), "") : "",
+        ].filter(Boolean).join("");
+        document.getElementById("crmLeadAgentInsights").innerHTML = renderAgentInsights(agentInsights);
 
         const visibleDetailTags = (payload.tags || []).filter((tag) => !isDeprecatedUiTag(tag));
         document.getElementById("crmLeadTags").innerHTML = visibleDetailTags.length
@@ -7550,22 +8591,17 @@
           twilio_account_sid: document.getElementById("clientProviderTwilioSid").value.trim(),
           twilio_auth_token: document.getElementById("clientProviderTwilioToken").value.trim(),
           twilio_from_number: document.getElementById("clientProviderTwilioFrom").value.trim(),
-          openai_api_key: document.getElementById("clientProviderOpenAiKey").value.trim(),
-          openai_model: document.getElementById("clientProviderOpenAiModel").value.trim(),
-          ai_provider_mode: document.getElementById("clientProviderAiMode").value,
           meta_verify_token: document.getElementById("clientProviderMetaVerify").value.trim(),
           meta_access_token: document.getElementById("clientProviderMetaAccess").value.trim(),
           meta_graph_api_version: document.getElementById("clientProviderMetaVersion").value.trim(),
           linkedin_verify_token: document.getElementById("clientProviderLinkedinVerify").value.trim(),
+          zapier_webhook_secret: document.getElementById("clientProviderZapierSecret").value.trim(),
           public_base_url: document.getElementById("clientProviderPublicBaseUrl").value.trim(),
         };
         const providerConfig = {};
         Object.entries(providerConfigRaw).forEach(([key, value]) => {
           if (value) providerConfig[key] = value;
         });
-        if (providerConfig.openai_api_key && !providerConfig.openai_model) {
-          providerConfig.openai_model = "gpt-4.1-mini";
-        }
         if (providerConfig.meta_access_token && !providerConfig.meta_graph_api_version) {
           providerConfig.meta_graph_api_version = "v22.0";
         }
@@ -7609,6 +8645,18 @@
         return payload;
       }
 
+      function resetClientProviderFields() {
+        document.getElementById("clientProviderTwilioSid").value = "";
+        document.getElementById("clientProviderTwilioToken").value = "";
+        document.getElementById("clientProviderTwilioFrom").value = "";
+        document.getElementById("clientProviderMetaVerify").value = "";
+        document.getElementById("clientProviderMetaAccess").value = "";
+        document.getElementById("clientProviderMetaVersion").value = "v22.0";
+        document.getElementById("clientProviderLinkedinVerify").value = "";
+        document.getElementById("clientProviderZapierSecret").value = "";
+        document.getElementById("clientProviderPublicBaseUrl").value = "";
+      }
+
       function resetClientForm() {
         state.creatingClient = false;
         if (state.clientDetail?.client) {
@@ -7623,17 +8671,7 @@
           document.getElementById("clientBookingUrl").value = "";
           document.getElementById("clientBookingMode").value = "internal";
           applyInternalCalendarToForm({});
-          document.getElementById("clientProviderTwilioSid").value = "";
-          document.getElementById("clientProviderTwilioToken").value = "";
-          document.getElementById("clientProviderTwilioFrom").value = "";
-          document.getElementById("clientProviderOpenAiKey").value = "";
-          document.getElementById("clientProviderOpenAiModel").value = "gpt-4.1-mini";
-          document.getElementById("clientProviderAiMode").value = "auto";
-          document.getElementById("clientProviderMetaVerify").value = "";
-          document.getElementById("clientProviderMetaAccess").value = "";
-          document.getElementById("clientProviderMetaVersion").value = "v22.0";
-          document.getElementById("clientProviderLinkedinVerify").value = "";
-          document.getElementById("clientProviderPublicBaseUrl").value = "";
+          resetClientProviderFields();
           document.getElementById("clientHandoffNumber").value = "";
           document.getElementById("clientConsentText").value = "Reply STOP to opt out. Msg/data rates may apply.";
           document.getElementById("clientPortalDisplayName").value = "";
@@ -7663,17 +8701,7 @@
         document.getElementById("clientBookingUrl").value = "";
         document.getElementById("clientBookingMode").value = "internal";
         applyInternalCalendarToForm({});
-        document.getElementById("clientProviderTwilioSid").value = "";
-        document.getElementById("clientProviderTwilioToken").value = "";
-        document.getElementById("clientProviderTwilioFrom").value = "";
-        document.getElementById("clientProviderOpenAiKey").value = "";
-        document.getElementById("clientProviderOpenAiModel").value = "gpt-4.1-mini";
-        document.getElementById("clientProviderAiMode").value = "auto";
-        document.getElementById("clientProviderMetaVerify").value = "";
-        document.getElementById("clientProviderMetaAccess").value = "";
-        document.getElementById("clientProviderMetaVersion").value = "v22.0";
-        document.getElementById("clientProviderLinkedinVerify").value = "";
-        document.getElementById("clientProviderPublicBaseUrl").value = "";
+        resetClientProviderFields();
         document.getElementById("clientHandoffNumber").value = "";
         document.getElementById("clientConsentText").value = "Reply STOP to opt out. Msg/data rates may apply.";
         document.getElementById("clientPortalDisplayName").value = "";
@@ -7702,13 +8730,11 @@
         document.getElementById("clientProviderTwilioSid").value = provider.twilio_account_sid || "";
         document.getElementById("clientProviderTwilioToken").value = provider.twilio_auth_token || "";
         document.getElementById("clientProviderTwilioFrom").value = provider.twilio_from_number || "";
-        document.getElementById("clientProviderOpenAiKey").value = provider.openai_api_key || "";
-        document.getElementById("clientProviderOpenAiModel").value = provider.openai_model || "gpt-4.1-mini";
-        document.getElementById("clientProviderAiMode").value = "auto";
         document.getElementById("clientProviderMetaVerify").value = provider.meta_verify_token || "";
         document.getElementById("clientProviderMetaAccess").value = provider.meta_access_token || "";
         document.getElementById("clientProviderMetaVersion").value = provider.meta_graph_api_version || "v22.0";
         document.getElementById("clientProviderLinkedinVerify").value = provider.linkedin_verify_token || "";
+        document.getElementById("clientProviderZapierSecret").value = provider.zapier_webhook_secret || "";
         document.getElementById("clientProviderPublicBaseUrl").value = provider.public_base_url || "";
         document.getElementById("clientHandoffNumber").value = data.client.fallback_handoff_number || "";
         document.getElementById("clientConsentText").value = data.client.consent_text || "";
@@ -7827,6 +8853,7 @@
               `;
             }).join("")
           : `<div class="empty-state"><div>${isClientRole() && archivedHiddenCount ? "Your active inbox is clear. Archived leads stay in Pipeline until you restore them." : "No conversations match the current filters."}</div><div class="actions" style="margin-top: 8px;"><button class="small ghost" data-action="clear-conversation-filters">Clear filters</button></div></div>`;
+        updateConversationMobileLayout();
       }
 
       function renderThread() {
@@ -7863,17 +8890,26 @@
           document.getElementById("threadFormAnswers").innerHTML = "";
           document.getElementById("threadNotes").innerHTML = "";
           document.getElementById("threadAuditEvents").innerHTML = "";
+          state.threadTimelineLeadId = null;
           document.getElementById("threadEmpty").classList.remove("hidden");
           document.getElementById("threadDetails").classList.add("hidden");
+          updateConversationMobileLayout();
           return;
         }
 
         const payload = state.thread;
         const archived = leadHasTag(payload.lead.tags || [], "archived");
+        const sandboxThread = leadHasTag(payload.lead.tags || [], "sandbox");
         setText("threadTitle", payload.lead.display_name || payload.lead.phone || "Thread");
         document.getElementById("threadManualMessage").placeholder = isClientRole()
-          ? "Send a direct reply to this lead."
-          : "Type a direct outbound message to this lead.";
+          ? (sandboxThread ? "Type the next lead message for the AI sandbox." : "Send a direct reply to this lead.")
+          : (sandboxThread ? "Type the next lead message for the AI sandbox." : "Type a direct outbound message to this lead.");
+        setText(
+          "threadComposerHint",
+          sandboxThread
+            ? "Sandbox mode: this sends as the lead, runs the AI, and stores the reply here. No Twilio."
+            : (isClientRole() ? "Your reply sends as the business's current SMS delivery mode." : "")
+        );
         const threadActionHintEl = document.getElementById("threadActionHint");
         threadActionHintEl.textContent = "";
         threadActionHintEl.classList.add("hidden");
@@ -7883,7 +8919,9 @@
         const threadHeaderPills = document.getElementById("threadHeaderPills");
         threadHeaderPills.classList.add("hidden");
         threadHeaderPills.innerHTML = "";
-        document.getElementById("threadTimeline").innerHTML = payload.timeline.length
+        const timelineEl = document.getElementById("threadTimeline");
+        const shouldStickToLatest = state.threadTimelineLeadId !== state.activeLeadId || isNearBottom(timelineEl, 96);
+        timelineEl.innerHTML = payload.timeline.length
           ? payload.timeline.map((item) => {
               if (item.type === "message") {
                 const outbound = item.direction === "OUTBOUND";
@@ -7922,6 +8960,12 @@
               return `<div class="note-event"><div class="meta-text">${escapeHtml(formatDateTime(item.created_at))}</div><div>${escapeHtml(item.body || "")}</div></div>`;
             }).join("")
           : '<div class="empty-state">No thread activity yet.</div>';
+        state.threadTimelineLeadId = state.activeLeadId;
+        if (shouldStickToLatest) {
+          window.requestAnimationFrame(() => {
+            timelineEl.scrollTop = timelineEl.scrollHeight;
+          });
+        }
 
         document.getElementById("threadEmpty").classList.add("hidden");
         document.getElementById("threadDetails").classList.remove("hidden");
@@ -7987,6 +9031,7 @@
               `;
             }).join("")
           : `<div class="empty-state">${isClientRole() ? "No technical details yet." : "No visible audit events."}</div>`;
+        updateConversationMobileLayout();
       }
 
       function renderLogs() {
@@ -8021,23 +9066,12 @@
         const isAdmin = !isClientRole();
         const runtime = state.runtime;
         if (isAdmin && runtime) {
-          document.getElementById("settingsTwilioSid").value = runtime.twilio_account_sid || "";
-          document.getElementById("settingsTwilioToken").value = runtime.twilio_auth_token || "";
-          document.getElementById("settingsTwilioFrom").value = runtime.twilio_from_number || "";
-          document.getElementById("settingsPublicBaseUrl").value = runtime.public_base_url || "";
           document.getElementById("settingsOpenAiKey").value = runtime.openai_api_key || "";
           document.getElementById("settingsOpenAiModel").value = runtime.openai_model || "gpt-4.1-mini";
           document.getElementById("settingsAiMode").value = "auto";
-          document.getElementById("settingsMetaVerify").value = runtime.meta_verify_token || "";
-          document.getElementById("settingsMetaAccessToken").value = runtime.meta_access_token || "";
-          document.getElementById("settingsMetaApiVersion").value = runtime.meta_graph_api_version || "v22.0";
-          document.getElementById("settingsLinkedinVerify").value = runtime.linkedin_verify_token || "";
           document.getElementById("settingsRuntimeSummary").innerHTML = [
-            renderBadge(runtime.twilio_account_sid_configured ? "SID set" : "SID missing", runtime.twilio_account_sid_configured ? "ok" : "warn"),
-            renderBadge(runtime.twilio_auth_token_configured ? "token set" : "token missing", runtime.twilio_auth_token_configured ? "ok" : "warn"),
             renderBadge(runtime.openai_api_key_configured ? "OpenAI set" : "OpenAI missing", runtime.openai_api_key_configured ? "ok" : "warn"),
-            renderBadge(runtime.meta_access_token_configured ? "Meta API set" : "Meta API missing", runtime.meta_access_token_configured ? "ok" : "warn"),
-            renderBadge(runtime.public_base_url ? "public URL set" : "public URL missing", runtime.public_base_url && !isLocalLike(runtime.public_base_url) ? "ok" : "warn"),
+            renderBadge(runtime.openai_model || "model missing", runtime.openai_model ? "info" : "warn"),
           ].join("");
         }
 
@@ -8110,6 +9144,7 @@
 
         document.getElementById("settingsAiContextInput").value = clientConfig?.ai_context || "";
         document.getElementById("settingsFaqContextInput").value = clientConfig?.faq_context || "";
+        renderKnowledgeSettings();
         document.getElementById("settingsPeterLeadPhone").value = localStorage.getItem("lead-ui-peter-test-phone") || "";
         applySettingsCalendarToForm(clientConfig?.booking_config || {});
         renderSettingsCalendarVisuals();
@@ -8151,8 +9186,8 @@
           const clientBaseUrl = clientConfig?.provider_config?.public_base_url || "";
           const rows = Object.entries(webhookData || {}).map(([key, value]) => ({ label: key.replaceAll("_", " "), value: absoluteUrl(value, clientBaseUrl) }));
           document.getElementById("settingsWebhookRows").innerHTML = renderWebhookRows(rows);
-          const effectiveBase = (clientBaseUrl || state.runtime?.public_base_url || "").trim();
-          setText("settingsWebhookWarning", effectiveBase && !isLocalLike(effectiveBase) ? "" : "Set a public base URL (client provider config preferred) for provider-ready webhook copies. Relative or localhost URLs will not work for Twilio or ad platforms.");
+          const effectiveBase = clientBaseUrl.trim();
+          setText("settingsWebhookWarning", effectiveBase && !isLocalLike(effectiveBase) ? "" : "Set this client's public base URL in Clients > Edit for provider-ready webhook copies. Relative or localhost URLs will not work for Twilio or ad platforms.");
         }
 
         const demoClients = state.clients.filter((client) => client.client_key.startsWith("demo-"));
@@ -8176,6 +9211,8 @@
           document.getElementById("testLabOwnerSummary").innerHTML = "Select a client to prepare live testing.";
           document.getElementById("testLabChecklist").innerHTML = '<div class="empty-state">No client selected.</div>';
           document.getElementById("labZapierWebhook").value = "";
+          document.getElementById("labSandboxName").value = "";
+          setText("labSandboxStatus", "");
           return;
         }
         const clientBaseUrl = state.ownerWorkspace.client.provider_config?.public_base_url || "";
@@ -8190,8 +9227,17 @@
         document.getElementById("testLabChecklist").innerHTML = renderChecklist(state.ownerWorkspace.live_test_checklist || []);
         document.getElementById("labTestClientKey").value = state.selectedClientKey || "";
         document.getElementById("labPeterLeadPhone").value = localStorage.getItem("lead-ui-peter-test-phone") || "";
+        document.getElementById("labSandboxName").value = document.getElementById("labSandboxName").value || "Peter Lead";
         document.getElementById("labZapierWebhook").value = zapierUrl;
         setText("labStartStatus", "");
+        setText(
+          "labSandboxStatus",
+          state.sandboxLeadId ? `Active sandbox lead: ${state.sandboxLeadId}. Open it in Conversations and type in the thread composer.` : ""
+        );
+      }
+
+      function isActiveSandboxThread() {
+        return Boolean(state.thread?.lead && leadHasTag(state.thread.lead.tags || [], "sandbox"));
       }
 
       function renderZapierResults() {
@@ -8231,9 +9277,115 @@
         }
       }
 
+      function renderKnowledgeSettings() {
+        const urlsInput = document.getElementById("settingsKnowledgeUrlsInput");
+        const summary = document.getElementById("settingsKnowledgeSummary");
+        const output = document.getElementById("settingsKnowledgeExtraction");
+        if (!urlsInput || !summary || !output) return;
+
+        const sources = state.knowledge?.sources || [];
+        if (document.activeElement !== urlsInput) {
+          urlsInput.value = sources.map((source) => source.url).filter(Boolean).join("\n");
+        }
+        if (!state.selectedClientKey) {
+          summary.innerHTML = '<div class="empty-state">Select a client first.</div>';
+          output.textContent = "";
+          return;
+        }
+        if (!sources.length) {
+          summary.innerHTML = '<div class="empty-state">No website knowledge sources yet.</div>';
+          output.textContent = "Add one URL per line, then ingest to preview extracted text and chunks.";
+          return;
+        }
+
+        summary.innerHTML = sources.map((source) => {
+          const tone = source.status === "ok" ? "ok" : "warn";
+          const title = source.title || source.normalized_url || source.url;
+          const detail = source.status === "ok"
+            ? `${source.chunk_count || 0} chunks · ${formatDateTime(source.last_crawled_at)}`
+            : (source.error_message || "Extraction failed");
+          return `
+            <div class="preview-item">
+              <div class="item-title-row">
+                <div class="item-title">${escapeHtml(title)}</div>
+                ${renderBadge(source.status || "pending", tone)}
+              </div>
+              <div class="item-subtitle mono">${escapeHtml(source.url || "")}</div>
+              <div class="item-snippet">${escapeHtml(detail)}</div>
+            </div>
+          `;
+        }).join("");
+
+        const lines = [];
+        sources.forEach((source, sourceIndex) => {
+          lines.push(`[${sourceIndex + 1}] ${source.title || source.url}`);
+          lines.push(`URL: ${source.url}`);
+          lines.push(`Status: ${source.status}${source.error_message ? ` (${source.error_message})` : ""}`);
+          if (source.text_excerpt) {
+            lines.push(`Extracted excerpt:\n${source.text_excerpt}`);
+          }
+          (source.chunks || []).slice(0, 5).forEach((chunk) => {
+            lines.push(`Chunk ${Number(chunk.chunk_index || 0) + 1}:\n${chunk.content}`);
+          });
+          lines.push("");
+        });
+        output.textContent = lines.join("\n");
+      }
+
+      async function refreshKnowledgeSettings() {
+        if (!state.selectedClientKey) {
+          setText("settingsKnowledgeStatus", "Select a client first.");
+          renderKnowledgeSettings();
+          return;
+        }
+        try {
+          state.knowledge = await apiJson(`/ui/api/owner/${encodeURIComponent(state.selectedClientKey)}/knowledge`);
+          renderKnowledgeSettings();
+          setText("settingsKnowledgeStatus", `Loaded ${state.knowledge.total_sources || 0} sources.`);
+        } catch (error) {
+          setText("settingsKnowledgeStatus", `Refresh failed: ${error.message}`);
+          showNotice(`Knowledge refresh failed: ${error.message}`, "err");
+        }
+      }
+
+      async function ingestKnowledgeUrls() {
+        if (!state.selectedClientKey) {
+          setText("settingsKnowledgeStatus", "Select a client first.");
+          return;
+        }
+        const urls = document.getElementById("settingsKnowledgeUrlsInput").value
+          .split(/\n+/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        if (!urls.length) {
+          setText("settingsKnowledgeStatus", "Add at least one URL.");
+          return;
+        }
+        setText("settingsKnowledgeStatus", "Fetching and extracting website text...");
+        try {
+          const result = await apiJson(`/ui/api/owner/${encodeURIComponent(state.selectedClientKey)}/knowledge/ingest`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ urls, replace: true }),
+          });
+          state.knowledge = result;
+          if (state.ownerWorkspace?.client?.client_key === state.selectedClientKey) {
+            state.ownerWorkspace.knowledge = result;
+          }
+          renderKnowledgeSettings();
+          const okCount = (result.extraction?.pages || []).filter((page) => page.status === "ok").length;
+          setText("settingsKnowledgeStatus", `Ingested ${okCount}/${urls.length} URLs · ${result.total_chunks || 0} chunks.`);
+          showNotice("Website knowledge ingested.", "ok");
+        } catch (error) {
+          setText("settingsKnowledgeStatus", `Ingest failed: ${error.message}`);
+          showNotice(`Knowledge ingest failed: ${error.message}`, "err");
+        }
+      }
+
       async function saveClient() {
         try {
           const payload = clientFormPayload(state.creatingClient);
+          const portalPasswordUpdated = Boolean(payload.portal_password);
           let result;
           if (state.creatingClient) {
             result = await apiJson("/admin/clients", {
@@ -8248,12 +9400,16 @@
             result = await apiJson(`/admin/clients/${encodeURIComponent(state.selectedClientKey)}`, {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(clientFormPayload(false)),
+              body: JSON.stringify(payload),
             });
             showNotice(`Saved ${result.business_name}.`, "ok");
           }
           document.getElementById("clientPortalPassword").value = "";
-          setText("clientSaveStatus", "Saved.");
+          setText("clientSaveStatus", portalPasswordUpdated ? "Saved. Portal password updated." : "Saved.");
+          setText(
+            "clientPortalStatus",
+            portalPasswordUpdated ? "Password was updated. Use the new value at client login." : "Password is configured. Set a new value to rotate it."
+          );
           await Promise.all([loadClients(), loadClientDetail(state.selectedClientKey), loadLogs(state.selectedClientKey), loadOwnerWorkspace(state.selectedClientKey), loadCalendar(), loadDashboard()]);
         } catch (error) {
           setText("clientSaveStatus", `Save failed: ${error.message}`);
@@ -8297,19 +9453,11 @@
 
       async function saveRuntimeSettings() {
         const payload = {
-          twilio_from_number: document.getElementById("settingsTwilioFrom").value.trim(),
-          public_base_url: document.getElementById("settingsPublicBaseUrl").value.trim(),
           openai_model: document.getElementById("settingsOpenAiModel").value.trim() || "gpt-4.1-mini",
           ai_provider_mode: document.getElementById("settingsAiMode").value,
-          meta_graph_api_version: document.getElementById("settingsMetaApiVersion").value.trim() || "v22.0",
         };
         const maybeSet = [
-          ["twilio_account_sid", document.getElementById("settingsTwilioSid").value.trim()],
-          ["twilio_auth_token", document.getElementById("settingsTwilioToken").value.trim()],
           ["openai_api_key", document.getElementById("settingsOpenAiKey").value.trim()],
-          ["meta_verify_token", document.getElementById("settingsMetaVerify").value.trim()],
-          ["meta_access_token", document.getElementById("settingsMetaAccessToken").value.trim()],
-          ["linkedin_verify_token", document.getElementById("settingsLinkedinVerify").value.trim()],
         ];
         maybeSet.forEach(([key, value]) => {
           if (value) payload[key] = value;
@@ -8656,14 +9804,22 @@
           setText("threadManualStatus", "Message body is required.");
           return;
         }
+        const sandboxThread = isActiveSandboxThread();
         try {
-          await apiJson(`/ui/api/conversations/${state.activeLeadId}/messages/manual`, {
+          const endpoint = sandboxThread
+            ? `/ui/api/conversations/${state.activeLeadId}/sandbox/messages`
+            : `/ui/api/conversations/${state.activeLeadId}/messages/manual`;
+          const result = await apiJson(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ body }),
           });
           document.getElementById("threadManualMessage").value = "";
-          setText("threadManualStatus", "Sent.");
+          if (sandboxThread) {
+            state.sandboxLeadId = state.activeLeadId;
+            saveLocalState();
+          }
+          setText("threadManualStatus", sandboxThread ? "AI replied in sandbox." : "Sent.");
           if (state.session?.role === "client") {
             await loadConversations();
             await loadCrmLeads();
@@ -8671,10 +9827,13 @@
           } else {
             await Promise.all([loadConversations(), openThread(state.activeLeadId), loadCrmLeads(), loadLogs(state.selectedClientKey), loadDashboard()]);
           }
-          showNotice("Manual message sent.", "ok");
+          if (sandboxThread) {
+            document.getElementById("testLabOutput").textContent = JSON.stringify(result, null, 2);
+          }
+          showNotice(sandboxThread ? "Sandbox turn completed." : "Manual message sent.", "ok");
         } catch (error) {
           setText("threadManualStatus", `Send failed: ${error.message}`);
-          showNotice(`Manual message failed: ${error.message}`, "err");
+          showNotice(`${sandboxThread ? "Sandbox turn" : "Manual message"} failed: ${error.message}`, "err");
         }
       }
 
@@ -8826,6 +9985,36 @@
         } catch (error) {
           setText(statusId, `Lead test failed: ${error.message}`);
           showNotice(`Lead test failed: ${error.message}`, "err");
+        }
+      }
+
+      async function startAiSandbox() {
+        if (!state.selectedClientKey) {
+          setText("labSandboxStatus", "Select a client first.");
+          return;
+        }
+        const fullName = document.getElementById("labSandboxName").value.trim() || "Peter Lead";
+        try {
+          const result = await apiJson(`/ui/api/owner/${encodeURIComponent(state.selectedClientKey)}/sandbox/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ full_name: fullName }),
+          });
+          state.sandboxLeadId = result.lead_id;
+          saveLocalState();
+          setText("labSandboxStatus", `Sandbox started. Lead ${result.lead_id} is open in Conversations.`);
+          document.getElementById("testLabOutput").textContent = JSON.stringify(result, null, 2);
+          if (state.session?.role === "client") {
+            await Promise.all([loadOwnerWorkspace(state.selectedClientKey), loadConversations(), loadCrmLeads(), loadCalendar(), loadCrmTasks()]);
+          } else {
+            await Promise.all([loadDashboard(), loadOwnerWorkspace(state.selectedClientKey), loadLogs(state.selectedClientKey), loadConversations(), loadCrmLeads()]);
+          }
+          setActiveView("conversations");
+          await openThread(result.lead_id);
+          showNotice("AI sandbox started. Type in the thread composer to continue as the lead.", "ok");
+        } catch (error) {
+          setText("labSandboxStatus", `Sandbox failed: ${error.message}`);
+          showNotice(`Sandbox failed: ${error.message}`, "err");
         }
       }
 
@@ -9032,7 +10221,7 @@
           } else if (state.activeView === "logs") {
             await loadLogs(state.selectedClientKey);
           } else if (state.activeView === "settings") {
-            await Promise.all([loadRuntime(), loadClientDetail(state.selectedClientKey)]);
+            await Promise.all([loadRuntime(), loadClientDetail(state.selectedClientKey), loadOwnerWorkspace(state.selectedClientKey)]);
           } else if (state.activeView === "test-lab") {
             await loadOwnerWorkspace(state.selectedClientKey);
           }
@@ -9044,6 +10233,11 @@
 
       function applyPaneSizes() {
         const shell = document.getElementById("conversationShell");
+        if (!shell) return;
+        if (isMobileViewport()) {
+          shell.style.gridTemplateColumns = "minmax(0, 1fr)";
+          return;
+        }
         shell.style.gridTemplateColumns = `${state.split.conversations.left}px 5px minmax(360px, 1fr) 5px ${state.split.conversations.right}px`;
       }
 
@@ -9054,7 +10248,7 @@
           if (state.activeView !== "conversations") return;
           try {
             await loadConversations();
-            if (state.activeLeadId) {
+            if (state.activeLeadId && (!isMobileViewport() || state.conversationMobilePanel === "thread")) {
               await openThread(state.activeLeadId);
             }
           } catch (_) {
@@ -9064,6 +10258,7 @@
       }
 
       function startResizer(edge, startX) {
+        if (isMobileViewport()) return;
         const shell = document.getElementById("conversationShell");
         const bounds = shell.getBoundingClientRect();
         const startLeft = state.split.conversations.left;
@@ -9153,6 +10348,8 @@
         setTheme(state.theme);
         applySidebarState();
         applyPaneSizes();
+        updateConversationMobileLayout();
+        updateConversationFilterUi();
       }
 
       function wireEvents() {
@@ -9231,6 +10428,8 @@
         document.getElementById("crmTaskCreateButton").addEventListener("click", createCrmTask);
         document.getElementById("saveRuntimeButton").addEventListener("click", saveRuntimeSettings);
         document.getElementById("saveAiContextButton").addEventListener("click", saveAiContextSettings);
+        document.getElementById("ingestKnowledgeButton").addEventListener("click", ingestKnowledgeUrls);
+        document.getElementById("refreshKnowledgeButton").addEventListener("click", refreshKnowledgeSettings);
         document.getElementById("saveSettingsCalendarButton").addEventListener("click", saveSettingsCalendar);
         ["settingsCalendarSlotMinutes", "settingsCalendarNoticeMinutes", "settingsCalendarHorizonDays"].forEach((id) => {
           const el = document.getElementById(id);
@@ -9259,6 +10458,7 @@
         document.getElementById("reseedClientShowcaseButton").addEventListener("click", () => seedClientShowcase(true));
         document.getElementById("labStartPeterLeadTest").addEventListener("click", () => startPeterLeadTest("lab"));
         document.getElementById("settingsStartPeterLeadTest").addEventListener("click", () => startPeterLeadTest("settings"));
+        document.getElementById("labStartAiSandbox").addEventListener("click", startAiSandbox);
         document.getElementById("labCopyWebhook").addEventListener("click", copySelectedWebhook);
         document.getElementById("labCopyZapierWebhook").addEventListener("click", copyZapierWebhook);
         document.getElementById("labRefreshZapierConsole").addEventListener("click", refreshZapierResults);
@@ -9366,6 +10566,14 @@
             await openThread(target.dataset.leadId);
             return;
           }
+          if (action === "conversation-show-list") {
+            showConversationListPanel();
+            return;
+          }
+          if (action === "toggle-conversation-filters") {
+            setConversationFiltersExpanded(!state.conversationFiltersExpanded);
+            return;
+          }
           if (action === "clear-conversation-filters") {
             resetConversationFilters();
             await loadConversations();
@@ -9390,6 +10598,11 @@
           }
         });
         window.addEventListener("hashchange", routeFromHash);
+        window.addEventListener("resize", () => {
+          applyPaneSizes();
+          updateConversationMobileLayout();
+          updateConversationFilterUi();
+        });
       }
 
       wireEvents();

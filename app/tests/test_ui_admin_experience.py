@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.db.models import CalendarBooking, Client, Lead, LeadSource
 from app.db.session import get_session_factory
+from app.services.sms_service import SMSDeliveryError
 
 
 def _admin_headers() -> dict[str, str]:
@@ -170,6 +171,61 @@ def test_ui_can_simulate_peter_lead_thread(test_context):
     assert thread_payload["messages"]
     assert thread_payload["messages"][0]["direction"] == "OUTBOUND"
     assert any(item["event_type"] == "ui_simulated_initial_ai_sms" for item in thread_payload["audit_events"])
+
+
+def test_ui_simulate_peter_lead_returns_provider_error_when_sms_fails(test_context, monkeypatch):
+    def fail_send_message(*, to_number: str, body: str) -> str:
+        _ = to_number, body
+        raise SMSDeliveryError("SMS provider authentication failed. Check the Twilio Account SID/Auth Token.")
+
+    monkeypatch.setattr(test_context.fake_sms, "send_message", fail_send_message)
+
+    response = test_context.client.post(
+        f"/ui/api/owner/{test_context.client_key}/simulate-peter-lead",
+        headers=_admin_headers(),
+        json={"phone": "+15554443333"},
+    )
+
+    assert response.status_code == 502
+    assert "SMS provider authentication failed" in response.json()["detail"]
+
+
+def test_ai_sandbox_runs_agent_thread_without_sms_provider(test_context):
+    start = test_context.client.post(
+        f"/ui/api/owner/{test_context.client_key}/sandbox/start",
+        headers=_admin_headers(),
+        json={"full_name": "Peter Sandbox"},
+    )
+
+    assert start.status_code == 200
+    start_payload = start.json()
+    assert start_payload["delivery_mode"] == "sandbox"
+    assert start_payload["twilio_bypassed"] is True
+    assert start_payload["lead_id"]
+    assert test_context.fake_sms.sent == []
+
+    turn = test_context.client.post(
+        f"/ui/api/conversations/{start_payload['lead_id']}/sandbox/messages",
+        headers=_admin_headers(),
+        json={"body": "Do you handle Revit models for retail spaces?"},
+    )
+
+    assert turn.status_code == 200
+    turn_payload = turn.json()
+    assert turn_payload["delivery_mode"] == "sandbox"
+    assert turn_payload["twilio_bypassed"] is True
+    assert turn_payload["reply"]["provider_message_sid"].startswith("MOCK-")
+    assert test_context.fake_sms.sent == []
+
+    thread = test_context.client.get(
+        f"/ui/api/conversations/{start_payload['lead_id']}/thread",
+        headers=_admin_headers(),
+    )
+    assert thread.status_code == 200
+    thread_payload = thread.json()
+    assert "sandbox" in thread_payload["lead"]["tags"]
+    assert [message["direction"] for message in thread_payload["messages"]] == ["OUTBOUND", "INBOUND", "OUTBOUND"]
+    assert any("Revit models" in message["body"] for message in thread_payload["messages"])
 
 
 def test_client_portal_can_launch_test_lead_without_admin_token(test_context):
@@ -366,10 +422,10 @@ def test_owner_calendar_settings_endpoint_updates_client_booking_config(test_con
 
 
 def test_owner_workspace_can_start_test_contact_and_send_manual_message(test_context):
-    runtime_update = test_context.client.put(
-        "/admin/runtime-config",
+    runtime_update = test_context.client.patch(
+        f"/admin/clients/{test_context.client_key}",
         headers=_admin_headers(),
-        json={"public_base_url": "https://owner-demo.ngrok-free.app"},
+        json={"provider_config": {"public_base_url": "https://owner-demo.ngrok-free.app"}},
     )
     assert runtime_update.status_code == 200
 

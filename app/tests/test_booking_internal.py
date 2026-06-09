@@ -186,3 +186,36 @@ def test_internal_calendar_slot_handler_ignores_plain_availability_question(test
             db=db,
         )
         assert result is None
+
+
+def test_internal_calendar_first_offer_spreads_across_days_with_coverage_summary(test_context):
+    SessionLocal = get_session_factory()
+    booking_service = BookingService()
+
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.booking_mode = "internal"
+        client.booking_config = _internal_always_open_config()
+
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.META,
+            full_name="Coverage Lead",
+            phone="+15551110003",
+            email="coverage@example.com",
+            city="Austin",
+            form_answers={},
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.flush()
+
+        offer = booking_service.offer_slots(client=client, lead=lead, limit=3, db=db)
+        assert len(offer.slots) == 3
+        offered_dates = {datetime.fromisoformat(slot.start_time.replace("Z", "+00:00")).date() for slot in offer.slots}
+        assert len(offered_dates) >= 2
+        assert "openings including" in offer.reply_text.lower()

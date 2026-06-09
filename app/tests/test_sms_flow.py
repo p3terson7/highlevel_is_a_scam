@@ -541,6 +541,102 @@ def test_sms_inbound_natural_slot_confirmation_still_books(test_context):
     app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
 
 
+def test_sms_inbound_premature_mark_booked_without_booking_does_not_set_booked(test_context):
+    from app.main import app
+
+    class PrematureBookedLLM:
+        def run_turn(self, *, client: Client, lead, inbound_text: str, history, booking_service=None, db=None):
+            _ = client
+            _ = lead
+            _ = inbound_text
+            _ = history
+            _ = booking_service
+            _ = db
+            return AgentResponse(
+                reply_text="3:00 PM works.",
+                next_state=ConversationStateEnum.BOOKED,
+                action="mark_booked",
+            )
+
+        def next_reply(self, client: Client, lead, inbound_text: str, history):
+            return self.run_turn(client=client, lead=lead, inbound_text=inbound_text, history=history)
+
+    premature_llm = PrematureBookedLLM()
+    app.dependency_overrides[get_llm_agent] = lambda: premature_llm
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="meta-lead-019",
+            source=LeadSource.META,
+            full_name="Premature Booked Lead",
+            phone="+15557776666",
+            email="premature@example.com",
+            city="Denver",
+            form_answers={"interest": "consultation"},
+            raw_payload={"source": "seed", "pending_step": "slot_selection_pending"},
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.flush()
+        db.add(
+            Message(
+                client_id=client.id,
+                lead_id=lead.id,
+                direction=MessageDirection.OUTBOUND,
+                body="I found a few times that should work:\n1) Mon Mar 09 at 10:00 AM\n2) Mon Mar 09 at 12:00 PM",
+                provider_message_sid="SM-OFFER-PREMATURE",
+                raw_payload={
+                    "booking_offer": {
+                        "provider": "calendly",
+                        "slots": [
+                            {
+                                "index": 1,
+                                "start_time": "2026-03-09T15:00:00Z",
+                                "display_time": "Mon Mar 09 at 10:00 AM",
+                                "display_hint": "Monday 10:00 AM",
+                                "search_blob": "monday 10am",
+                            },
+                            {
+                                "index": 2,
+                                "start_time": "2026-03-09T17:00:00Z",
+                                "display_time": "Mon Mar 09 at 12:00 PM",
+                                "display_hint": "Monday 12:00 PM",
+                                "search_blob": "monday 12pm",
+                            },
+                        ],
+                    }
+                },
+            )
+        )
+        db.commit()
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 777-6666",
+            "Body": "Let's go with 3 PM",
+            "MessageSid": "SM-IN-018",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "pick one of the offered times" in test_context.fake_sms.sent[-1]["body"].lower()
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15557776666"))
+        assert lead is not None
+        assert lead.conversation_state.value == "BOOKING_SENT"
+        assert lead.crm_stage != "Meeting Booked"
+
+    app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+
+
 def test_sms_inbound_booked_lead_can_still_get_answers(test_context):
     from app.main import app
 

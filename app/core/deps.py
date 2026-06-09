@@ -6,9 +6,9 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.services.booking import BookingService, build_booking_service
-from app.services.llm_agent import LLMAgent, build_llm_agent
+from app.services.llm_agent import LLMAgent, build_llm_agent, clear_llm_provider_cache
 from app.services.runtime_config import load_runtime_overrides
-from app.services.sms_service import SMSService, build_sms_service
+from app.services.sms_service import SMSService, build_sms_service, clear_sms_provider_cache
 
 
 @lru_cache
@@ -56,3 +56,5 @@ def get_booking_service(
 def clear_dependency_caches() -> None:
     _sms_singleton.cache_clear()
     _llm_singleton.cache_clear()
+    clear_sms_provider_cache()
+    clear_llm_provider_cache()

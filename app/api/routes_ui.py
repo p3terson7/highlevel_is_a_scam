@@ -9,7 +9,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, select
+from sqlalchemy import case, desc, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import Settings
@@ -37,9 +38,11 @@ from app.services.booking import (
 )
 from app.services.crm import (
     CRM_STAGE_CONTACTED,
+    CRM_STAGE_QUALIFIED,
     CRM_STAGES,
     TASK_STATUS_DONE,
     TASK_STATUS_OPEN,
+    is_meaningful_inbound,
     normalize_crm_stage,
     normalize_tag,
     normalize_task_status,
@@ -54,6 +57,8 @@ from app.services.demo_seed import (
     seed_showcase_client_data,
 )
 from app.services.lead_intake import normalize_phone
+from app.services.knowledge import KnowledgeIngestionService, knowledge_payload
+from app.services.inbound_sms import process_inbound_turn
 from app.services.llm_agent import build_llm_agent
 from app.services.lead_summary import build_lead_summary_lines, build_lead_summary_text, normalize_form_answers
 from app.services.portal_auth import issue_portal_token, verify_portal_password, verify_portal_token
@@ -63,7 +68,7 @@ from app.services.runtime_config import (
     get_effective_runtime_map_for_client,
     load_runtime_overrides,
 )
-from app.services.sms_service import SMSService, build_sms_service
+from app.services.sms_service import SMSDeliveryError, SMSService, build_mock_sms_service, build_sms_service
 from app.workers.tasks import _meta_initial_seed_text
 
 router = APIRouter(tags=["ui"])
@@ -125,6 +130,16 @@ class PeterLeadTestRequest(BaseModel):
     phone: str
 
 
+class OwnerSandboxStartRequest(BaseModel):
+    full_name: str | None = None
+    city: str | None = None
+    email: str | None = None
+
+
+class OwnerSandboxMessageRequest(BaseModel):
+    body: str
+
+
 class ClientPortalLoginRequest(BaseModel):
     email: str
     password: str
@@ -133,6 +148,11 @@ class ClientPortalLoginRequest(BaseModel):
 class OwnerAIContextUpdateRequest(BaseModel):
     ai_context: str
     faq_context: str | None = None
+
+
+class OwnerKnowledgeIngestRequest(BaseModel):
+    urls: list[str] = Field(default_factory=list)
+    replace: bool = True
 
 
 class OwnerCalendarAvailabilityRow(BaseModel):
@@ -326,7 +346,8 @@ def _sms_service_for_client(
     db: Session,
     client: Client | None,
 ) -> SMSService:
-    if not client_runtime_overrides(client):
+    provider_overrides = client_runtime_overrides(client)
+    if not all(provider_overrides.get(key) for key in ("twilio_account_sid", "twilio_auth_token", "twilio_from_number")):
         return sms_service
     return build_sms_service(settings, runtime_overrides=_effective_runtime(settings, db, client=client))
 
@@ -341,6 +362,26 @@ def _lead_summary(lead: Lead) -> str:
 
 def _lead_summary_lines(lead: Lead) -> list[dict[str, str]]:
     return build_lead_summary_lines(normalize_form_answers(lead.form_answers or {}))
+
+
+def _lead_agent_insights(lead: Lead) -> dict[str, Any]:
+    raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    lead_summary = raw_payload.get("lead_summary") if isinstance(raw_payload.get("lead_summary"), dict) else {}
+    cta_state = raw_payload.get("cta_state") if isinstance(raw_payload.get("cta_state"), dict) else {}
+    important_missing = raw_payload.get("important_missing_fields")
+    if not isinstance(important_missing, list):
+        important_missing = []
+    return {
+        "intent_level": raw_payload.get("intent_level") or lead_summary.get("intent_level") or "",
+        "intent_score": raw_payload.get("intent_score") or 0,
+        "intent_reasons": raw_payload.get("intent_reasons") or lead_summary.get("intent_reasons") or [],
+        "qualification_level": lead_summary.get("qualification_level") or "",
+        "meeting_status": cta_state.get("meeting_status") or lead_summary.get("meeting_status") or "",
+        "meeting_suggested_count": cta_state.get("meeting_suggested_count") or lead_summary.get("meeting_suggested_count") or 0,
+        "cta_state": cta_state,
+        "important_missing_fields": important_missing,
+        "recommended_follow_up": raw_payload.get("recommended_follow_up") or lead_summary.get("recommended_follow_up") or "",
+    }
 
 
 def _snippet(text: str, length: int = 90) -> str:
@@ -389,30 +430,65 @@ def _parse_task_status_filter(raw_status: str | None) -> str | None:
 def _latest_messages_by_lead(db: Session, lead_ids: list[int]) -> dict[int, Message]:
     if not lead_ids:
         return {}
-    latest: dict[int, Message] = {}
+    latest_rows = (
+        select(
+            Message.id.label("message_id"),
+            func.row_number()
+            .over(
+                partition_by=Message.lead_id,
+                order_by=(desc(Message.created_at), desc(Message.id)),
+            )
+            .label("row_number"),
+        )
+        .where(Message.lead_id.in_(lead_ids))
+        .subquery()
+    )
     messages = db.scalars(
         select(Message)
-        .where(Message.lead_id.in_(lead_ids))
-        .order_by(desc(Message.created_at), desc(Message.id))
+        .join(latest_rows, Message.id == latest_rows.c.message_id)
+        .where(latest_rows.c.row_number == 1)
     ).all()
-    for message in messages:
-        latest.setdefault(message.lead_id, message)
-    return latest
+    return {message.lead_id: message for message in messages}
 
 
-def _logs_by_lead(db: Session, lead_ids: list[int]) -> dict[int, list[AuditLog]]:
+def _logs_by_lead(db: Session, lead_ids: list[int], *, per_lead_limit: int = 40) -> dict[int, list[AuditLog]]:
     grouped: dict[int, list[AuditLog]] = defaultdict(list)
     if not lead_ids:
         return grouped
+    latest_rows = (
+        select(
+            AuditLog.id.label("log_id"),
+            func.row_number()
+            .over(
+                partition_by=AuditLog.lead_id,
+                order_by=(desc(AuditLog.created_at), desc(AuditLog.id)),
+            )
+            .label("row_number"),
+        )
+        .where(AuditLog.lead_id.in_(lead_ids))
+        .subquery()
+    )
     logs = db.scalars(
         select(AuditLog)
-        .where(AuditLog.lead_id.in_(lead_ids))
+        .join(latest_rows, AuditLog.id == latest_rows.c.log_id)
+        .where(latest_rows.c.row_number <= max(1, per_lead_limit))
         .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
     ).all()
     for log in logs:
         if log.lead_id is not None:
             grouped[log.lead_id].append(log)
     return grouped
+
+
+def _note_counts_by_lead(db: Session, lead_ids: list[int]) -> dict[int, int]:
+    if not lead_ids:
+        return {}
+    rows = db.execute(
+        select(AuditLog.lead_id, func.count(AuditLog.id))
+        .where(AuditLog.lead_id.in_(lead_ids), AuditLog.event_type == "internal_note")
+        .group_by(AuditLog.lead_id)
+    ).all()
+    return {int(lead_id): int(count) for lead_id, count in rows if lead_id is not None}
 
 
 def _custom_tags_by_lead(db: Session, lead_ids: list[int]) -> dict[int, list[str]]:
@@ -736,7 +812,7 @@ def _send_outbound_message(
     if not lead.phone:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lead has no phone number")
 
-    provider_sid = sms_service.send_message(to_number=lead.phone, body=cleaned_body)
+    provider_sid = _send_sms_or_http_error(sms_service=sms_service, to_number=lead.phone, body=cleaned_body)
     db.add(
         Message(
             lead_id=lead.id,
@@ -785,6 +861,13 @@ def _send_outbound_message(
     return provider_sid, lead.conversation_state
 
 
+def _send_sms_or_http_error(*, sms_service: SMSService, to_number: str, body: str) -> str:
+    try:
+        return sms_service.send_message(to_number=to_number, body=body)
+    except SMSDeliveryError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
 def _build_conversation_items(
     db: Session,
     leads: list[Lead],
@@ -798,6 +881,7 @@ def _build_conversation_items(
     latest_messages = _latest_messages_by_lead(db, lead_ids)
     logs_by_lead = _logs_by_lead(db, lead_ids)
     custom_tags_by_lead = _custom_tags_by_lead(db, lead_ids)
+    note_counts_by_lead = _note_counts_by_lead(db, lead_ids)
 
     items: list[dict[str, Any]] = []
     query_lower = query.lower().strip() if query else ""
@@ -817,7 +901,7 @@ def _build_conversation_items(
             conversation_tags=_conversation_tags(lead, logs),
             custom_tags=custom_tags,
         )
-        notes_count = sum(1 for log in logs if log.event_type == "internal_note")
+        notes_count = note_counts_by_lead.get(lead.id, 0)
         items.append(
             {
                 "lead_id": lead.id,
@@ -850,6 +934,7 @@ def _client_preview_payload(db: Session, settings: Settings, client: Client) -> 
         .options(selectinload(Lead.client))
         .where(Lead.client_id == client.id)
         .order_by(desc(Lead.updated_at), desc(Lead.created_at))
+        .limit(80)
     ).all()
     recent_conversations = _build_conversation_items(db, leads, limit=10)
     recent_logs = db.scalars(
@@ -865,7 +950,15 @@ def _client_preview_payload(db: Session, settings: Settings, client: Client) -> 
         .order_by(desc(Message.created_at), desc(Message.id))
         .limit(1)
     )
-    counts = Counter(lead.conversation_state.value for lead in leads)
+    counts: Counter[str] = Counter()
+    for raw_state, count in db.execute(
+        select(Lead.conversation_state, func.count(Lead.id))
+        .where(Lead.client_id == client.id)
+        .group_by(Lead.conversation_state)
+    ).all():
+        key = raw_state.value if hasattr(raw_state, "value") else str(raw_state or "")
+        if key:
+            counts[key] = int(count)
     onboarding = [
         {
             "label": "Twilio configured",
@@ -949,6 +1042,7 @@ def _owner_workspace_payload(db: Session, settings: Settings, client: Client) ->
         .options(selectinload(Lead.client))
         .where(Lead.client_id == client.id)
         .order_by(desc(Lead.updated_at), desc(Lead.created_at))
+        .limit(120)
     ).all()
     last_outbound = db.scalar(
         select(Message)
@@ -973,6 +1067,7 @@ def _owner_workspace_payload(db: Session, settings: Settings, client: Client) ->
         },
         "runtime": runtime,
         "delivery_mode": "twilio" if runtime["twilio_configured"] else "mock",
+        "knowledge": knowledge_payload(db, client_id=client.id),
         "live_test_checklist": [
             {
                 "label": "Twilio configured",
@@ -1028,12 +1123,88 @@ def _dashboard_breakdown_rows(
     return rows
 
 
+def _dashboard_campaign_performance(clients: list[Client]) -> dict[str, Any]:
+    campaigns: list[dict[str, Any]] = []
+    last_synced_at = ""
+    source_label = "Zapier demo"
+    report_range = "Last 30 days"
+
+    for client in clients:
+        provider_config = client.provider_config if isinstance(client.provider_config, dict) else {}
+        report = provider_config.get("ad_campaign_reports") or provider_config.get("demo_ad_campaign_reports")
+        if not isinstance(report, dict):
+            continue
+        if report.get("last_synced_at"):
+            last_synced_at = max(last_synced_at, str(report.get("last_synced_at")))
+        source_label = str(report.get("source_label") or report.get("source") or source_label)
+        report_range = str(report.get("report_range") or report_range)
+        for raw_campaign in report.get("campaigns") or []:
+            if not isinstance(raw_campaign, dict):
+                continue
+            impressions = max(0, int(raw_campaign.get("impressions") or 0))
+            clicks = max(0, int(raw_campaign.get("clicks") or 0))
+            conversions = max(0, int(raw_campaign.get("conversions") or 0))
+            reach = max(0, int(raw_campaign.get("reach") or 0))
+            spend = max(0.0, float(raw_campaign.get("spend") or 0))
+            cpc = float(raw_campaign.get("cpc") or (spend / clicks if clicks else 0))
+            cost_per_conversion = float(
+                raw_campaign.get("cost_per_conversion") or (spend / conversions if conversions else 0)
+            )
+            campaigns.append(
+                {
+                    "campaign_id": str(raw_campaign.get("campaign_id") or ""),
+                    "campaign_name": str(raw_campaign.get("campaign_name") or "Untitled campaign"),
+                    "client_key": client.client_key,
+                    "client_name": client.business_name,
+                    "platform": str(raw_campaign.get("platform") or report.get("platform") or "Facebook Lead Ads"),
+                    "status": str(raw_campaign.get("status") or "active"),
+                    "objective": str(raw_campaign.get("objective") or "Lead generation"),
+                    "impressions": impressions,
+                    "reach": reach,
+                    "clicks": clicks,
+                    "conversions": conversions,
+                    "spend": round(spend, 2),
+                    "cpc": round(cpc, 2),
+                    "cost_per_conversion": round(cost_per_conversion, 2),
+                    "ctr": (clicks / impressions) if impressions else 0,
+                    "conversion_rate": (conversions / clicks) if clicks else 0,
+                }
+            )
+
+    campaigns.sort(key=lambda item: (item["conversions"], -item["cost_per_conversion"]), reverse=True)
+    total_impressions = sum(item["impressions"] for item in campaigns)
+    total_reach = sum(item["reach"] for item in campaigns)
+    total_clicks = sum(item["clicks"] for item in campaigns)
+    total_conversions = sum(item["conversions"] for item in campaigns)
+    total_spend = sum(float(item["spend"]) for item in campaigns)
+
+    return {
+        "source": source_label,
+        "report_range": report_range,
+        "last_synced_at": last_synced_at,
+        "totals": {
+            "campaigns": len(campaigns),
+            "impressions": total_impressions,
+            "reach": total_reach,
+            "clicks": total_clicks,
+            "conversions": total_conversions,
+            "spend": round(total_spend, 2),
+            "cpc": round((total_spend / total_clicks) if total_clicks else 0, 2),
+            "cost_per_conversion": round((total_spend / total_conversions) if total_conversions else 0, 2),
+            "ctr": (total_clicks / total_impressions) if total_impressions else 0,
+            "conversion_rate": (total_conversions / total_clicks) if total_clicks else 0,
+        },
+        "campaigns": campaigns[:6],
+    }
+
+
 def _dashboard_open_tasks(
     db: Session,
     actor: UIActor,
     *,
+    today: date,
     limit: int = 5,
-) -> tuple[list[LeadTask], list[dict[str, Any]]]:
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
     stmt = (
         select(LeadTask)
         .join(Lead, LeadTask.lead_id == Lead.id)
@@ -1041,14 +1212,31 @@ def _dashboard_open_tasks(
         .options(selectinload(LeadTask.lead).selectinload(Lead.client))
         .where(LeadTask.status == TASK_STATUS_OPEN)
     )
+    count_stmt = (
+        select(func.count(LeadTask.id))
+        .join(Lead, LeadTask.lead_id == Lead.id)
+        .join(Client, LeadTask.client_id == Client.id)
+        .where(LeadTask.status == TASK_STATUS_OPEN)
+    )
+    overdue_stmt = count_stmt.where(LeadTask.due_date < today)
+    due_today_stmt = count_stmt.where(LeadTask.due_date == today)
     if actor.role == "client" and actor.client:
         stmt = stmt.where(LeadTask.client_id == actor.client.id)
+        count_stmt = count_stmt.where(LeadTask.client_id == actor.client.id)
+        overdue_stmt = overdue_stmt.where(LeadTask.client_id == actor.client.id)
+        due_today_stmt = due_today_stmt.where(LeadTask.client_id == actor.client.id)
 
-    tasks = db.scalars(stmt).unique().all()
-    tasks.sort(key=lambda task: (task.due_date is None, task.due_date or date.max, task.created_at))
+    tasks = db.scalars(
+        stmt.order_by(
+            LeadTask.due_date.is_(None),
+            LeadTask.due_date.asc(),
+            LeadTask.created_at.asc(),
+            LeadTask.id.asc(),
+        ).limit(limit)
+    ).unique().all()
 
     items: list[dict[str, Any]] = []
-    for task in tasks[:limit]:
+    for task in tasks:
         lead = task.lead
         item = _serialize_task(task)
         item.update(
@@ -1060,7 +1248,12 @@ def _dashboard_open_tasks(
             }
         )
         items.append(item)
-    return tasks, items
+    summary = {
+        "total": int(db.scalar(count_stmt) or 0),
+        "overdue": int(db.scalar(overdue_stmt) or 0),
+        "due_today": int(db.scalar(due_today_stmt) or 0),
+    }
+    return summary, items
 
 
 def _dashboard_upcoming_meetings(
@@ -1069,7 +1262,7 @@ def _dashboard_upcoming_meetings(
     *,
     now: datetime,
     limit: int = 5,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
     stmt = (
         select(CalendarBooking, Lead, Client)
         .join(Client, CalendarBooking.client_id == Client.id)
@@ -1077,10 +1270,17 @@ def _dashboard_upcoming_meetings(
         .where(CalendarBooking.status == "scheduled", CalendarBooking.end_at >= now)
         .order_by(CalendarBooking.start_at.asc(), CalendarBooking.id.asc())
     )
+    count_stmt = select(func.count(CalendarBooking.id)).where(
+        CalendarBooking.status == "scheduled",
+        CalendarBooking.end_at >= now,
+    )
+    seven_day_stmt = count_stmt.where(CalendarBooking.start_at < now + timedelta(days=8))
     if actor.role == "client" and actor.client:
         stmt = stmt.where(CalendarBooking.client_id == actor.client.id)
+        count_stmt = count_stmt.where(CalendarBooking.client_id == actor.client.id)
+        seven_day_stmt = seven_day_stmt.where(CalendarBooking.client_id == actor.client.id)
 
-    rows = db.execute(stmt).all()
+    rows = db.execute(stmt.limit(limit)).all()
     items = [
         {
             "id": booking.id,
@@ -1098,13 +1298,41 @@ def _dashboard_upcoming_meetings(
         }
         for booking, lead, client in rows
     ]
-    return items, items[:limit]
+    summary = {
+        "total": int(db.scalar(count_stmt) or 0),
+        "next_7_days": int(db.scalar(seven_day_stmt) or 0),
+    }
+    return summary, items
 
 
 def _as_utc_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _start_of_day_utc(value: date) -> datetime:
+    return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+
+
+def _dashboard_lead_count(db: Session, conditions: list[Any], *extra_conditions: Any) -> int:
+    stmt = select(func.count(Lead.id))
+    all_conditions = [*conditions, *extra_conditions]
+    if all_conditions:
+        stmt = stmt.where(*all_conditions)
+    return int(db.scalar(stmt) or 0)
+
+
+def _dashboard_counter_rows(db: Session, column: Any, conditions: list[Any]) -> Counter[str]:
+    stmt = select(column, func.count(Lead.id)).group_by(column)
+    if conditions:
+        stmt = stmt.where(*conditions)
+    counter: Counter[str] = Counter()
+    for raw_key, count in db.execute(stmt).all():
+        key = raw_key.value if hasattr(raw_key, "value") else str(raw_key or "")
+        if key:
+            counter[key] = int(count)
+    return counter
 
 
 @router.get("/ui/api/session")
@@ -1167,17 +1395,25 @@ def ui_dashboard(
     runtime = _runtime_summary(settings, db, client=scoped_client)
     clients = [scoped_client] if scoped_client else db.scalars(select(Client).order_by(Client.business_name.asc())).all()
 
-    leads_stmt = select(Lead).options(selectinload(Lead.client))
-    if scoped_client is not None:
-        leads_stmt = leads_stmt.where(Lead.client_id == scoped_client.id)
-    leads = db.scalars(leads_stmt.order_by(desc(Lead.updated_at), desc(Lead.created_at))).unique().all()
-    recent_conversations = _build_conversation_items(db, leads, limit=8)
     now = datetime.now(timezone.utc)
     today = now.date()
     seven_days_ago = today - timedelta(days=6)
     thirty_days_ago = today - timedelta(days=29)
     one_day_ago = now - timedelta(days=1)
     scoped_client_ids = [client.id for client in clients if client is not None]
+    lead_conditions: list[Any] = []
+    if scoped_client is not None:
+        lead_conditions.append(Lead.client_id == scoped_client.id)
+
+    leads_stmt = select(Lead).options(selectinload(Lead.client))
+    if lead_conditions:
+        leads_stmt = leads_stmt.where(*lead_conditions)
+
+    recent_conversation_leads = db.scalars(
+        leads_stmt.order_by(desc(Lead.updated_at), desc(Lead.created_at), desc(Lead.id)).limit(80)
+    ).unique().all()
+    recent_conversations = _build_conversation_items(db, recent_conversation_leads, limit=8)
+    conversations_total = _dashboard_lead_count(db, lead_conditions)
 
     last_webhook_query = select(AuditLog).where(AuditLog.event_type.in_(_WEBHOOK_EVENT_TYPES))
     last_inbound_query = select(Message).where(Message.direction == MessageDirection.INBOUND)
@@ -1213,16 +1449,21 @@ def ui_dashboard(
             },
             {
                 "label": "Lead intake active",
-                "done": bool(leads) or last_webhook is not None,
+                "done": conversations_total > 0 or last_webhook is not None,
                 "detail": last_webhook.created_at.isoformat() if last_webhook else "No webhook traffic recorded yet.",
             },
         ]
     else:
+        clients_with_sms = sum(
+            1
+            for client in clients
+            if all(client_runtime_overrides(client).get(key) for key in ("twilio_account_sid", "twilio_auth_token", "twilio_from_number"))
+        )
         onboarding = [
             {
-                "label": "Configure Twilio",
-                "done": runtime["twilio_configured"],
-                "detail": runtime["twilio_from_number"] or "Required for real SMS sends.",
+                "label": "Configure client SMS",
+                "done": clients_with_sms > 0,
+                "detail": f"{clients_with_sms} client(s) have Twilio credentials. Set these in Clients > Edit.",
             },
             {
                 "label": "Configure AI",
@@ -1246,7 +1487,10 @@ def ui_dashboard(
             },
         ]
 
-    latest_messages = _latest_messages_by_lead(db, [lead.id for lead in leads])
+    recent_lead_rows = db.scalars(
+        leads_stmt.order_by(desc(Lead.created_at), desc(Lead.id)).limit(8)
+    ).unique().all()
+    latest_messages = _latest_messages_by_lead(db, [lead.id for lead in recent_lead_rows])
     recent_leads = [
         {
             "lead_id": lead.id,
@@ -1261,50 +1505,63 @@ def ui_dashboard(
             "created_at": lead.created_at.isoformat(),
             "last_message_snippet": _snippet(latest_messages.get(lead.id).body if latest_messages.get(lead.id) else "No messages yet."),
         }
-        for lead in sorted(leads, key=lambda item: (item.created_at, item.id), reverse=True)[:8]
+        for lead in recent_lead_rows
     ]
-    source_counts = Counter(lead.source.value for lead in leads)
-    stage_counts = Counter(normalize_crm_stage(lead.crm_stage) for lead in leads)
-    open_tasks, upcoming_tasks = _dashboard_open_tasks(db, actor, limit=5)
-    upcoming_meetings_all, upcoming_meetings = _dashboard_upcoming_meetings(db, actor, now=now, limit=5)
+    source_counts = _dashboard_counter_rows(db, Lead.source, lead_conditions)
+    stage_counts: Counter[str] = Counter()
+    for stage, count in _dashboard_counter_rows(db, Lead.crm_stage, lead_conditions).items():
+        stage_counts[normalize_crm_stage(stage)] += count
+    task_summary, upcoming_tasks = _dashboard_open_tasks(db, actor, today=today, limit=5)
+    meeting_summary, upcoming_meetings = _dashboard_upcoming_meetings(db, actor, now=now, limit=5)
 
     lead_trend: list[dict[str, Any]] = []
     current_week_start = today - timedelta(days=today.weekday())
     for offset in range(5, -1, -1):
         week_start = current_week_start - timedelta(days=offset * 7)
         week_end = week_start + timedelta(days=6)
+        week_start_at = _start_of_day_utc(week_start)
+        week_end_at = _start_of_day_utc(week_end + timedelta(days=1))
         lead_trend.append(
             {
                 "week_start": week_start.isoformat(),
                 "week_end": week_end.isoformat(),
-                "count": sum(1 for lead in leads if week_start <= lead.created_at.date() <= week_end),
+                "count": _dashboard_lead_count(
+                    db,
+                    lead_conditions,
+                    Lead.created_at >= week_start_at,
+                    Lead.created_at < week_end_at,
+                ),
             }
         )
 
     top_clients: list[dict[str, Any]] = []
     if actor.role == "admin":
-        leads_by_client: dict[int, list[Lead]] = defaultdict(list)
-        for lead in leads:
-            leads_by_client[lead.client_id].append(lead)
-        for client in clients:
-            client_leads = leads_by_client.get(client.id, [])
-            last_activity = max(
-                (_last_activity_at(lead, latest_messages.get(lead.id)) for lead in client_leads),
-                default=client.updated_at,
+        client_rows = db.execute(
+            select(
+                Client.id,
+                Client.client_key,
+                Client.business_name,
+                Client.is_active,
+                Client.updated_at,
+                func.count(Lead.id).label("lead_count"),
+                func.sum(case((Lead.conversation_state.notin_(list(_CLOSED_STATES)), 1), else_=0)).label("open_count"),
+                func.sum(case((Lead.conversation_state == ConversationStateEnum.BOOKED, 1), else_=0)).label("booked_count"),
+                func.max(Lead.updated_at).label("last_lead_activity"),
             )
+            .outerjoin(Lead, Lead.client_id == Client.id)
+            .group_by(Client.id, Client.client_key, Client.business_name, Client.is_active, Client.updated_at)
+        ).all()
+        for row in client_rows:
+            last_activity = row.last_lead_activity or row.updated_at
             top_clients.append(
                 {
-                    "client_key": client.client_key,
-                    "business_name": client.business_name,
-                    "lead_count": len(client_leads),
-                    "open_conversations": sum(
-                        1 for lead in client_leads if lead.conversation_state not in _CLOSED_STATES
-                    ),
-                    "booked_total": sum(
-                        1 for lead in client_leads if lead.conversation_state == ConversationStateEnum.BOOKED
-                    ),
+                    "client_key": row.client_key,
+                    "business_name": row.business_name,
+                    "lead_count": int(row.lead_count or 0),
+                    "open_conversations": int(row.open_count or 0),
+                    "booked_total": int(row.booked_count or 0),
                     "last_activity_at": last_activity.isoformat() if last_activity else None,
-                    "is_active": client.is_active,
+                    "is_active": row.is_active,
                 }
             )
         top_clients.sort(
@@ -1317,16 +1574,17 @@ def ui_dashboard(
         )
         top_clients = top_clients[:5]
 
-    attention_count = sum(1 for lead in leads if lead.conversation_state not in _CLOSED_STATES)
-    conversations_total = len(leads)
-    booked_total = sum(1 for lead in leads if lead.conversation_state == ConversationStateEnum.BOOKED)
-    won_total = sum(1 for lead in leads if normalize_crm_stage(lead.crm_stage) == "Won")
-    overdue_tasks = sum(1 for task in open_tasks if task.due_date and task.due_date < today)
-    due_today_tasks = sum(1 for task in open_tasks if task.due_date == today)
-    upcoming_meetings_7d = sum(
-        1
-        for item in upcoming_meetings_all
-        if today <= datetime.fromisoformat(item["start_at"]).date() <= (today + timedelta(days=7))
+    attention_count = _dashboard_lead_count(db, lead_conditions, Lead.conversation_state.notin_(list(_CLOSED_STATES)))
+    booked_total = _dashboard_lead_count(db, lead_conditions, Lead.conversation_state == ConversationStateEnum.BOOKED)
+    won_total = _dashboard_lead_count(db, lead_conditions, Lead.crm_stage == "Won")
+    handoff_total = _dashboard_lead_count(db, lead_conditions, Lead.conversation_state == ConversationStateEnum.HANDOFF)
+    new_last_7_days = _dashboard_lead_count(db, lead_conditions, Lead.created_at >= _start_of_day_utc(seven_days_ago))
+    new_last_30_days = _dashboard_lead_count(db, lead_conditions, Lead.created_at >= _start_of_day_utc(thirty_days_ago))
+    open_pipeline_total = _dashboard_lead_count(
+        db,
+        lead_conditions,
+        Lead.crm_stage.notin_(["Won", "Lost"]),
+        Lead.conversation_state != ConversationStateEnum.OPTED_OUT,
     )
     return {
         "scope": {
@@ -1343,22 +1601,17 @@ def ui_dashboard(
             "total_leads": conversations_total,
             "attention_needed": attention_count,
             "booked_total": booked_total,
-            "handoff_total": sum(1 for lead in leads if lead.conversation_state == ConversationStateEnum.HANDOFF),
+            "handoff_total": handoff_total,
             "won_total": won_total,
-            "new_last_24_hours": sum(1 for lead in leads if _as_utc_datetime(lead.created_at) >= one_day_ago),
-            "new_last_7_days": sum(1 for lead in leads if lead.created_at.date() >= seven_days_ago),
-            "new_last_30_days": sum(1 for lead in leads if lead.created_at.date() >= thirty_days_ago),
-            "open_pipeline_total": sum(
-                1
-                for lead in leads
-                if normalize_crm_stage(lead.crm_stage) not in {"Won", "Lost"}
-                and lead.conversation_state != ConversationStateEnum.OPTED_OUT
-            ),
-            "open_tasks_total": len(open_tasks),
-            "overdue_tasks_total": overdue_tasks,
-            "due_today_tasks": due_today_tasks,
-            "upcoming_meetings_total": len(upcoming_meetings_all),
-            "upcoming_meetings_7d": upcoming_meetings_7d,
+            "new_last_24_hours": _dashboard_lead_count(db, lead_conditions, Lead.created_at >= one_day_ago),
+            "new_last_7_days": new_last_7_days,
+            "new_last_30_days": new_last_30_days,
+            "open_pipeline_total": open_pipeline_total,
+            "open_tasks_total": task_summary["total"],
+            "overdue_tasks_total": task_summary["overdue"],
+            "due_today_tasks": task_summary["due_today"],
+            "upcoming_meetings_total": meeting_summary["total"],
+            "upcoming_meetings_7d": meeting_summary["next_7_days"],
             "booked_rate": (booked_total / conversations_total) if conversations_total else 0,
             "won_rate": (won_total / conversations_total) if conversations_total else 0,
         },
@@ -1372,6 +1625,7 @@ def ui_dashboard(
                 LeadSource.MANUAL.value,
             ],
         ),
+        "campaign_performance": _dashboard_campaign_performance(clients),
         "stage_breakdown": _dashboard_breakdown_rows(stage_counts, ordered_keys=CRM_STAGES),
         "onboarding": onboarding,
         "top_clients": top_clients,
@@ -1614,6 +1868,86 @@ def ui_owner_update_ai_context(
     }
 
 
+@router.get("/ui/api/owner/{client_key}/knowledge")
+def ui_owner_knowledge(
+    client_key: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    if actor.role == "client":
+        client = actor.client
+        if client is None or client.client_key != client_key:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+    else:
+        client = _load_client_by_key(db, client_key)
+
+    return {
+        "status": "ok",
+        "client_key": client.client_key,
+        **knowledge_payload(db, client_id=client.id),
+    }
+
+
+@router.post("/ui/api/owner/{client_key}/knowledge/ingest")
+def ui_owner_ingest_knowledge(
+    client_key: str,
+    payload: OwnerKnowledgeIngestRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    if actor.role == "client":
+        client = actor.client
+        if client is None or client.client_key != client_key:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+    else:
+        client = _load_client_by_key(db, client_key)
+
+    if not payload.urls:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one URL is required")
+
+    service = KnowledgeIngestionService()
+    try:
+        extraction = service.ingest_urls(
+            db=db,
+            client_id=client.id,
+            urls=payload.urls,
+            replace=payload.replace,
+        )
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Website knowledge tables are not available yet. Run alembic upgrade head, then retry ingestion.",
+        ) from exc
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=None,
+            event_type="knowledge_urls_ingested",
+            decision={
+                "urls": payload.urls,
+                "replace": payload.replace,
+                "total_pages": extraction["total_pages"],
+                "total_chunks": extraction["total_chunks"],
+                "actor_role": actor.role,
+            },
+        )
+    )
+    db.commit()
+    return {
+        "status": "ok",
+        "client_key": client.client_key,
+        "extraction": extraction,
+        **knowledge_payload(db, client_id=client.id),
+    }
+
+
 @router.patch("/ui/api/owner/{client_key}/calendar")
 def ui_owner_update_calendar(
     client_key: str,
@@ -1695,6 +2029,8 @@ def ui_conversations(
         stmt = stmt.where(Client.client_key == effective_client_key)
     if state_filter is not None:
         stmt = stmt.where(Lead.conversation_state == state_filter)
+    if not q and from_filter is None and to_filter is None:
+        stmt = stmt.limit(limit)
     leads = db.scalars(stmt.order_by(desc(Lead.updated_at), desc(Lead.created_at))).unique().all()
 
     items = _build_conversation_items(db, leads, limit=limit, date_from=from_filter, date_to=to_filter, query=q)
@@ -1832,6 +2168,9 @@ def ui_conversation_thread(
         "crm_task_updated",
         "manual_outbound_sent",
         "portal_manual_outbound_sent",
+        "ui_sandbox_started",
+        "ui_sandbox_initial_ai_sms",
+        "ui_sandbox_lead_message",
         "admin_marked_handoff",
         "portal_marked_handoff",
         "conversation_archived",
@@ -1860,6 +2199,7 @@ def ui_conversation_thread(
             "form_answers": normalized_answers,
             "summary": _lead_summary(lead),
             "summary_lines": _lead_summary_lines(lead),
+            "agent_insights": _lead_agent_insights(lead),
             "current_state": lead.conversation_state.value,
             "crm_stage": normalize_crm_stage(lead.crm_stage),
             "opted_out": lead.opted_out,
@@ -1969,7 +2309,7 @@ def ui_send_booking_link(
     now = datetime.now(timezone.utc)
     intro = payload.message.strip() if payload.message else "Here is the booking link whenever you are ready."
     body = ensure_booking_link(intro, lead.client)
-    provider_sid = resolved_sms_service.send_message(to_number=lead.phone, body=body)
+    provider_sid = _send_sms_or_http_error(sms_service=resolved_sms_service, to_number=lead.phone, body=body)
     db.add(
         Message(
             lead_id=lead.id,
@@ -2181,6 +2521,10 @@ def ui_crm_leads(
     effective_client_key = _scoped_client_key(actor, client_key)
     if effective_client_key:
         stmt = stmt.where(Client.client_key == effective_client_key)
+    if stage_filter:
+        stmt = stmt.where(Lead.crm_stage == stage_filter)
+    if not q:
+        stmt = stmt.limit(limit)
     leads = db.scalars(stmt.order_by(desc(Lead.updated_at), desc(Lead.created_at))).unique().all()
 
     lead_ids = [lead.id for lead in leads]
@@ -2589,6 +2933,8 @@ def ui_crm_tasks(
         stmt = stmt.where(Client.client_key == effective_client_key)
     if task_status:
         stmt = stmt.where(LeadTask.status == task_status)
+    if not q:
+        stmt = stmt.limit(limit)
     tasks = db.scalars(
         stmt.order_by(LeadTask.status.desc(), LeadTask.due_date.asc(), desc(LeadTask.created_at))
     ).unique().all()
@@ -2808,6 +3154,281 @@ def ui_owner_test_contact(
     }
 
 
+@router.post("/ui/api/owner/{client_key}/sandbox/start")
+def ui_owner_start_ai_sandbox(
+    client_key: str,
+    payload: OwnerSandboxStartRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    client = actor.client if actor.role == "client" else _load_client_by_key(db, client_key)
+    if client is None or client.client_key != client_key:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+
+    effective_runtime = get_effective_runtime_map_for_client(
+        settings=settings,
+        overrides=load_runtime_overrides(db),
+        client=client,
+    )
+    llm_agent = build_llm_agent(settings=settings, runtime_overrides=effective_runtime)
+    sandbox_sms_service = build_mock_sms_service()
+    template = _peter_lead_template(db, client=client)
+    now = datetime.now(timezone.utc)
+
+    lead = Lead(
+        client_id=client.id,
+        external_lead_id=f"ui-sandbox-peter-{int(now.timestamp() * 1000)}",
+        source=LeadSource.MANUAL,
+        full_name=(payload.full_name or template["full_name"] or "Peter Lead").strip(),
+        phone="+10000000000",
+        email=(payload.email or template["email"] or "sandbox@example.com").strip(),
+        city=(payload.city or template["city"] or "").strip(),
+        form_answers={
+            **dict(template.get("form_answers") or {}),
+            "created_from": "ui_ai_sandbox",
+            "simulation_template": "Peter Lead",
+        },
+        raw_payload={
+            "created_from": "ui_ai_sandbox",
+            "simulation_template": "Peter Lead",
+            "actor_role": actor.role,
+            "delivery_mode": "sandbox",
+        },
+        consented=True,
+        opted_out=False,
+        conversation_state=ConversationStateEnum.NEW,
+    )
+    db.add(lead)
+    db.flush()
+    lead.phone = f"+1000{lead.id:07d}"
+    db.add(LeadTag(lead_id=lead.id, client_id=client.id, tag="sandbox"))
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type="ui_sandbox_started",
+            decision={
+                "template": "Peter Lead",
+                "actor_role": actor.role,
+                "delivery_mode": "sandbox",
+                "twilio_bypassed": True,
+            },
+            created_at=now,
+        )
+    )
+
+    ai_seed = _meta_initial_seed_text(lead)
+    ai_response = llm_agent.next_reply(client=client, lead=lead, inbound_text=ai_seed, history=[])
+    body = ai_response.reply_text.strip()
+    if not body:
+        first_name = lead.full_name.split(" ")[0] if lead.full_name else "there"
+        body = f"Hi {first_name}, thanks for reaching out to {client.business_name}."
+
+    qualification_memory = dict(lead.raw_payload or {})
+    qualification_memory["qualification_memory"] = ai_response.collected_fields.model_dump(exclude_none=True)
+    if ai_response.next_question_key:
+        qualification_memory["last_question_key"] = ai_response.next_question_key
+    else:
+        qualification_memory.pop("last_question_key", None)
+    pending_step = (ai_response.runtime_payload or {}).get("pending_step")
+    if pending_step:
+        qualification_memory["pending_step"] = pending_step
+    else:
+        qualification_memory.pop("pending_step", None)
+    for key in (
+        "cta_state",
+        "intent_level",
+        "intent_score",
+        "intent_reasons",
+        "important_missing_fields",
+        "lead_summary",
+        "recommended_follow_up",
+    ):
+        if key in (ai_response.runtime_payload or {}):
+            qualification_memory[key] = ai_response.runtime_payload[key]
+    lead.raw_payload = qualification_memory
+
+    outbound_payload = {
+        "reason": "ui_sandbox_initial_ai_sms",
+        "provider": ai_response.provider,
+        "provider_error": ai_response.provider_error,
+        "agent": {
+            "action": ai_response.action,
+            "next_question_key": ai_response.next_question_key,
+            "collected_fields": ai_response.collected_fields.model_dump(exclude_none=True),
+            "provider": ai_response.provider,
+            "provider_error": ai_response.provider_error,
+            "intent_level": (ai_response.runtime_payload or {}).get("intent_level"),
+            "intent_score": (ai_response.runtime_payload or {}).get("intent_score"),
+            "cta_state": (ai_response.runtime_payload or {}).get("cta_state"),
+            "lead_summary": (ai_response.runtime_payload or {}).get("lead_summary"),
+        },
+        "actions": [action.model_dump() for action in ai_response.actions],
+        "seed_context": ai_seed,
+        "delivery_mode": "sandbox",
+        "twilio_bypassed": True,
+    }
+    provider_sid, _ = _send_outbound_message(
+        db=db,
+        sms_service=sandbox_sms_service,
+        lead=lead,
+        body=body,
+        created_at=now,
+        raw_payload=outbound_payload,
+        audit_event_type="ui_sandbox_initial_ai_sms",
+        audit_decision={"template": "Peter Lead", "actor_role": actor.role, "delivery_mode": "sandbox"},
+        advance_new_to_greeted=False,
+    )
+
+    previous_state = lead.conversation_state
+    previous_stage = lead.crm_stage
+    lead.conversation_state = (
+        ai_response.next_state if ai_response.next_state != ConversationStateEnum.NEW else ConversationStateEnum.QUALIFYING
+    )
+    lead.crm_stage = progress_crm_stage(lead.crm_stage, CRM_STAGE_CONTACTED)
+    lead.initial_sms_sent_at = now
+    lead.last_outbound_at = now
+    lead.updated_at = now
+    if previous_state != lead.conversation_state:
+        db.add(
+            ConversationState(
+                lead_id=lead.id,
+                previous_state=previous_state,
+                new_state=lead.conversation_state,
+                reason="ui_sandbox_initial_ai_sms",
+                metadata_json=outbound_payload,
+                created_at=now,
+            )
+        )
+    if previous_stage != lead.crm_stage:
+        db.add(
+            AuditLog(
+                client_id=client.id,
+                lead_id=lead.id,
+                event_type="crm_stage_auto_updated",
+                decision={
+                    "previous_stage": previous_stage,
+                    "new_stage": lead.crm_stage,
+                    "reason": "ui_sandbox_initial_outbound",
+                },
+                created_at=now,
+            )
+        )
+    db.commit()
+
+    return {
+        "status": "ok",
+        "lead_id": lead.id,
+        "template": "Peter Lead",
+        "state": lead.conversation_state.value,
+        "body": body,
+        "provider_sid": provider_sid,
+        "delivery_mode": "sandbox",
+        "twilio_bypassed": True,
+        "phone": lead.phone,
+    }
+
+
+@router.post("/ui/api/conversations/{lead_id}/sandbox/messages")
+def ui_send_ai_sandbox_message(
+    lead_id: int,
+    payload: OwnerSandboxMessageRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    booking_service: BookingService = Depends(get_booking_service),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    lead = _load_lead_for_actor(db, actor, lead_id)
+    raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    if raw_payload.get("created_from") != "ui_ai_sandbox":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This action is only available for AI sandbox threads")
+
+    inbound_text = payload.body.strip()
+    if not inbound_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Message body is required")
+    if not lead.client:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+
+    now = datetime.now(timezone.utc)
+    inbound_message = Message(
+        lead_id=lead.id,
+        client_id=lead.client_id,
+        direction=MessageDirection.INBOUND,
+        body=inbound_text,
+        provider_message_sid=f"SANDBOX-IN-{int(now.timestamp() * 1000)}",
+        raw_payload={"source": "ui_ai_sandbox", "actor_role": actor.role, "twilio_bypassed": True},
+        created_at=now,
+    )
+    db.add(inbound_message)
+    db.flush()
+    lead.last_inbound_at = now
+    lead.updated_at = now
+
+    if is_meaningful_inbound(inbound_text):
+        _set_crm_stage(
+            db=db,
+            lead=lead,
+            new_stage=CRM_STAGE_QUALIFIED,
+            actor_role="system",
+            reason="sandbox_meaningful_inbound",
+            allow_backward=False,
+            event_type="crm_stage_auto_updated",
+            now=now,
+        )
+    db.add(
+        AuditLog(
+            client_id=lead.client_id,
+            lead_id=lead.id,
+            event_type="ui_sandbox_lead_message",
+            decision={"inbound": inbound_text, "actor_role": actor.role, "twilio_bypassed": True},
+            created_at=now,
+        )
+    )
+
+    effective_runtime = get_effective_runtime_map_for_client(
+        settings=settings,
+        overrides=load_runtime_overrides(db),
+        client=lead.client,
+    )
+    process_inbound_turn(
+        db=db,
+        client=lead.client,
+        lead=lead,
+        inbound_text=inbound_text,
+        now=now,
+        sms_service=build_mock_sms_service(),
+        booking_service=booking_service,
+        llm_agent=build_llm_agent(settings=settings, runtime_overrides=effective_runtime),
+        inbound_message_id=inbound_message.id,
+    )
+
+    latest_outbound = db.scalar(
+        select(Message)
+        .where(Message.lead_id == lead.id, Message.direction == MessageDirection.OUTBOUND)
+        .order_by(desc(Message.created_at), desc(Message.id))
+        .limit(1)
+    )
+    return {
+        "status": "ok",
+        "lead_id": lead.id,
+        "state": lead.conversation_state.value,
+        "crm_stage": normalize_crm_stage(lead.crm_stage),
+        "delivery_mode": "sandbox",
+        "twilio_bypassed": True,
+        "inbound_message_id": inbound_message.id,
+        "reply": {
+            "id": latest_outbound.id if latest_outbound else None,
+            "body": latest_outbound.body if latest_outbound else "",
+            "provider_message_sid": latest_outbound.provider_message_sid if latest_outbound else "",
+        },
+    }
+
+
 @router.post("/ui/api/owner/{client_key}/simulate-peter-lead")
 def ui_owner_simulate_peter_lead(
     client_key: str,
@@ -2902,6 +3523,17 @@ def ui_owner_simulate_peter_lead(
         qualification_memory["pending_step"] = pending_step
     else:
         qualification_memory.pop("pending_step", None)
+    for key in (
+        "cta_state",
+        "intent_level",
+        "intent_score",
+        "intent_reasons",
+        "important_missing_fields",
+        "lead_summary",
+        "recommended_follow_up",
+    ):
+        if key in (ai_response.runtime_payload or {}):
+            qualification_memory[key] = ai_response.runtime_payload[key]
     lead.raw_payload = qualification_memory
 
     outbound_payload = {
@@ -2914,6 +3546,10 @@ def ui_owner_simulate_peter_lead(
             "collected_fields": ai_response.collected_fields.model_dump(exclude_none=True),
             "provider": ai_response.provider,
             "provider_error": ai_response.provider_error,
+            "intent_level": (ai_response.runtime_payload or {}).get("intent_level"),
+            "intent_score": (ai_response.runtime_payload or {}).get("intent_score"),
+            "cta_state": (ai_response.runtime_payload or {}).get("cta_state"),
+            "lead_summary": (ai_response.runtime_payload or {}).get("lead_summary"),
         },
         "actions": [action.model_dump() for action in ai_response.actions],
         "seed_context": ai_seed,
