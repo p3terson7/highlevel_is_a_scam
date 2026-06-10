@@ -6,8 +6,6 @@ from sqlalchemy import select
 
 from app.db.models import CalendarBooking, Client, Lead, LeadSource
 from app.db.session import get_session_factory
-from app.services.sms_service import SMSDeliveryError
-
 
 def _admin_headers() -> dict[str, str]:
     return {"X-Admin-Token": "test-admin-token"}
@@ -145,20 +143,30 @@ def test_seed_showcase_for_selected_existing_client(test_context):
     assert any(item["conversation_state"] == "BOOKING_SENT" for item in crm_payload["items"])
 
 
-def test_ui_can_simulate_peter_lead_thread(test_context):
+def test_ui_can_start_custom_test_lab_sandbox_thread(test_context):
     response = test_context.client.post(
-        f"/ui/api/owner/{test_context.client_key}/simulate-peter-lead",
+        f"/ui/api/owner/{test_context.client_key}/sandbox/start",
         headers=_admin_headers(),
-        json={"phone": "+15554443333"},
+        json={
+            "mode": "gpt_only",
+            "full_name": "Strategy Call Lead",
+            "phone": "+15554443333",
+            "email": "strategy@example.com",
+            "city": "Toronto",
+            "form_answers": [
+                {"question": "Timeline", "answer": "Within 2 weeks"},
+                {"question": "Project scope", "answer": "Retail existing conditions"},
+                {"question": "Locations scope", "answer": "One building"},
+            ],
+        },
     )
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
-    assert payload["template"] == "Peter Lead"
-    assert payload["delivery_mode"] == "mock"
+    assert payload["mode"] == "gpt_only"
+    assert payload["delivery_mode"] == "sandbox"
     assert payload["phone"] == "+15554443333"
-    assert test_context.fake_sms.sent
-    assert test_context.fake_sms.sent[-1]["to"] == "+15554443333"
+    assert test_context.fake_sms.sent == []
 
     thread = test_context.client.get(
         f"/ui/api/conversations/{payload['lead_id']}/thread",
@@ -166,35 +174,39 @@ def test_ui_can_simulate_peter_lead_thread(test_context):
     )
     assert thread.status_code == 200
     thread_payload = thread.json()
-    assert thread_payload["lead"]["full_name"] == "Peter Lead"
-    assert thread_payload["lead"]["source"] == "meta"
+    assert thread_payload["lead"]["full_name"] == "Strategy Call Lead"
+    assert thread_payload["lead"]["source"] == "manual"
+    assert thread_payload["lead"]["form_answers"]["when_to_start"] == "Within 2 weeks"
+    assert thread_payload["lead"]["form_answers"]["project_scope"] == "Retail existing conditions"
     assert thread_payload["messages"]
     assert thread_payload["messages"][0]["direction"] == "OUTBOUND"
-    assert any(item["event_type"] == "ui_simulated_initial_ai_sms" for item in thread_payload["audit_events"])
+    assert any(item["event_type"] == "ui_sandbox_initial_ai_sms" for item in thread_payload["audit_events"])
 
 
-def test_ui_simulate_peter_lead_returns_provider_error_when_sms_fails(test_context, monkeypatch):
-    def fail_send_message(*, to_number: str, body: str) -> str:
-        _ = to_number, body
-        raise SMSDeliveryError("SMS provider authentication failed. Check the Twilio Account SID/Auth Token.")
-
-    monkeypatch.setattr(test_context.fake_sms, "send_message", fail_send_message)
-
+def test_test_lab_future_modes_are_explicitly_disabled(test_context):
     response = test_context.client.post(
-        f"/ui/api/owner/{test_context.client_key}/simulate-peter-lead",
+        f"/ui/api/owner/{test_context.client_key}/sandbox/start",
         headers=_admin_headers(),
-        json={"phone": "+15554443333"},
+        json={
+            "mode": "gpt_twilio",
+            "full_name": "Future Mode Lead",
+            "form_answers": [{"question": "Timeline", "answer": "Tomorrow"}],
+        },
     )
 
-    assert response.status_code == 502
-    assert "SMS provider authentication failed" in response.json()["detail"]
+    assert response.status_code == 400
+    assert "Only GPT only" in response.json()["detail"]
 
 
 def test_ai_sandbox_runs_agent_thread_without_sms_provider(test_context):
     start = test_context.client.post(
         f"/ui/api/owner/{test_context.client_key}/sandbox/start",
         headers=_admin_headers(),
-        json={"full_name": "Peter Sandbox"},
+        json={
+            "mode": "gpt_only",
+            "full_name": "Peter Sandbox",
+            "form_answers": [{"question": "Project scope", "answer": "Revit models for retail spaces"}],
+        },
     )
 
     assert start.status_code == 200
@@ -240,15 +252,21 @@ def test_client_portal_can_launch_test_lead_without_admin_token(test_context):
     token = login.json()["token"]
 
     response = test_context.client.post(
-        f"/ui/api/owner/{test_context.client_key}/simulate-peter-lead",
+        "/ui/api/owner/demo-roofing/sandbox/start",
         headers=_portal_headers(token),
-        json={"phone": "+15556667777"},
+        json={
+            "mode": "gpt_only",
+            "full_name": "Portal Sandbox",
+            "phone": "+15556667777",
+            "form_answers": [{"question": "Timeline", "answer": "This week"}],
+        },
     )
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["phone"] == "+15556667777"
-    assert test_context.fake_sms.sent[-1]["to"] == "+15556667777"
+    assert payload["delivery_mode"] == "sandbox"
+    assert test_context.fake_sms.sent == []
 
 
 def test_conversation_thread_notes_and_actions(test_context):
@@ -421,7 +439,7 @@ def test_owner_calendar_settings_endpoint_updates_client_booking_config(test_con
         assert isinstance(internal.get("availability"), list)
 
 
-def test_owner_workspace_can_start_test_contact_and_send_manual_message(test_context):
+def test_owner_workspace_can_send_manual_message_with_client_provider(test_context):
     runtime_update = test_context.client.patch(
         f"/admin/clients/{test_context.client_key}",
         headers=_admin_headers(),
@@ -439,25 +457,27 @@ def test_owner_workspace_can_start_test_contact_and_send_manual_message(test_con
     assert owner_payload["delivery_mode"] == "mock"
     assert owner_payload["client"]["twilio_inbound_path"] == "/sms/inbound/test-client-key"
 
-    start = test_context.client.post(
-        f"/ui/api/owner/{test_context.client_key}/test-contact",
-        headers=_admin_headers(),
-        json={
-            "full_name": "Peter Test",
-            "phone": "+1 (555) 222-3333",
-            "email": "peter@example.com",
-            "city": "Austin",
-            "use_initial_template": True,
-        },
-    )
-    assert start.status_code == 200
-    start_payload = start.json()
-    assert start_payload["state"] == "GREETED"
-    assert start_payload["delivery_mode"] == "mock"
-    assert "Acme Solar" in test_context.fake_sms.sent[-1]["body"]
+    session_factory = get_session_factory()
+    with session_factory() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.MANUAL,
+            full_name="Peter Test",
+            phone="+15552223333",
+            email="peter@example.com",
+            city="Austin",
+            form_answers={"timeline": "This week"},
+            raw_payload={"created_from": "manual_test"},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.commit()
+        lead_id = lead.id
 
     manual = test_context.client.post(
-        f"/ui/api/conversations/{start_payload['lead_id']}/messages/manual",
+        f"/ui/api/conversations/{lead_id}/messages/manual",
         headers=_admin_headers(),
         json={"body": "Checking in personally before we get you scheduled."},
     )
@@ -467,13 +487,12 @@ def test_owner_workspace_can_start_test_contact_and_send_manual_message(test_con
     assert "Checking in personally" in test_context.fake_sms.sent[-1]["body"]
 
     thread = test_context.client.get(
-        f"/ui/api/conversations/{start_payload['lead_id']}/thread",
+        f"/ui/api/conversations/{lead_id}/thread",
         headers=_admin_headers(),
     )
     assert thread.status_code == 200
     thread_payload = thread.json()
     outbound_bodies = [message["body"] for message in thread_payload["messages"] if message["direction"] == "OUTBOUND"]
-    assert any("Acme Solar" in body for body in outbound_bodies)
     assert any("Checking in personally" in body for body in outbound_bodies)
 
 
@@ -612,6 +631,14 @@ def test_client_portal_can_archive_and_restore_conversation(test_context):
     assert archived_detail.status_code == 200
     assert "archived" in archived_detail.json()["tags"]
 
+    active_crm_leads = test_context.client.get("/ui/api/crm/leads", headers=_portal_headers(token))
+    assert active_crm_leads.status_code == 200
+    assert lead_id not in {item["lead_id"] for item in active_crm_leads.json()["items"]}
+
+    archived_crm_leads = test_context.client.get("/ui/api/crm/leads?archived=true", headers=_portal_headers(token))
+    assert archived_crm_leads.status_code == 200
+    assert lead_id in {item["lead_id"] for item in archived_crm_leads.json()["items"]}
+
     restore = test_context.client.patch(
         f"/ui/api/conversations/{lead_id}/archive",
         headers=_portal_headers(token),
@@ -628,6 +655,10 @@ def test_client_portal_can_archive_and_restore_conversation(test_context):
     restored_payload = restored_thread.json()
     assert "archived" not in restored_payload["lead"]["tags"]
     assert any(event["event_type"] == "conversation_unarchived" for event in restored_payload["audit_events"])
+
+    restored_crm_leads = test_context.client.get("/ui/api/crm/leads", headers=_portal_headers(token))
+    assert restored_crm_leads.status_code == 200
+    assert lead_id in {item["lead_id"] for item in restored_crm_leads.json()["items"]}
 
 
 def test_seed_demo_backfills_missing_portal_credentials(test_context):

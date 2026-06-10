@@ -111,6 +111,7 @@ def _store_agent_memory(
         "important_missing_fields",
         "lead_summary",
         "recommended_follow_up",
+        "calendar_booking",
     ):
         if key in runtime_payload:
             payload[key] = runtime_payload[key]

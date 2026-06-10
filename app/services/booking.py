@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import CalendarBooking, Client, ConversationStateEnum, Lead, Message
@@ -311,6 +312,37 @@ def _internal_booking_info(booking: CalendarBooking) -> dict[str, Any]:
     }
 
 
+def _cancel_existing_internal_bookings_for_lead(
+    db: Session,
+    *,
+    client_id: int,
+    lead_id: int,
+    keep_start_at: datetime,
+    keep_end_at: datetime,
+) -> list[int]:
+    existing = db.scalars(
+        select(CalendarBooking)
+        .where(
+            CalendarBooking.client_id == client_id,
+            CalendarBooking.lead_id == lead_id,
+            CalendarBooking.provider == _INTERNAL_PROVIDER,
+            CalendarBooking.status == "scheduled",
+        )
+        .order_by(CalendarBooking.start_at.asc())
+    ).all()
+    cancelled: list[int] = []
+    keep_start = _as_utc(keep_start_at)
+    keep_end = _as_utc(keep_end_at)
+    now = datetime.now(timezone.utc)
+    for booking in existing:
+        if _as_utc(booking.start_at) == keep_start and _as_utc(booking.end_at) == keep_end:
+            continue
+        booking.status = "cancelled"
+        booking.updated_at = now
+        cancelled.append(int(booking.id))
+    return cancelled
+
+
 def _booked_from_reply(inbound_text: str) -> bool:
     return calendar_booking_confirmed(inbound_text)
 
@@ -385,9 +417,9 @@ class BookingService:
             lines.append(f"I have call openings including {coverage_summary}.")
         lines.extend(
             [
-                "Here are a few call times to lock in now:",
+                "Here are a few spread-out call times to lock in now:",
                 *[f"{slot.index}) {slot.display_time}" for slot in slots],
-                f"{_slot_selection_prompt(slots)} Times shown in {timezone_label}.",
+                f"{_slot_selection_prompt(slots)}. If none of those work, just send me a time that's better for you. Times shown in {timezone_label}.",
             ]
         )
         raw_payload = {
@@ -441,7 +473,11 @@ class BookingService:
         matched_preference = bool(filtered)
         match_mode = "exact" if filtered else "none"
         if filtered:
-            slots = filtered[: max(1, min(limit, len(filtered)))]
+            slots = _spread_first_offer_slots(
+                slots=filtered,
+                limit=max(1, min(limit, len(filtered))),
+                timezone_name=client.timezone or "UTC",
+            )
         elif specific_request:
             relaxed = _filter_slots(
                 slots=slots,
@@ -453,10 +489,18 @@ class BookingService:
                 range_end=None,
             )
             if relaxed:
-                slots = relaxed[: max(1, min(limit, len(relaxed)))]
+                slots = _spread_first_offer_slots(
+                    slots=relaxed,
+                    limit=max(1, min(limit, len(relaxed))),
+                    timezone_name=client.timezone or "UTC",
+                )
                 match_mode = "same_day_alternative" if preferred_day else "closest_alternative"
             else:
-                slots = slots[: max(1, min(limit, len(slots)))]
+                slots = _spread_first_offer_slots(
+                    slots=slots,
+                    limit=max(1, min(limit, len(slots))),
+                    timezone_name=client.timezone or "UTC",
+                )
                 match_mode = "closest_alternative"
         else:
             slots = _spread_first_offer_slots(
@@ -514,7 +558,7 @@ class BookingService:
         lines = [
             intro,
             *[f"{slot.index}) {slot.display_time}" for slot in slots],
-            f"{_slot_selection_prompt(slots)} Times shown in {timezone_label}.",
+            f"{_slot_selection_prompt(slots)}. If none of those work, just send me a time that's better for you. Times shown in {timezone_label}.",
         ]
         return SlotOffer(
             reply_text="\n".join(lines),
@@ -584,8 +628,10 @@ class BookingService:
         else:
             booking = self._book_calendly_slot(client=client, lead=lead, slot=matched)
 
+        was_rescheduled = bool(booking.get("rescheduled_from_booking_ids") or booking.get("rescheduled_from_event_uri"))
+        reply_prefix = "Updated. Your call is now set" if was_rescheduled else "Booked. Your call is set"
         return {
-            "reply_text": f"Booked. Your call is set for {matched.get('display_time')}.",
+            "reply_text": f"{reply_prefix} for {matched.get('display_time')}.",
             "booking": booking,
             "runtime_payload": {
                 "calendar_booking": {
@@ -649,8 +695,9 @@ class BookingService:
                 )
         else:
             booking = self._book_calendly_slot(client=client, lead=lead, slot=matched)
+        was_rescheduled = bool(booking.get("rescheduled_from_booking_ids") or booking.get("rescheduled_from_event_uri"))
         confirmation = [
-            f"Booked. Your call is set for {matched.get('display_time')}.",
+            f"{'Updated. Your call is now set' if was_rescheduled else 'Booked. Your call is set'} for {matched.get('display_time')}.",
         ]
         if lead.email.strip():
             confirmation.append(f"Confirmation will be sent to {lead.email}.")
@@ -881,23 +928,50 @@ class BookingService:
             if _slot_occupied(start_at=start_at, end_at=end_at, existing=existing):
                 raise BookingProviderError("That time is no longer available.")
 
-            booking = CalendarBooking(
-                client_id=client.id,
-                lead_id=lead.id,
-                provider=_INTERNAL_PROVIDER,
-                source="sms_ai",
-                status="scheduled",
-                start_at=start_at,
-                end_at=end_at,
-                timezone=client.timezone or "UTC",
-                title=_booking_title(lead),
-                notes="Booked by AI SMS agent",
-            )
-            session.add(booking)
-            session.flush()
+            try:
+                with session.begin_nested():
+                    cancelled_booking_ids = _cancel_existing_internal_bookings_for_lead(
+                        session,
+                        client_id=client.id,
+                        lead_id=lead.id,
+                        keep_start_at=start_at,
+                        keep_end_at=end_at,
+                    )
+                    booking = CalendarBooking(
+                        client_id=client.id,
+                        lead_id=lead.id,
+                        provider=_INTERNAL_PROVIDER,
+                        source="sms_ai",
+                        status="scheduled",
+                        start_at=start_at,
+                        end_at=end_at,
+                        timezone=client.timezone or "UTC",
+                        title=_booking_title(lead),
+                        notes="Booked by AI SMS agent",
+                    )
+                    session.add(booking)
+                    session.flush()
+            except IntegrityError as exc:
+                duplicate = session.scalar(
+                    select(CalendarBooking)
+                    .where(
+                        CalendarBooking.client_id == client.id,
+                        CalendarBooking.provider == _INTERNAL_PROVIDER,
+                        CalendarBooking.status == "scheduled",
+                        CalendarBooking.start_at == start_at,
+                        CalendarBooking.end_at == end_at,
+                    )
+                    .limit(1)
+                )
+                if duplicate is not None and duplicate.lead_id == lead.id:
+                    return _internal_booking_info(duplicate)
+                raise BookingProviderError("That time is no longer available.") from exc
             if db is None:
                 session.commit()
-            return _internal_booking_info(booking)
+            info = _internal_booking_info(booking)
+            if cancelled_booking_ids:
+                info["rescheduled_from_booking_ids"] = cancelled_booking_ids
+            return info
 
     def _request(
         self,
@@ -1110,7 +1184,19 @@ def _spread_first_offer_slots(
     if len(ordered) <= target:
         return ordered[:target]
 
-    day_anchors: list[BookingSlot] = []
+    selected: list[BookingSlot] = []
+    selected_keys: set[str] = set()
+
+    def slot_key(slot: BookingSlot) -> str:
+        return f"{slot.start_time}|{slot.end_time or ''}"
+
+    def add_slot(slot: BookingSlot) -> None:
+        key = slot_key(slot)
+        if key in selected_keys or len(selected) >= target:
+            return
+        selected.append(slot)
+        selected_keys.add(key)
+
     seen_days: set[str] = set()
     for slot in ordered:
         local_dt = _slot_local_start(slot, timezone_name)
@@ -1118,12 +1204,39 @@ def _spread_first_offer_slots(
         if day_key in seen_days:
             continue
         seen_days.add(day_key)
-        day_anchors.append(slot)
+        add_slot(slot)
+        if len(selected) >= target:
+            return sorted(selected, key=_slot_sort_key)[:target]
 
-    selected = _evenly_spaced_select(day_anchors, target)
-    if len(selected) < target:
-        remaining = [slot for slot in ordered if slot not in selected]
-        selected.extend(_evenly_spaced_select(remaining, target - len(selected)))
+    seen_day_periods: set[tuple[str, str]] = set()
+    for slot in selected:
+        local_dt = _slot_local_start(slot, timezone_name)
+        if local_dt is None:
+            continue
+        seen_day_periods.add((local_dt.date().isoformat(), _time_period(local_dt)))
+
+    for slot in ordered:
+        local_dt = _slot_local_start(slot, timezone_name)
+        if local_dt is None:
+            continue
+        key = (local_dt.date().isoformat(), _time_period(local_dt))
+        if key in seen_day_periods:
+            continue
+        seen_day_periods.add(key)
+        add_slot(slot)
+        if len(selected) >= target:
+            return sorted(selected, key=_slot_sort_key)[:target]
+
+    for slot in ordered:
+        if _slot_is_spaced_from_selection(slot=slot, selected=selected, timezone_name=timezone_name, minimum_minutes=90):
+            add_slot(slot)
+        if len(selected) >= target:
+            return sorted(selected, key=_slot_sort_key)[:target]
+
+    for slot in ordered:
+        add_slot(slot)
+        if len(selected) >= target:
+            break
     return sorted(selected, key=_slot_sort_key)[:target]
 
 
@@ -1251,6 +1364,27 @@ def _slot_local_start(slot: BookingSlot, timezone_name: str) -> datetime | None:
     if start_at is None:
         return None
     return start_at.astimezone(_tzinfo(timezone_name))
+
+
+def _slot_is_spaced_from_selection(
+    *,
+    slot: BookingSlot,
+    selected: Sequence[BookingSlot],
+    timezone_name: str,
+    minimum_minutes: int,
+) -> bool:
+    candidate = _slot_local_start(slot, timezone_name)
+    if candidate is None:
+        return True
+    for existing in selected:
+        existing_start = _slot_local_start(existing, timezone_name)
+        if existing_start is None:
+            continue
+        if existing_start.date() != candidate.date():
+            continue
+        if abs((candidate - existing_start).total_seconds()) < minimum_minutes * 60:
+            return False
+    return True
 
 
 def _evenly_spaced_select(items: Sequence[BookingSlot], target: int) -> list[BookingSlot]:

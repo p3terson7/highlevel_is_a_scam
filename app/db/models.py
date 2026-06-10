@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -29,7 +30,7 @@ def default_questions() -> list[str]:
     return [
         "What are you looking to solve right now?",
         "What timeline are you aiming for?",
-        "What is your budget range?",
+        "What outcome would make this successful?",
     ]
 
 
@@ -182,6 +183,15 @@ class Message(Base):
         Index("ix_messages_lead_created_id", "lead_id", "created_at", "id"),
         Index("ix_messages_client_direction_created_id", "client_id", "direction", "created_at", "id"),
         Index("ix_messages_client_direction_sid", "client_id", "direction", "provider_message_sid"),
+        Index(
+            "uq_messages_client_direction_provider_sid_not_empty",
+            "client_id",
+            "direction",
+            "provider_message_sid",
+            unique=True,
+            postgresql_where=text("provider_message_sid <> ''"),
+            sqlite_where=text("provider_message_sid <> ''"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -302,6 +312,25 @@ class CalendarBooking(Base, TimestampMixin):
             "status",
             "start_at",
             "end_at",
+        ),
+        Index(
+            "uq_calendar_bookings_client_provider_start_end_scheduled",
+            "client_id",
+            "provider",
+            "start_at",
+            "end_at",
+            unique=True,
+            postgresql_where=text("status = 'scheduled'"),
+            sqlite_where=text("status = 'scheduled'"),
+        ),
+        Index(
+            "uq_calendar_bookings_client_lead_provider_scheduled",
+            "client_id",
+            "lead_id",
+            "provider",
+            unique=True,
+            postgresql_where=text("status = 'scheduled' AND lead_id IS NOT NULL"),
+            sqlite_where=text("status = 'scheduled' AND lead_id IS NOT NULL"),
         ),
     )
 

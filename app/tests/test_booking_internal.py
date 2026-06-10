@@ -219,3 +219,59 @@ def test_internal_calendar_first_offer_spreads_across_days_with_coverage_summary
         offered_dates = {datetime.fromisoformat(slot.start_time.replace("Z", "+00:00")).date() for slot in offer.slots}
         assert len(offered_dates) >= 2
         assert "openings including" in offer.reply_text.lower()
+        assert "if none of those work" in offer.reply_text.lower()
+
+
+def test_internal_calendar_reschedule_cancels_previous_booking(test_context):
+    SessionLocal = get_session_factory()
+    booking_service = BookingService()
+
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.booking_mode = "internal"
+        client.booking_config = _internal_always_open_config()
+
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.META,
+            full_name="Reschedule Lead",
+            phone="+15551110004",
+            email="reschedule@example.com",
+            city="Austin",
+            form_answers={},
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.flush()
+
+        first_offer = booking_service.offer_slots(client=client, lead=lead, db=db)
+        first_result = booking_service.book_requested_slot(
+            client=client,
+            lead=lead,
+            latest_offer=first_offer.raw_payload["booking_offer"],
+            slot_index=1,
+            db=db,
+        )
+        assert first_result["booking"]["status"] == "scheduled"
+
+        second_offer = booking_service.offer_slots(client=client, lead=lead, db=db)
+        second_result = booking_service.book_requested_slot(
+            client=client,
+            lead=lead,
+            latest_offer=second_offer.raw_payload["booking_offer"],
+            slot_index=1,
+            db=db,
+        )
+        assert second_result["reply_text"].startswith("Updated.")
+        db.commit()
+
+        bookings = db.scalars(select(CalendarBooking).where(CalendarBooking.lead_id == lead.id)).all()
+        scheduled = [booking for booking in bookings if booking.status == "scheduled"]
+        cancelled = [booking for booking in bookings if booking.status == "cancelled"]
+        assert len(scheduled) == 1
+        assert len(cancelled) == 1
+        assert scheduled[0].id != cancelled[0].id

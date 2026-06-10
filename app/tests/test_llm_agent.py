@@ -113,22 +113,47 @@ class RepeatingProvider:
         }
 
 
+class RepeatingFactProvider:
+    name = "repeating-fact"
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        assert "acknowledged_form_fact_keys" in user_prompt
+        _ = system_prompt
+        payload = json.loads(user_prompt)
+        assert "desired_outcome" in payload["answered_missing_field_keys"]
+        assert payload["recommended_missing_field"]["key"] != "desired_outcome"
+        assert "lead_city" in payload["acknowledged_form_fact_keys"]
+        assert "decision_maker_role" in payload["acknowledged_form_fact_keys"]
+        return {
+            "reply_text": (
+                "10 quality leads next month is a clear target. "
+                "Since you're the decision-maker in Montreal, the only thing I'd confirm is timeline. "
+                "When would you ideally like to get started or have this resolved?"
+            ),
+            "next_state": "QUALIFYING",
+            "collected_fields": payload["qualification_memory"],
+            "next_question_key": None,
+            "action": "none",
+            "tool_call": {"name": "none", "args": {}},
+        }
+
+
 class HighIntentConciergeProvider:
     name = "high-intent-concierge"
 
     def generate_json(self, system_prompt: str, user_prompt: str):
-        assert "lead concierge" in system_prompt.lower()
+        assert "ai assistant" in system_prompt.lower()
         payload = json.loads(user_prompt)
         assert payload["intent_level"] == "HIGH_INTENT"
         assert payload["initial_outreach"] is True
         assert payload["lead_form_answers"]["deliverable_type"] == "CAD as-builts and Revit/BIM"
         assert payload["qualification_memory"]["timeline"] == "Within 2 weeks"
         assert payload["qualification_memory"]["decision_makers"] == "Owner"
-        assert payload["recommended_missing_field"]["key"] == "project_purpose"
+        assert payload["recommended_missing_field"]["key"] == "desired_outcome"
         return {
             "reply_text": (
                 "Hi Jordan, thanks for reaching out. I saw the retail space is about 12,000 sqft and you need CAD as-builts plus Revit/BIM within 2 weeks. "
-                "What is the main goal for this project?"
+                "What would a successful outcome look like for you?"
             ),
             "next_state": "QUALIFYING",
             "collected_fields": payload["qualification_memory"],
@@ -182,7 +207,7 @@ class PricingQuestionProvider:
         assert payload["pricing_question"] is True
         assert payload["intent_level"] == "HIGH_INTENT"
         return {
-            "reply_text": "Pricing depends on scope, square footage, deliverables, site access, travel, and turnaround. With the details you shared, the team would need to confirm the exact deliverables before giving a reliable estimate.",
+            "reply_text": "Pricing depends on scope, timing, requirements, and the level of support needed. With the details you shared, the team would need to confirm the exact fit before giving a reliable estimate.",
             "next_state": "QUALIFYING",
             "collected_fields": payload["qualification_memory"],
             "next_question_key": None,
@@ -513,6 +538,33 @@ def test_exact_time_request_after_offer_checks_calendar_instead_of_rejecting_cur
     assert "couldn" not in response.reply_text.lower()
 
 
+def test_booked_lead_reschedule_request_uses_calendar_tools():
+    agent = LLMAgent(provider=WrongBookSlotProvider())
+    booking_service = ExactTimeFallbackBookingService()
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Booked. Your call is set for Mon May 25 at 9:00 AM.",
+            raw_payload={"calendar_booking": {"provider": "internal"}},
+        )
+    ]
+
+    response = agent.run_turn(
+        client=_client(),
+        lead=_lead(state=ConversationStateEnum.BOOKED),
+        inbound_text="Can we reschedule to Monday 11 AM?",
+        history=history,
+        booking_service=booking_service,
+        db=None,
+    )
+
+    assert response.next_state == ConversationStateEnum.BOOKING_SENT
+    assert booking_service.find_args[-1]["preferred_day"] == "monday"
+    assert booking_service.find_args[-1]["exact_time"] == "11 am"
+    assert "11:00 AM" in response.reply_text
+    assert "if none of those work" in response.reply_text.lower()
+
+
 def test_booked_confirmation_marks_booked_and_stops_qualifying():
     agent = LLMAgent(provider=BookedProvider())
 
@@ -551,6 +603,68 @@ def test_agent_does_not_repeat_same_question_twice():
     assert response.reply_text.count("?") == 1
 
 
+def test_agent_tracks_answered_generic_missing_field_and_strips_repeated_fact_preamble():
+    agent = LLMAgent(provider=RepeatingFactProvider())
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body=(
+                "Perfect - thanks Johnny. Since you're the decision-maker and you're in Montreal, "
+                "the next thing I'd want to confirm is the outcome you're aiming for. "
+                "What would a successful result look like for you?"
+            ),
+        ),
+        Message(direction=MessageDirection.INBOUND, body="10 quality leads in the next month"),
+    ]
+
+    lead = _lead(
+        form_answers={"decision_maker_role": "Owner"},
+        raw_payload={"qualification_memory": {"decision_makers": "Owner"}},
+    )
+    lead.city = "Montreal"
+
+    response = agent.next_reply(
+        client=_client(),
+        lead=lead,
+        inbound_text="10 quality leads in the next month",
+        history=history,
+    )
+
+    text = response.reply_text.lower()
+    assert "decision-maker" not in text
+    assert "decision maker" not in text
+    assert "montreal" not in text
+    assert "budget" not in text
+    assert "timeline" in text or "when would you" in text
+    missing_keys = [field["key"] for field in response.runtime_payload["important_missing_fields"]]
+    assert "desired_outcome" not in missing_keys
+
+
+def test_identity_question_is_answered_as_hermes_without_calling_provider():
+    agent = LLMAgent(provider=FailingProvider())
+    client = _client()
+    client.business_name = "StackLeads"
+    client.faq_context = "StackLeads was founded by Peter Sarateanu to help businesses improve lead follow-up."
+
+    response = agent.run_turn(
+        client=client,
+        lead=_lead(),
+        inbound_text="You're the founder of the company?",
+        history=[],
+        booking_service=None,
+        db=None,
+    )
+
+    text = response.reply_text.lower()
+    assert response.provider_error is None
+    assert "no" in text
+    assert "hermes" in text
+    assert "assistant" in text
+    assert "peter sarateanu" in text
+    assert "i'm the founder" not in text
+    assert "i am the founder" not in text
+
+
 def test_high_intent_form_answers_are_used_as_known_context():
     agent = LLMAgent(provider=HighIntentConciergeProvider())
     form_answers = {
@@ -574,7 +688,7 @@ def test_high_intent_form_answers_are_used_as_known_context():
     assert response.runtime_payload["intent_level"] == "HIGH_INTENT"
     assert response.runtime_payload["lead_summary"]["intent_level"] == "HIGH_INTENT"
     assert response.runtime_payload["lead_summary"]["meeting_status"] == "not_suggested"
-    assert response.runtime_payload["important_missing_fields"][0]["key"] == "project_purpose"
+    assert response.runtime_payload["important_missing_fields"][0]["key"] == "desired_outcome"
     assert "12,000" in response.reply_text
     assert "within 2 weeks" in response.reply_text.lower()
     assert "are you the decision-maker" not in response.reply_text.lower()
@@ -618,7 +732,7 @@ def test_low_intent_lead_does_not_get_pushed_to_book():
     assert "call" not in text
 
 
-def test_pricing_question_is_answered_without_inventing_exact_price():
+def test_pricing_question_is_suppressed_without_ai_pricing_context():
     agent = LLMAgent(provider=PricingQuestionProvider())
 
     response = agent.next_reply(
@@ -635,7 +749,11 @@ def test_pricing_question_is_answered_without_inventing_exact_price():
     )
 
     assert response.runtime_payload["intent_level"] == "HIGH_INTENT"
-    assert "depends on" in response.reply_text.lower()
+    text = response.reply_text.lower()
+    assert "pricing" not in text
+    assert "cost" not in text
+    assert "budget" not in text
+    assert "package details" in text
     assert "$" not in response.reply_text
     assert response.tool_call.name == "none"
 

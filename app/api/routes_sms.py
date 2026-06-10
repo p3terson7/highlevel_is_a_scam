@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -200,7 +201,11 @@ async def inbound_sms(
         raw_payload=payload,
     )
     db.add(inbound_message)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        return _empty_twiml_response()
     lead.last_inbound_at = now
     incr("sms_inbound_total")
 
