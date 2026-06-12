@@ -3,6 +3,29 @@ from .shared import *
 
 router = APIRouter()
 
+
+def _lead_business_metrics(lead: Lead) -> dict[str, Any]:
+    raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    summary = raw_payload.get("lead_summary") if isinstance(raw_payload.get("lead_summary"), dict) else {}
+
+    def number_or_none(value: Any) -> int | float | None:
+        try:
+            if value is None or value == "":
+                return None
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return int(number) if number.is_integer() else number
+
+    return {
+        "lead_score": number_or_none(raw_payload.get("lead_score") or raw_payload.get("intent_score")),
+        "estimated_value": number_or_none(raw_payload.get("estimated_value")),
+        "campaign_name": str(raw_payload.get("campaign_name") or "").strip(),
+        "intent_level": str(summary.get("intent_level") or "").strip(),
+        "recommended_follow_up": str(summary.get("recommended_follow_up") or "").strip(),
+    }
+
+
 @router.get("/ui/api/crm/leads")
 def ui_crm_leads(
     client_key: str | None = Query(default=None),
@@ -34,6 +57,15 @@ def ui_crm_leads(
     latest_messages = _latest_messages_by_lead(db, lead_ids)
     logs_by_lead = _logs_by_lead(db, lead_ids)
     custom_tags_by_lead = _custom_tags_by_lead(db, lead_ids)
+    next_tasks_by_lead: dict[int, LeadTask] = {}
+    if lead_ids:
+        open_tasks = db.scalars(
+            select(LeadTask)
+            .where(LeadTask.lead_id.in_(lead_ids), LeadTask.status == TASK_STATUS_OPEN)
+            .order_by(LeadTask.due_date.asc(), LeadTask.created_at.asc(), LeadTask.id.asc())
+        ).all()
+        for task in open_tasks:
+            next_tasks_by_lead.setdefault(task.lead_id, task)
     query_lower = (q or "").strip().lower()
 
     items: list[dict[str, Any]] = []
@@ -48,6 +80,7 @@ def ui_crm_leads(
             conversation_tags=_conversation_tags(lead, logs),
         )
         summary = _lead_summary(lead)
+        metrics = _lead_business_metrics(lead)
         search_blob = " ".join(
             [
                 _lead_search_blob(lead),
@@ -55,6 +88,9 @@ def ui_crm_leads(
                 lead.source.value,
                 summary,
                 " ".join(tags),
+                str(metrics.get("campaign_name") or ""),
+                str(metrics.get("intent_level") or ""),
+                str(metrics.get("recommended_follow_up") or ""),
             ]
         ).lower()
         if query_lower and query_lower not in search_blob:
@@ -62,6 +98,7 @@ def ui_crm_leads(
 
         last_activity_at = _last_activity_at(lead, latest_message)
         booked = crm_stage in {"Meeting Booked", "Meeting Completed", "Won"} or lead.conversation_state == ConversationStateEnum.BOOKED
+        next_task = next_tasks_by_lead.get(lead.id)
         items.append(
             {
                 "lead_id": lead.id,
@@ -73,7 +110,7 @@ def ui_crm_leads(
                 "client_name": lead.client.business_name if lead.client else "",
                 "crm_stage": crm_stage,
                 "conversation_state": lead.conversation_state.value,
-                "last_message_snippet": _snippet(latest_message.body if latest_message else "No messages yet."),
+                "last_message_snippet": _snippet(_message_preview_text(latest_message)),
                 "last_message_direction": latest_message.direction.value if latest_message else "",
                 "lead_summary": summary,
                 "last_activity_at": last_activity_at.isoformat(),
@@ -81,6 +118,9 @@ def ui_crm_leads(
                 "tags": tags,
                 "booked": booked,
                 "archived": _has_tag(tags, _ARCHIVED_TAG),
+                **metrics,
+                "next_task_title": next_task.title if next_task else "",
+                "next_task_due_date": next_task.due_date.isoformat() if next_task and next_task.due_date else "",
             }
         )
 
@@ -92,6 +132,71 @@ def ui_crm_leads(
         "counts": dict(counts),
         "total": len(limited),
         "stages": CRM_STAGES,
+    }
+
+
+@router.post("/ui/api/crm/leads")
+def ui_crm_create_lead(
+    payload: ManualLeadCreateRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    client = _client_for_actor(db, actor, payload.client_key)
+    full_name = payload.full_name.strip()
+    if not full_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lead name is required")
+    crm_stage = normalize_crm_stage(payload.crm_stage or "New Lead")
+    if crm_stage not in CRM_STAGES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid CRM stage")
+
+    now = datetime.now(timezone.utc)
+    lead = Lead(
+        client_id=client.id,
+        external_lead_id=f"manual-{uuid4().hex}",
+        source=LeadSource.MANUAL,
+        full_name=full_name,
+        phone=normalize_phone(payload.phone or ""),
+        email=(payload.email or "").strip(),
+        city=(payload.city or "").strip(),
+        owner_name=(payload.owner_name or "").strip(),
+        form_answers={},
+        raw_payload={"source": "ui_manual_lead", "created_by": actor.role},
+        consented=True,
+        opted_out=False,
+        conversation_state=ConversationStateEnum.NEW,
+        crm_stage=crm_stage,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(lead)
+    db.flush()
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type="manual_lead_created",
+            decision={"actor_role": actor.role, "crm_stage": crm_stage},
+            created_at=now,
+        )
+    )
+    note = (payload.notes or "").strip()
+    if note:
+        _create_internal_note(db=db, lead=lead, note=note, actor_role=actor.role, created_at=now)
+    db.commit()
+    db.refresh(lead)
+    return {
+        "status": "ok",
+        "lead": {
+            "id": lead.id,
+            "lead_id": lead.id,
+            "display_name": _lead_display_name(lead),
+            "client_key": client.client_key,
+            "crm_stage": normalize_crm_stage(lead.crm_stage),
+            "conversation_state": lead.conversation_state.value,
+        },
     }
 
 
@@ -112,6 +217,7 @@ def ui_crm_lead_detail(
         .where(Message.lead_id == lead.id)
         .order_by(Message.created_at.asc(), Message.id.asc())
     ).all()
+    attachments_by_message = _attachments_by_message(db, [message.id for message in messages])
     state_history = db.scalars(
         select(ConversationState)
         .where(ConversationState.lead_id == lead.id)
@@ -140,6 +246,7 @@ def ui_crm_lead_detail(
                 "created_at": message.created_at.isoformat(),
                 "direction": message.direction.value,
                 "body": message.body,
+                "attachments": attachments_by_message.get(message.id, []),
             }
         )
     for state_row in state_history:
@@ -233,6 +340,7 @@ def ui_crm_lead_detail(
             "last_inbound_at": lead.last_inbound_at.isoformat() if lead.last_inbound_at else None,
             "last_outbound_at": lead.last_outbound_at.isoformat() if lead.last_outbound_at else None,
             "tags": merged_tags,
+            **_lead_business_metrics(lead),
         },
         "client": {
             "client_key": client.client_key,
@@ -247,6 +355,7 @@ def ui_crm_lead_detail(
                 "direction": msg.direction.value,
                 "body": msg.body,
                 "provider_message_sid": msg.provider_message_sid,
+                "attachments": attachments_by_message.get(msg.id, []),
                 "created_at": msg.created_at.isoformat(),
             }
             for msg in messages
@@ -593,4 +702,3 @@ def ui_crm_update_task(
     db.commit()
     db.refresh(task)
     return {"status": "ok", "task": _serialize_task(task)}
-

@@ -60,6 +60,7 @@
         applyPaneSizes();
         updateConversationMobileLayout();
         updateConversationFilterUi();
+        if (typeof translatePage === "function") translatePage();
       }
 
       function wireEvents() {
@@ -84,6 +85,11 @@
         document.getElementById("sidebarToggle").addEventListener("click", toggleSidebar);
         document.getElementById("themeToggle").addEventListener("click", toggleTheme);
         document.getElementById("refreshButton").addEventListener("click", refreshCurrentView);
+        document.getElementById("topLanguageToggle").addEventListener("click", () => {
+          const current = typeof getUiLanguage === "function" ? getUiLanguage() : "en";
+          if (typeof setUiLanguage === "function") setUiLanguage(current === "fr" ? "en" : "fr");
+          refreshCurrentView();
+        });
         document.getElementById("calendarPrevMonthButton").addEventListener("click", () => shiftCalendarMonth(-1));
         document.getElementById("calendarTodayButton").addEventListener("click", jumpCalendarToToday);
         document.getElementById("calendarNextMonthButton").addEventListener("click", () => shiftCalendarMonth(1));
@@ -106,6 +112,8 @@
         document.getElementById("clientPreviewSlotsButton").addEventListener("click", previewBookingSlots);
         document.getElementById("resetClientFormButton").addEventListener("click", resetClientForm);
         document.getElementById("threadSendManualButton").addEventListener("click", sendManualMessage);
+        document.getElementById("threadMediaInput").addEventListener("change", updateThreadMediaPreview);
+        document.getElementById("threadClearMediaButton").addEventListener("click", clearThreadMediaSelection);
         document.getElementById("threadAddNoteButton").addEventListener("click", addNote);
         document.getElementById("threadHandoffButton").addEventListener("click", markHandoff);
         document.getElementById("threadArchiveButton").addEventListener("click", () => {
@@ -115,6 +123,21 @@
         document.getElementById("threadDeleteButton").addEventListener("click", deleteConversation);
         document.getElementById("threadCrmStageSaveButton").addEventListener("click", updateThreadCrmStage);
         document.getElementById("threadTagAddButton").addEventListener("click", () => addCrmTag("thread"));
+        document.getElementById("crmAddLeadButton").addEventListener("click", () => {
+          state.crmAddLeadOpen = true;
+          renderCrmBoard();
+        });
+        document.getElementById("crmCancelAddLeadButton").addEventListener("click", () => {
+          state.crmAddLeadOpen = false;
+          renderCrmBoard();
+        });
+        document.getElementById("manualLeadCreateButton").addEventListener("click", () => createManualLead("crm"));
+        document.getElementById("calendarShowMeetingFormButton").addEventListener("click", toggleCalendarMeetingPanel);
+        document.getElementById("calendarSelectedAddMeetingButton").addEventListener("click", toggleCalendarMeetingPanel);
+        document.getElementById("calendarShowLeadFormButton").addEventListener("click", openCalendarLeadPanel);
+        document.getElementById("calendarCreateLeadButton").addEventListener("click", () => createManualLead("calendar"));
+        document.getElementById("manualMeetingLeadMode").addEventListener("change", updateManualMeetingLeadMode);
+        document.getElementById("manualMeetingCreateButton").addEventListener("click", createManualMeeting);
         ["crmClientFilter", "crmStageFilter"].forEach((id) => {
           document.getElementById(id).addEventListener("change", async () => {
             applyCrmFilterInputs();
@@ -261,6 +284,22 @@
             renderClientWorkspace();
             return;
           }
+          if (action === "set-client-wizard-step") {
+            setClientWizardStep(target.dataset.step);
+            return;
+          }
+          if (action === "client-wizard-prev") {
+            moveClientWizard(-1);
+            return;
+          }
+          if (action === "client-wizard-next") {
+            moveClientWizard(1);
+            return;
+          }
+          if (action === "begin-new-client") {
+            beginNewClient();
+            return;
+          }
           if (action === "select-client") {
             await selectClient(target.dataset.clientKey);
             return;
@@ -279,6 +318,22 @@
           }
           if (action === "calendar-select-day") {
             selectCalendarDate(target.dataset.dateKey);
+            return;
+          }
+          if (action === "calendar-add-meeting") {
+            if (!state.calendarMeetingPanelOpen) {
+              toggleCalendarMeetingPanel();
+            } else {
+              syncManualMeetingFormDefaults();
+            }
+            return;
+          }
+          if (action === "calendar-meeting-status") {
+            await updateManualMeetingStatus(target.dataset.meetingId, target.dataset.status);
+            return;
+          }
+          if (action === "calendar-meeting-delete") {
+            await deleteManualMeeting(target.dataset.meetingId);
             return;
           }
           if (action === "open-thread") {
@@ -303,6 +358,11 @@
             resetConversationFilters();
             await loadConversations();
             showNotice("Conversation filters cleared.", "ok");
+            return;
+          }
+          if (action === "crm-open-add-lead") {
+            state.crmAddLeadOpen = true;
+            renderCrmBoard();
             return;
           }
           if (action === "open-crm-lead") {
@@ -332,6 +392,8 @@
 
       wireEvents();
       setTheme(state.theme);
+      if (typeof installI18nObserver === "function") installI18nObserver();
+      if (typeof updateLanguageToggle === "function") updateLanguageToggle();
       applySidebarState();
       applyLoginMode();
       startLivePolling();

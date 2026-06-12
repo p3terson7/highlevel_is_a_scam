@@ -14,14 +14,16 @@
                 </div>
                 <div class="item-meta-row">
                   <div class="chip-row">
-                    ${renderBadge(`${client.lead_count} leads`)}
+                    ${renderBadge(`${client.lead_count} records`)}
                     ${renderBadge(`${client.open_conversations} open`, client.open_conversations ? "info" : "")}
                   </div>
                   <div class="meta-text">${escapeHtml(formatDateTime(client.last_activity_at))}</div>
                 </div>
               </div>
             `).join("")
-          : '<div class="empty-state">No clients match the current search.</div>';
+          : renderEmptyState("No clients match the current search.", [
+              { label: "New client", attrs: { "data-action": "begin-new-client" } },
+            ], { compact: true });
         renderClientWorkspace();
       }
 
@@ -32,24 +34,40 @@
           ? data.stages
           : ["New Lead", "Contacted", "Qualified", "Meeting Booked", "Meeting Completed", "Won", "Lost"];
         document.getElementById("crmCountPills").innerHTML = stages
-          .map((stage) => renderBadge(`${stage} ${data.counts?.[stage] || 0}`, stage.includes("Won") || stage.includes("Booked") ? "ok" : stage === "Lost" ? "warn" : ""))
+          .map((stage) => renderBadge(`${formatCrmStageDisplay(stage)} ${data.counts?.[stage] || 0}`, stage.includes("Won") || stage.includes("Booked") ? "ok" : stage === "Lost" ? "warn" : ""))
           .join("");
+        document.getElementById("crmAddLeadPanel").classList.toggle("hidden", !state.crmAddLeadOpen);
 
         document.getElementById("crmBoard").innerHTML = stages.map((stage) => {
           const leads = (data.items || []).filter((item) => item.crm_stage === stage);
           const cards = leads.length
             ? leads.map((item) => {
                 const visibleTags = uniqueStatusTags(item.tags || [], [item.crm_stage, item.conversation_state], 2);
+                const scoreLabel = formatScoreLabel(item.lead_score);
+                const valueLabel = formatCompactCurrency(item.estimated_value);
+                const signalBadges = [
+                  scoreLabel ? renderBadge(`Score ${scoreLabel}`, Number(item.lead_score) >= 80 ? "ok" : Number(item.lead_score) >= 55 ? "info" : "warn") : "",
+                  valueLabel ? renderBadge(valueLabel, "info") : "",
+                ].filter(Boolean).join("");
+                const nextTask = item.next_task_title
+                  ? `<div class="crm-card-next"><span>${escapeHtml(t("Next task"))}</span>${escapeHtml(item.next_task_title)}${item.next_task_due_date ? ` · ${escapeHtml(item.next_task_due_date)}` : ""}</div>`
+                  : "";
+                const campaign = item.campaign_name
+                  ? `<div class="crm-card-campaign">${escapeHtml(item.campaign_name)}</div>`
+                  : "";
                 return `
                   <div class="crm-card" data-action="open-crm-lead" data-lead-id="${item.lead_id}" data-crm-stage="${escapeHtml(item.crm_stage)}" draggable="true">
                     <div class="item-title-row">
-                      <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Lead ${item.lead_id}`)}</div>
+                      <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Contact ${item.lead_id}`)}</div>
                       <div class="actions">
                         ${maybeRenderConversationState(item.crm_stage, item.conversation_state)}
                       </div>
                     </div>
                     <div class="item-subtitle">${escapeHtml([item.phone || "-", formatLeadSourceLabel(item.source || "-"), includeClientName ? (item.client_name || "") : ""].filter(Boolean).join(" · "))}</div>
+                    ${signalBadges ? `<div class="crm-card-metrics">${signalBadges}</div>` : ""}
+                    ${campaign}
                     <div class="item-snippet">${renderLabeledSnippet(item, "No messages yet.", 120)}</div>
+                    ${nextTask}
                     <div class="item-meta-row">
                       <div class="chip-row">${visibleTags.map((tag) => renderTag(tag)).join("")}</div>
                       <div class="meta-text">${escapeHtml(formatDateTime(item.last_activity_at))}</div>
@@ -57,24 +75,101 @@
                   </div>
                 `;
               }).join("")
-            : '<div class="empty-state">No leads in this stage.</div>';
+            : renderEmptyState("No records in this stage.", [
+                { label: "Add contact", attrs: { "data-action": "crm-open-add-lead" } },
+              ], { compact: true });
           return `
             <div class="crm-stage-column">
               <div class="crm-stage-header">
-                <div class="item-title">${escapeHtml(stage)}</div>
+                <div class="item-title">${escapeHtml(formatCrmStageDisplay(stage))}</div>
                 ${renderBadge(String(leads.length), leads.length ? "info" : "")}
               </div>
               <div class="crm-stage-list" data-stage="${escapeHtml(stage)}">${cards}</div>
             </div>
           `;
         }).join("");
+        if (typeof renderTodayView === "function") renderTodayView();
+      }
+
+      function manualLeadOptions() {
+        const selectedClientKey = state.session?.role === "client" ? state.session.client_key : state.selectedClientKey;
+        const leads = (state.crmLeads?.items || []).filter((lead) => {
+          if (!selectedClientKey) return true;
+          return !lead.client_key || lead.client_key === selectedClientKey;
+        });
+        return leads.slice().sort((a, b) => String(a.lead_name || "").localeCompare(String(b.lead_name || "")));
+      }
+
+      function fillManualMeetingLeadSelect() {
+        const select = document.getElementById("manualMeetingLeadSelect");
+        if (!select) return;
+        const leads = manualLeadOptions();
+        select.innerHTML = leads.length
+          ? leads.map((lead) => `<option value="${lead.lead_id}">${escapeHtml(lead.lead_name || lead.phone || `Contact ${lead.lead_id}`)}${lead.phone ? ` · ${escapeHtml(lead.phone)}` : ""}</option>`).join("")
+          : '<option value="">No contacts available</option>';
+      }
+
+      function selectedDateTimeLocalValue() {
+        const dateKey = state.calendarSelectedDate || dateKeyInTimeZone(new Date(), state.calendar?.timezone || undefined);
+        const now = new Date();
+        const minutes = now.getMinutes();
+        const rounded = minutes <= 30 ? 30 : 60;
+        let hour = now.getHours();
+        let minute = rounded === 60 ? 0 : rounded;
+        if (rounded === 60) hour += 1;
+        if (dateKey !== dateKeyInTimeZone(now, state.calendar?.timezone || undefined)) {
+          hour = 9;
+          minute = 0;
+        }
+        return `${dateKey}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+      }
+
+      function syncManualMeetingFormDefaults() {
+        const timezoneInput = document.getElementById("manualMeetingTimezone");
+        const startInput = document.getElementById("manualMeetingStart");
+        if (timezoneInput && !timezoneInput.value) {
+          timezoneInput.value = state.calendar?.timezone || state.ownerWorkspace?.client?.timezone || "America/Toronto";
+        }
+        if (startInput && !startInput.value) {
+          startInput.value = selectedDateTimeLocalValue();
+        }
+        fillManualMeetingLeadSelect();
+        updateManualMeetingLeadMode();
+        document.getElementById("calendarMeetingPanel")?.classList.toggle("hidden", !state.calendarMeetingPanelOpen);
+        document.getElementById("calendarShowMeetingFormButton")?.classList.toggle("active", state.calendarMeetingPanelOpen);
+        document.getElementById("calendarSelectedAddMeetingButton")?.classList.toggle("active", state.calendarMeetingPanelOpen);
+        document.getElementById("calendarManualLeadPanel")?.classList.toggle("hidden", !state.calendarLeadPanelOpen);
+        document.getElementById("calendarShowLeadFormButton")?.classList.toggle("active", state.calendarLeadPanelOpen);
+      }
+
+      function toggleCalendarMeetingPanel() {
+        state.calendarMeetingPanelOpen = !state.calendarMeetingPanelOpen;
+        if (state.calendarMeetingPanelOpen) {
+          state.calendarLeadPanelOpen = false;
+          const startInput = document.getElementById("manualMeetingStart");
+          if (startInput) startInput.value = "";
+          setText("manualMeetingStatus", "");
+        }
+        renderCalendarView();
+      }
+
+      function openCalendarLeadPanel() {
+        state.calendarLeadPanelOpen = true;
+        state.calendarMeetingPanelOpen = false;
+        renderCalendarView();
+      }
+
+      function updateManualMeetingLeadMode() {
+        const mode = document.getElementById("manualMeetingLeadMode")?.value || "existing";
+        document.getElementById("manualMeetingExistingLeadWrap")?.classList.toggle("hidden", mode !== "existing");
+        document.getElementById("manualMeetingNewLeadWrap")?.classList.toggle("hidden", mode !== "new");
       }
 
       function renderLeadsView() {
         const leads = state.crmLeads?.items || [];
         const archiveMode = Boolean(state.crmFilters.showArchived);
         const archiveToggle = document.getElementById("crmLeadArchiveToggleButton");
-        archiveToggle.textContent = archiveMode ? "Active leads" : "Archived";
+        archiveToggle.textContent = archiveMode ? "Active contacts" : "Archived";
         archiveToggle.classList.toggle("active", archiveMode);
         setText("crmLeadCount", archiveMode ? `${leads.length} archived` : `${leads.length}`);
         document.getElementById("crmLeadList").innerHTML = leads.length
@@ -83,7 +178,7 @@
               return `
                 <div class="lead-list-card ${item.lead_id === state.activeCrmLeadId ? "active" : ""}" data-action="open-crm-lead" data-lead-id="${item.lead_id}">
                   <div class="item-title-row">
-                    <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Lead ${item.lead_id}`)}</div>
+                    <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Contact ${item.lead_id}`)}</div>
                     <div class="actions">
                       ${renderBadge(item.crm_stage || "New Lead", crmStageTone(item.crm_stage))}
                     </div>
@@ -99,10 +194,14 @@
                 </div>
               `;
             }).join("")
-          : `<div class="empty-state">${archiveMode ? "No archived leads yet." : "No active leads match the current filters."}</div>`;
+          : renderEmptyState(
+              archiveMode ? "No archived contacts yet." : "No active contacts match the current filters.",
+              archiveMode ? [] : [{ label: "Add contact", attrs: { "data-action": "crm-open-add-lead" } }],
+              { compact: true }
+            );
 
         if (!state.crmLeadDetail) {
-          setText("crmLeadTitle", "Lead details");
+          setText("crmLeadTitle", "Contact details");
           document.getElementById("crmLeadHeaderStageBadge").innerHTML = "";
           document.getElementById("crmLeadHeaderLinePrimary").innerHTML = "";
           setText("crmLeadHeaderLineSecondary", "");
@@ -115,7 +214,7 @@
 
         const payload = state.crmLeadDetail;
         const archived = leadHasTag(payload.tags || payload.lead.tags || [], "archived");
-        const leadName = payload.lead.display_name || payload.lead.phone || "Lead";
+        const leadName = payload.lead.display_name || payload.lead.phone || "Contact";
         const stage = payload.lead.crm_stage || "New Lead";
         const currentConversationState = payload.lead.conversation_state || payload.lead.current_state || "";
         setText("crmLeadTitle", leadName);
@@ -157,7 +256,7 @@
         setText(
           "crmLeadStageHint",
           isClientRole()
-            ? "Update this only when the lead has clearly moved forward or is no longer active."
+            ? "Update this only when the contact has clearly moved forward or is no longer active."
             : "Keep the pipeline stage aligned with the latest conversation."
         );
         const leadSummaryLines = mergeSummaryRows(payload.lead.summary_lines || [], payload.lead.form_answers || {}, leadName);
@@ -212,7 +311,7 @@
         document.getElementById("crmLeadMessages").innerHTML = messages.length
           ? messages.slice(-10).map((msg) => {
               const outbound = msg.direction === "OUTBOUND";
-              const author = outbound ? (isClientRole() ? "You" : "Outbound") : (isClientRole() ? "Lead" : "Inbound");
+              const author = outbound ? (isClientRole() ? "You" : "Outbound") : (isClientRole() ? "Contact" : "Inbound");
               return `
                 <div class="crm-message-row ${outbound ? "outbound" : "inbound"}">
                   <div class="crm-message-bubble">
@@ -220,7 +319,8 @@
                       <span class="crm-message-author">${escapeHtml(author)}</span>
                       <span class="crm-message-time">${escapeHtml(formatDateTime(msg.created_at))}</span>
                     </div>
-                    <div class="crm-message-body">${escapeHtml(msg.body || "")}</div>
+                    ${msg.body ? `<div class="crm-message-body">${escapeHtml(msg.body || "")}</div>` : ""}
+                    ${renderMessageAttachments(msg.attachments || [])}
                   </div>
                 </div>
               `;
@@ -242,28 +342,73 @@
 
       function renderTasksView() {
         const payload = state.crmTasks || { items: [], counts: {} };
+        const timeZone = state.calendar?.timezone || state.ownerWorkspace?.client?.timezone || undefined;
+        const todayKey = dateKeyInTimeZone(new Date(), timeZone);
+        const bucketForTask = (task) => {
+          if (task.status === "done") return "Done";
+          if (task.due_date && task.due_date < todayKey) return "Overdue";
+          if (task.due_date === todayKey) return "Today";
+          if (task.due_date) return "Upcoming";
+          return "No due date";
+        };
+        const bucketTone = {
+          Overdue: "err",
+          Today: "warn",
+          Upcoming: "info",
+          "No due date": "",
+          Done: "ok",
+        };
+        const bucketOrder = {
+          Overdue: 0,
+          Today: 1,
+          Upcoming: 2,
+          "No due date": 3,
+          Done: 4,
+        };
+        const sortedTasks = (payload.items || []).slice().sort((a, b) => {
+          const aBucket = bucketForTask(a);
+          const bBucket = bucketForTask(b);
+          if (bucketOrder[aBucket] !== bucketOrder[bBucket]) return bucketOrder[aBucket] - bucketOrder[bBucket];
+          const aDue = a.due_date || "9999-12-31";
+          const bDue = b.due_date || "9999-12-31";
+          if (aDue !== bDue) return aDue.localeCompare(bDue);
+          return String(a.title || "").localeCompare(String(b.title || ""));
+        });
+        let lastBucket = "";
         document.getElementById("tasksCountPills").innerHTML = [
           renderBadge(`open ${payload.counts?.open || 0}`, "warn"),
           renderBadge(`done ${payload.counts?.done || 0}`, "ok"),
         ].join("");
         document.getElementById("crmTasksTableBody").innerHTML = payload.items?.length
-          ? payload.items.map((task) => `
-              <tr>
-                <td>${renderBadge(task.status, task.status === "done" ? "ok" : "warn")}</td>
-                <td>${escapeHtml(task.title)}</td>
-                <td>${escapeHtml(task.lead_name || "-")}<div class="meta-text mono">${escapeHtml(task.lead_phone || "")}</div></td>
-                <td>${escapeHtml(task.client_name || "-")}</td>
-                <td class="mono">${escapeHtml(task.due_date || "-")}</td>
-                <td>${escapeHtml(task.crm_stage || "-")}</td>
-                <td>
-                  <div class="actions">
-                    <button class="small ghost" data-action="crm-task-toggle" data-task-id="${task.id}" data-next-status="${task.status === "done" ? "open" : "done"}">${task.status === "done" ? "Reopen" : "Done"}</button>
-                    <button class="small ghost" data-action="open-crm-lead" data-lead-id="${task.lead_id}">Lead</button>
-                  </div>
-                </td>
-              </tr>
-            `).join("")
-          : '<tr><td colspan="7">No tasks match the current filters.</td></tr>';
+          ? sortedTasks.map((task) => {
+              const bucket = bucketForTask(task);
+              const heading = bucket !== lastBucket
+                ? `<tr class="task-group-row"><td colspan="7">${renderBadge(bucket, bucketTone[bucket])}</td></tr>`
+                : "";
+              lastBucket = bucket;
+              const dueLabel = task.due_date
+                ? formatDateLabel(task.due_date, timeZone, { month: "short", day: "numeric", weekday: "short" })
+                : "-";
+              return `
+                ${heading}
+                <tr class="task-row ${bucket.toLowerCase().replaceAll(" ", "-")}">
+                  <td data-label="Status">${renderBadge(task.status, task.status === "done" ? "ok" : "warn")}</td>
+                  <td data-label="Task"><strong>${escapeHtml(task.title)}</strong>${task.description ? `<div class="meta-text">${escapeHtml(task.description)}</div>` : ""}</td>
+                  <td data-label="Contact">${escapeHtml(task.lead_name || "-")}<div class="meta-text mono">${escapeHtml(task.lead_phone || "")}</div></td>
+                  <td data-label="Client">${escapeHtml(task.client_name || "-")}</td>
+                  <td data-label="Due" class="mono">${escapeHtml(dueLabel)}</td>
+                  <td data-label="Stage">${escapeHtml(task.crm_stage || "-")}</td>
+                  <td data-label="Actions">
+                    <div class="actions">
+                      <button class="small ghost" data-action="crm-task-toggle" data-task-id="${task.id}" data-next-status="${task.status === "done" ? "open" : "done"}">${task.status === "done" ? "Reopen" : "Done"}</button>
+                      <button class="small ghost" data-action="open-crm-lead" data-lead-id="${task.lead_id}">Open</button>
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join("")
+          : `<tr><td colspan="7">${renderEmptyState("No tasks match the current filters.", [], { compact: true })}</td></tr>`;
+        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function ensureCalendarFocus(timeZone) {
@@ -288,6 +433,8 @@
         if (!dateKey) return;
         state.calendarSelectedDate = dateKey;
         state.calendarMonth = monthKeyForDateKey(dateKey);
+        const startInput = document.getElementById("manualMeetingStart");
+        if (state.calendarMeetingPanelOpen && startInput) startInput.value = "";
         saveLocalState();
         renderCalendarView();
       }
@@ -329,17 +476,29 @@
       }
 
       function agendaMeetingItem(item, timeZone) {
+        const statusTone = item.status === "scheduled" ? "info" : item.status === "completed" ? "ok" : item.status === "cancelled" ? "warn" : "err";
+        const statusLabel = String(item.status || "scheduled").replaceAll("_", " ");
         return `
           <div class="calendar-agenda-item">
             <div class="item-title-row">
-              <div class="item-title">${escapeHtml(item.lead_name || "Booked meeting")}</div>
-              ${renderBadge("meeting", "info")}
+              <div class="item-title">${escapeHtml(item.title || item.lead_name || "Booked meeting")}</div>
+              ${renderBadge(statusLabel, statusTone)}
             </div>
-            <div class="item-snippet">${escapeHtml(`${formatTimeInTimeZone(item.start_at, timeZone)} to ${formatTimeInTimeZone(item.end_at, timeZone)}`)}</div>
+            <div class="item-snippet">${escapeHtml(item.lead_name || "No contact")} · ${escapeHtml(`${formatTimeInTimeZone(item.start_at, timeZone)} to ${formatTimeInTimeZone(item.end_at, timeZone)}`)}</div>
+            ${item.notes ? `<div class="item-snippet">${escapeHtml(item.notes)}</div>` : ""}
             <div class="item-meta-row">
               <div class="meta-text">${escapeHtml([item.phone || "", item.email || ""].filter(Boolean).join(" · ") || "No contact details")}</div>
-              <div class="actions">
-                ${item.lead_id ? `<button class="small ghost" data-action="open-crm-lead" data-lead-id="${item.lead_id}">Lead</button>` : ""}
+              <div class="actions calendar-item-actions">
+                ${item.lead_id ? `<button class="small ghost" data-action="open-crm-lead" data-lead-id="${item.lead_id}">Open</button>` : ""}
+                <details class="action-menu">
+                  <summary class="small ghost">Actions</summary>
+                  <div class="action-menu-panel">
+                    <button class="small ghost" data-action="calendar-meeting-status" data-meeting-id="${item.id}" data-status="completed">Completed</button>
+                    <button class="small ghost" data-action="calendar-meeting-status" data-meeting-id="${item.id}" data-status="no_show">No Show</button>
+                    <button class="small ghost" data-action="calendar-meeting-status" data-meeting-id="${item.id}" data-status="cancelled">Cancel</button>
+                    <button class="small warn" data-action="calendar-meeting-delete" data-meeting-id="${item.id}">Delete</button>
+                  </div>
+                </details>
               </div>
             </div>
           </div>
@@ -358,10 +517,10 @@
             </div>
             <div class="item-snippet">${escapeHtml(task.description || "No extra details.")}</div>
             <div class="item-meta-row">
-              <div class="meta-text">${escapeHtml(`${task.lead_name || "Lead"} · ${dueText}`)}</div>
+              <div class="meta-text">${escapeHtml(`${task.lead_name || "Contact"} · ${dueText}`)}</div>
               <div class="actions">
                 <button class="small ghost" data-action="crm-task-toggle" data-task-id="${task.id}" data-next-status="${task.status === "done" ? "open" : "done"}">${task.status === "done" ? "Reopen" : "Done"}</button>
-                <button class="small ghost" data-action="open-crm-lead" data-lead-id="${task.lead_id}">Lead</button>
+                <button class="small ghost" data-action="open-crm-lead" data-lead-id="${task.lead_id}">Open</button>
               </div>
             </div>
           </div>
@@ -432,6 +591,7 @@
             ? "This is your default planning view. Click any day to inspect booked meetings, then work through the open task list without leaving the page."
             : "Click a day to inspect bookings, then use the task list to follow up quickly."
         );
+        syncManualMeetingFormDefaults();
         document.getElementById("calendarOverviewGrid").innerHTML = [
           ["Meetings today", (itemsByDate.get(todayKey) || []).length],
           ["Tasks due today", dueTodayCount],
@@ -470,10 +630,12 @@
         }).join("");
         document.getElementById("calendarSelectedMeetings").innerHTML = selectedMeetings.length
           ? selectedMeetings.map((item) => agendaMeetingItem(item, timeZone)).join("")
-          : '<div class="empty-state">No meetings booked for this day.</div>';
+          : renderEmptyState("No meetings booked for this day.", [
+              { label: "Add meeting", attrs: { "data-action": "calendar-add-meeting" } },
+            ], { compact: true });
         document.getElementById("calendarSelectedTasks").innerHTML = selectedTasks.length
           ? selectedTasks.map((task) => agendaTaskItem(task, timeZone, task.due_date && task.due_date < todayKey ? "err" : "warn")).join("")
-          : '<div class="empty-state">No tasks are due on this day.</div>';
+          : renderEmptyState("No tasks are due on this day.", [], { compact: true });
         document.getElementById("calendarOpenTasks").innerHTML = openTasks.length
           ? openTasks.slice(0, 8).map((task) => {
               const tone = task.due_date && task.due_date < todayKey
@@ -481,7 +643,8 @@
                 : (task.due_date === todayKey ? "warn" : "info");
               return agendaTaskItem(task, timeZone, tone);
             }).join("")
-          : '<div class="empty-state">No open tasks right now.</div>';
+          : renderEmptyState("No open tasks right now.", [], { compact: true });
+        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function readCalendarConfigFromForm(prefix) {
@@ -541,6 +704,7 @@
           throw new Error("Template overrides must be valid JSON.");
         }
         const providerConfigRaw = {
+          language: document.getElementById("clientLanguage").value || "en",
           twilio_account_sid: document.getElementById("clientProviderTwilioSid").value.trim(),
           twilio_auth_token: document.getElementById("clientProviderTwilioToken").value.trim(),
           twilio_from_number: document.getElementById("clientProviderTwilioFrom").value.trim(),
@@ -608,6 +772,7 @@
         document.getElementById("clientProviderLinkedinVerify").value = "";
         document.getElementById("clientProviderZapierSecret").value = "";
         document.getElementById("clientProviderPublicBaseUrl").value = "";
+        document.getElementById("clientLanguage").value = "en";
       }
 
       function resetClientForm() {
@@ -620,6 +785,7 @@
           document.getElementById("clientKeyInput").readOnly = false;
           document.getElementById("clientTone").value = "friendly";
           document.getElementById("clientTimezone").value = "America/New_York";
+          document.getElementById("clientLanguage").value = "en";
           document.getElementById("clientIsActive").value = "true";
           document.getElementById("clientBookingUrl").value = "";
           document.getElementById("clientBookingMode").value = "internal";
@@ -650,6 +816,7 @@
         document.getElementById("clientKeyInput").value = "";
         document.getElementById("clientTone").value = "friendly";
         document.getElementById("clientTimezone").value = "America/New_York";
+        document.getElementById("clientLanguage").value = "en";
         document.getElementById("clientIsActive").value = "true";
         document.getElementById("clientBookingUrl").value = "";
         document.getElementById("clientBookingMode").value = "internal";
@@ -680,6 +847,7 @@
         document.getElementById("clientBookingMode").value = mode;
         applyInternalCalendarToForm(data.client.booking_config || {});
         const provider = data.client.provider_config || {};
+        document.getElementById("clientLanguage").value = provider.language || "en";
         document.getElementById("clientProviderTwilioSid").value = provider.twilio_account_sid || "";
         document.getElementById("clientProviderTwilioToken").value = provider.twilio_auth_token || "";
         document.getElementById("clientProviderTwilioFrom").value = provider.twilio_from_number || "";
@@ -707,6 +875,161 @@
         );
       }
 
+      const clientWizardSteps = ["business", "channels", "agent", "booking", "portal", "review"];
+      const clientWizardCopy = {
+        business: {
+          title: "Business setup",
+          hint: "Name the workspace, choose language, tone, timezone, and activation state.",
+        },
+        channels: {
+          title: "Channels and handoff",
+          hint: "Configure client-scoped Twilio, Meta, LinkedIn, Zapier, public URL, consent, and handoff details.",
+        },
+        agent: {
+          title: "Agent guidance",
+          hint: "Shape qualification questions, business context, FAQ, AI playbook, and optional templates.",
+        },
+        booking: {
+          title: "Booking rules",
+          hint: "Choose the booking mode and define the internal calendar availability the agent can use.",
+        },
+        portal: {
+          title: "Client portal",
+          hint: "Create the client login so the business can manage inbox, pipeline, calendar, and settings.",
+        },
+        review: {
+          title: "Review setup",
+          hint: "Confirm the workspace is presentation-ready before saving the client.",
+        },
+      };
+
+      function validClientWizardStep(step) {
+        return clientWizardSteps.includes(step) ? step : "business";
+      }
+
+      function setClientWizardStep(step) {
+        state.clientWizardStep = validClientWizardStep(step);
+        saveLocalState();
+        applyClientWizard();
+      }
+
+      function moveClientWizard(delta) {
+        const current = clientWizardSteps.indexOf(validClientWizardStep(state.clientWizardStep));
+        const next = Math.max(0, Math.min(clientWizardSteps.length - 1, current + delta));
+        setClientWizardStep(clientWizardSteps[next]);
+      }
+
+      function clientWizardFieldValue(id, fallback = "-") {
+        const el = document.getElementById(id);
+        if (!el) return fallback;
+        return String(el.value || "").trim() || fallback;
+      }
+
+      function clientWizardStatusLabel(value) {
+        return value && value !== "-" ? t("configured") : t("missing");
+      }
+
+      function renderClientWizardReview() {
+        const enabledDays = Array.from({ length: 7 }).filter((_, index) => document.getElementById(`clientCalDay${index}Enabled`)?.checked).length;
+        const aiContext = clientWizardFieldValue("clientAiContext", "");
+        const questions = clientWizardFieldValue("clientQuestions", "").split("\n").map((item) => item.trim()).filter(Boolean);
+        const cards = [
+          {
+            title: "Business",
+            rows: [
+              ["Name", clientWizardFieldValue("clientBusinessName")],
+              ["Key", clientWizardFieldValue("clientKeyInput")],
+              ["Language", clientWizardFieldValue("clientLanguage")],
+              ["Timezone", clientWizardFieldValue("clientTimezone")],
+              ["Active", clientWizardFieldValue("clientIsActive")],
+            ],
+          },
+          {
+            title: "Channels",
+            rows: [
+              ["Twilio", clientWizardStatusLabel(clientWizardFieldValue("clientProviderTwilioSid", ""))],
+              ["Meta", clientWizardStatusLabel(clientWizardFieldValue("clientProviderMetaAccess", ""))],
+              ["LinkedIn", clientWizardStatusLabel(clientWizardFieldValue("clientProviderLinkedinVerify", ""))],
+              ["Zapier", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierSecret", ""))],
+              ["Handoff", clientWizardStatusLabel(clientWizardFieldValue("clientHandoffNumber", ""))],
+            ],
+          },
+          {
+            title: "Agent",
+            rows: [
+              ["Tone", clientWizardFieldValue("clientTone")],
+              ["Questions", `${questions.length}`],
+              ["Playbook", aiContext ? `${aiContext.length} chars` : "missing"],
+              ["FAQ", clientWizardStatusLabel(clientWizardFieldValue("clientFaqContext", ""))],
+            ],
+          },
+          {
+            title: "Booking",
+            rows: [
+              ["Mode", clientWizardFieldValue("clientBookingMode")],
+              ["Booking URL", clientWizardStatusLabel(clientWizardFieldValue("clientBookingUrl", ""))],
+              ["Meeting length", `${clientWizardFieldValue("clientCalendarSlotMinutes", "30")} min`],
+              ["Available days", `${enabledDays}`],
+            ],
+          },
+          {
+            title: "Portal",
+            rows: [
+              ["Enabled", clientWizardFieldValue("clientPortalEnabled")],
+              ["Email", clientWizardFieldValue("clientPortalEmail")],
+              ["Display name", clientWizardFieldValue("clientPortalDisplayName")],
+              ["Password", clientWizardStatusLabel(clientWizardFieldValue("clientPortalPassword", "") || (state.clientDetail?.client?.portal_password_configured ? "saved" : ""))],
+            ],
+          },
+        ];
+        return `
+          <div class="client-wizard-review-grid">
+            ${cards.map((card) => `
+              <div class="client-wizard-review-card">
+                <div class="client-wizard-review-title">${escapeHtml(t(card.title))}</div>
+                ${card.rows.map(([label, value]) => `
+                  <div class="client-wizard-review-row">
+                    <span>${escapeHtml(t(label))}</span>
+                    <strong>${escapeHtml(value)}</strong>
+                  </div>
+                `).join("")}
+              </div>
+            `).join("")}
+          </div>
+        `;
+      }
+
+      function applyClientWizard() {
+        const wizard = document.getElementById("clientWizard");
+        if (!wizard) return;
+        const step = validClientWizardStep(state.clientWizardStep);
+        const isReview = step === "review";
+        const copy = clientWizardCopy[step] || clientWizardCopy.business;
+        setText("clientWizardTitle", copy.title);
+        setText("clientWizardHint", copy.hint);
+        document.querySelectorAll("[data-action='set-client-wizard-step']").forEach((btn) => {
+          const active = btn.dataset.step === step;
+          btn.classList.toggle("active", active);
+          btn.setAttribute("aria-current", active ? "step" : "false");
+        });
+        document.querySelectorAll("[data-client-wizard-section]").forEach((section) => {
+          section.classList.toggle("hidden", isReview || section.dataset.clientWizardSection !== step);
+        });
+        const review = document.getElementById("clientWizardReview");
+        if (review) {
+          review.classList.toggle("hidden", !isReview);
+          if (isReview) review.innerHTML = renderClientWizardReview();
+        }
+        const currentIndex = clientWizardSteps.indexOf(step);
+        const prev = document.querySelector("[data-action='client-wizard-prev']");
+        const next = document.querySelector("[data-action='client-wizard-next']");
+        if (prev) prev.disabled = currentIndex <= 0;
+        if (next) {
+          next.disabled = currentIndex >= clientWizardSteps.length - 1;
+          next.textContent = currentIndex >= clientWizardSteps.length - 2 ? t("Review") : t("Next step");
+        }
+      }
+
       function renderClientWorkspace() {
         const data = state.clientDetail;
         document.querySelectorAll("[data-action='set-client-tab']").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === state.clientTab));
@@ -722,6 +1045,7 @@
           document.getElementById("clientChecklist").innerHTML = '<div class="empty-state">Save the client to unlock onboarding and webhooks.</div>';
           document.getElementById("clientWebhookRows").innerHTML = '<div class="empty-state">Client-specific webhooks appear after creation.</div>';
           setText("clientBookingPreviewStatus", "");
+          applyClientWizard();
           return;
         }
 
@@ -733,6 +1057,7 @@
           document.getElementById("clientChecklist").innerHTML = '<div class="empty-state">No client selected.</div>';
           document.getElementById("clientWebhookRows").innerHTML = '<div class="empty-state">No client selected.</div>';
           setText("clientBookingPreviewStatus", "");
+          applyClientWizard();
           return;
         }
 
@@ -762,6 +1087,7 @@
         const clientBaseUrl = data.client.provider_config?.public_base_url || "";
         const webhookRows = Object.entries(data.webhook_urls || {}).map(([key, value]) => ({ label: key.replaceAll("_", " "), value: absoluteUrl(value, clientBaseUrl) }));
         document.getElementById("clientWebhookRows").innerHTML = renderWebhookRows(webhookRows);
+        applyClientWizard();
       }
 
       function renderConversationList() {
@@ -798,23 +1124,24 @@
                     <div class="item-meta-row">
                       <div class="chip-row">
                       ${visibleTags.map((tag) => renderTag(tag)).join("")}
-                      <button class="small ghost" data-action="open-crm-lead" data-lead-id="${item.lead_id}">${isClientRole() ? "Lead details" : "Lead"}</button>
+                      <button class="small ghost" data-action="open-crm-lead" data-lead-id="${item.lead_id}">${isClientRole() ? "Details" : "Open"}</button>
                     </div>
                     <div class="meta-text">${escapeHtml(formatDateTime(item.last_activity_at))}</div>
                   </div>
                 </div>
               `;
             }).join("")
-          : `<div class="empty-state"><div>${isClientRole() && archivedHiddenCount ? "Your active inbox is clear. Archived leads stay in Pipeline until you restore them." : "No conversations match the current filters."}</div><div class="actions" style="margin-top: 8px;"><button class="small ghost" data-action="clear-conversation-filters">Clear filters</button></div></div>`;
+          : `<div class="empty-state"><div>${isClientRole() && archivedHiddenCount ? "Your active inbox is clear. Archived contacts stay in Pipeline until you restore them." : "No conversations match the current filters."}</div><div class="actions" style="margin-top: 8px;"><button class="small ghost" data-action="clear-conversation-filters">Clear filters</button></div></div>`;
         updateConversationMobileLayout();
+        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function renderThread() {
         if (!state.thread) {
           setText("threadTitle", "Thread");
           document.getElementById("threadManualMessage").placeholder = isClientRole()
-            ? "Send a direct reply to this lead."
-            : "Type a direct outbound message to this lead.";
+            ? t("Send a direct reply to this contact.")
+            : t("Type a direct outbound message to this contact.");
           setText("threadComposerHint", isClientRole() ? "Your reply sends as the business's current SMS delivery mode." : "");
           const threadActionHintEl = document.getElementById("threadActionHint");
           threadActionHintEl.textContent = "";
@@ -844,6 +1171,7 @@
           document.getElementById("threadNotes").innerHTML = "";
           document.getElementById("threadAuditEvents").innerHTML = "";
           state.threadTimelineLeadId = null;
+          state.threadTimelineSignature = "";
           document.getElementById("threadEmpty").classList.remove("hidden");
           document.getElementById("threadDetails").classList.add("hidden");
           updateConversationMobileLayout();
@@ -855,12 +1183,12 @@
         const sandboxThread = leadHasTag(payload.lead.tags || [], "sandbox");
         setText("threadTitle", payload.lead.display_name || payload.lead.phone || "Thread");
         document.getElementById("threadManualMessage").placeholder = isClientRole()
-          ? (sandboxThread ? "Type the next lead message for the AI sandbox." : "Send a direct reply to this lead.")
-          : (sandboxThread ? "Type the next lead message for the AI sandbox." : "Type a direct outbound message to this lead.");
+          ? (sandboxThread ? t("Type the next contact message for the AI sandbox.") : t("Send a direct reply to this contact."))
+          : (sandboxThread ? t("Type the next contact message for the AI sandbox.") : t("Type a direct outbound message to this contact."));
         setText(
           "threadComposerHint",
           sandboxThread
-            ? "Sandbox mode: this sends as the lead, runs the AI, and stores the reply here. No Twilio."
+            ? "Sandbox mode: this sends as the contact, runs the AI, and stores the reply here. No Twilio."
             : (isClientRole() ? "Your reply sends as the business's current SMS delivery mode." : "")
         );
         const threadActionHintEl = document.getElementById("threadActionHint");
@@ -873,46 +1201,55 @@
         threadHeaderPills.classList.add("hidden");
         threadHeaderPills.innerHTML = "";
         const timelineEl = document.getElementById("threadTimeline");
-        const shouldStickToLatest = state.threadTimelineLeadId !== state.activeLeadId || isNearBottom(timelineEl, 96);
-        timelineEl.innerHTML = payload.timeline.length
-          ? payload.timeline.map((item) => {
-              if (item.type === "message") {
-                const outbound = item.direction === "OUTBOUND";
-                const meta = [
-                  outbound ? (isClientRole() ? "You" : "Outbound") : (isClientRole() ? "Lead" : "Inbound"),
-                  formatDateTime(item.created_at),
-                ];
-                if (!isClientRole() && item.provider_message_sid) {
-                  meta.push(item.provider_message_sid);
-                }
-                return `
-                  <div class="bubble-row ${outbound ? "outbound" : "inbound"}">
-                    <div class="bubble ${outbound ? "outbound" : ""}">
-                      <div>${escapeHtml(item.body)}</div>
-                      <div class="bubble-meta">
-                        ${meta.map((entry) => `<span>${escapeHtml(entry)}</span>`).join("")}
+        if (state.threadTimelineLeadId !== state.activeLeadId && typeof clearThreadMediaSelection === "function") {
+          clearThreadMediaSelection();
+        }
+        const timelineSignature = threadTimelineSignature(payload.timeline || []);
+        const timelineChanged = state.threadTimelineLeadId !== state.activeLeadId || state.threadTimelineSignature !== timelineSignature;
+        const shouldStickToLatest = timelineChanged && (state.threadTimelineLeadId !== state.activeLeadId || isNearBottom(timelineEl, 96));
+        if (timelineChanged) {
+          timelineEl.innerHTML = payload.timeline.length
+            ? payload.timeline.map((item) => {
+                if (item.type === "message") {
+                  const outbound = item.direction === "OUTBOUND";
+                  const meta = [
+                    outbound ? (isClientRole() ? "You" : "Outbound") : (isClientRole() ? "Contact" : "Inbound"),
+                    formatDateTime(item.created_at),
+                  ];
+                  if (!isClientRole() && item.provider_message_sid) {
+                    meta.push(item.provider_message_sid);
+                  }
+                  return `
+                    <div class="bubble-row ${outbound ? "outbound" : "inbound"}">
+                      <div class="bubble ${outbound ? "outbound" : ""}">
+                        ${item.body ? `<div>${escapeHtml(item.body)}</div>` : ""}
+                        ${renderMessageAttachments(item.attachments || [])}
+                        <div class="bubble-meta">
+                          ${meta.map((entry) => `<span>${escapeHtml(entry)}</span>`).join("")}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                `;
-              }
-              if (item.type === "state") {
-                const detail = `${formatConversationStateLabel(item.previous_state)} -> ${formatConversationStateLabel(item.new_state)}`;
-                const reason = formatConversationTransitionReason(item.reason);
-                return renderThreadTimelineEvent("conversation-state", "Conversation Status", detail);
-              }
-              if (item.type === "crm_stage") {
-                const detail = `${item.previous_stage || "-"} -> ${item.new_stage || "-"}`;
-                const reason = formatCrmTransitionReason(item.reason);
-                return renderThreadTimelineEvent("crm-stage", "CRM Pipeline Stage", detail);
-              }
-              if (item.type === "task" || item.type === "task_completed") {
-                const detail = `${item.type === "task_completed" ? "Completed" : "Created"}: ${item.title || ""}`;
-                return renderThreadTimelineEvent("task-event", "Task", detail, "Task tracking update.");
-              }
-              return `<div class="note-event"><div class="meta-text">${escapeHtml(formatDateTime(item.created_at))}</div><div>${escapeHtml(item.body || "")}</div></div>`;
-            }).join("")
-          : '<div class="empty-state">No thread activity yet.</div>';
+                  `;
+                }
+                if (item.type === "state") {
+                  const detail = `${formatConversationStateLabel(item.previous_state)} -> ${formatConversationStateLabel(item.new_state)}`;
+                  const reason = formatConversationTransitionReason(item.reason);
+                  return renderThreadTimelineEvent("conversation-state", "Conversation Status", detail);
+                }
+                if (item.type === "crm_stage") {
+                  const detail = `${item.previous_stage || "-"} -> ${item.new_stage || "-"}`;
+                  const reason = formatCrmTransitionReason(item.reason);
+                  return renderThreadTimelineEvent("crm-stage", "CRM Pipeline Stage", detail);
+                }
+                if (item.type === "task" || item.type === "task_completed") {
+                  const detail = `${item.type === "task_completed" ? "Completed" : "Created"}: ${item.title || ""}`;
+                  return renderThreadTimelineEvent("task-event", "Task", detail, "Task tracking update.");
+                }
+                return `<div class="note-event"><div class="meta-text">${escapeHtml(formatDateTime(item.created_at))}</div><div>${escapeHtml(item.body || "")}</div></div>`;
+              }).join("")
+            : '<div class="empty-state">No thread activity yet.</div>';
+          state.threadTimelineSignature = timelineSignature;
+        }
         state.threadTimelineLeadId = state.activeLeadId;
         if (shouldStickToLatest) {
           window.requestAnimationFrame(() => {
@@ -922,7 +1259,7 @@
 
         document.getElementById("threadEmpty").classList.add("hidden");
         document.getElementById("threadDetails").classList.remove("hidden");
-        const threadLeadName = payload.lead.display_name || payload.lead.phone || "Lead";
+        const threadLeadName = payload.lead.display_name || payload.lead.phone || "Contact";
         const threadLeadStage = payload.lead.crm_stage || "New Lead";
         const threadState = payload.lead.current_state || "";
         setText("threadLeadOverviewName", threadLeadName);
@@ -936,7 +1273,7 @@
           threadHeaderPrimaryParts.push(renderCopyableHeaderValue(threadEmailDisplay, threadEmailDisplay, "email"));
         }
         const threadHeaderPrimary = threadHeaderPrimaryParts.join('<span class="lead-detail-sep">·</span>');
-        document.getElementById("threadLeadOverviewSubtitle").innerHTML = threadHeaderPrimary || "No lead contact details yet.";
+        document.getElementById("threadLeadOverviewSubtitle").innerHTML = threadHeaderPrimary || "No contact details yet.";
         setText(
           "threadLeadHeaderMeta",
           [
@@ -994,7 +1331,7 @@
           return;
         }
         document.getElementById("logEventCards").innerHTML = [
-          ["last lead", state.logEvents.last_lead_received_at],
+          ["last record", state.logEvents.last_lead_received_at],
           ["last inbound", state.logEvents.last_sms_inbound_at],
           ["last outbound", state.logEvents.last_sms_outbound_at],
           ["last AI", state.logEvents.last_ai_decision_at],
@@ -1005,11 +1342,11 @@
         document.getElementById("logsTableBody").innerHTML = logs.length
           ? logs.map((log) => `
               <tr>
-                <td class="mono">${escapeHtml(formatDateTime(log.created_at))}</td>
-                <td class="mono">${escapeHtml(log.event_type)}</td>
-                <td>${escapeHtml(log.lead_id ?? "-")}</td>
-                <td class="mono">${escapeHtml(JSON.stringify(log.decision || {}))}</td>
-                <td>${log.lead_id ? `<button class="small ghost" data-action="open-thread" data-lead-id="${log.lead_id}">Open</button>` : ""}</td>
+                <td data-label="Time" class="mono">${escapeHtml(formatDateTime(log.created_at))}</td>
+                <td data-label="Event" class="mono">${escapeHtml(log.event_type)}</td>
+                <td data-label="Record">${escapeHtml(log.lead_id ?? "-")}</td>
+                <td data-label="Decision" class="mono">${escapeHtml(JSON.stringify(log.decision || {}))}</td>
+                <td data-label="Actions">${log.lead_id ? `<button class="small ghost" data-action="open-thread" data-lead-id="${log.lead_id}">Open</button>` : ""}</td>
               </tr>
             `).join("")
           : '<tr><td colspan="5">No matching audit rows.</td></tr>';
@@ -1043,13 +1380,63 @@
           linkedin_events: `/webhooks/linkedin/${clientConfig.client_key}`,
           twilio_sms: `/sms/inbound/${clientConfig.client_key}`,
         } : null);
+        const selectedRuntime = detail?.provider_runtime || state.ownerWorkspace?.runtime || {};
+        const setupSteps = isAdmin
+          ? [
+              {
+                label: "Select a business",
+                detail: clientConfig ? clientConfig.business_name || clientConfig.client_key : "Choose a client from the top bar or Clients page.",
+                done: Boolean(clientConfig),
+              },
+              {
+                label: "Global OpenAI configured",
+                detail: runtime?.openai_api_key_configured ? (runtime.openai_model || "Configured") : "Add the centralized OpenAI key once.",
+                done: Boolean(runtime?.openai_api_key_configured),
+              },
+              {
+                label: "Client channels configured",
+                detail: selectedRuntime.twilio_configured ? "SMS delivery is ready for this business." : "Add Twilio/Zapier/Meta/LinkedIn credentials in Clients > Edit.",
+                done: Boolean(selectedRuntime.twilio_configured),
+              },
+              {
+                label: "Business playbook ready",
+                detail: clientConfig?.ai_context ? "Custom assistant guidance is present." : "Add offer, qualification, escalation, and tone notes.",
+                done: Boolean(clientConfig?.ai_context),
+              },
+              {
+                label: "Booking availability ready",
+                detail: formatBookingModeLabel(clientConfig?.booking_mode || "link"),
+                done: Boolean(clientConfig && ["internal", "calendar", "calendly"].includes(String(clientConfig.booking_mode || "").toLowerCase())),
+              },
+            ]
+          : [
+              {
+                label: "Assistant guidance",
+                detail: clientConfig?.ai_context ? "The assistant has business-specific instructions." : "Add guidance before relying on new AI replies.",
+                done: Boolean(clientConfig?.ai_context),
+              },
+              {
+                label: "Booking availability",
+                detail: formatBookingModeLabel(clientConfig?.booking_mode || "link"),
+                done: Boolean(clientConfig && ["internal", "calendar", "calendly"].includes(String(clientConfig.booking_mode || "").toLowerCase())),
+              },
+              {
+                label: "SMS delivery",
+                detail: formatDeliveryModeLabel(state.ownerWorkspace?.delivery_mode || "mock"),
+                done: Boolean(selectedRuntime.twilio_configured),
+              },
+            ];
+        const setupGuide = document.getElementById("settingsSetupGuideSteps");
+        if (setupGuide) {
+          setupGuide.innerHTML = renderChecklist(setupSteps);
+        }
 
         setText("settingsAiSectionTitle", isAdmin ? "AI Context / Business Playbook" : "AI Assistant Guidance");
         setText(
           "settingsAiSectionSubtitle",
           isAdmin
             ? "Tailor how AI speaks, what to emphasize, and what to avoid for this business. Same field as Clients > Edit."
-            : "Guide how your assistant speaks, qualifies leads, and handles sensitive topics. Keep this focused on live customer-facing behavior."
+            : "Guide how your assistant speaks, qualifies new inquiries, and handles sensitive topics. Keep this focused on live customer-facing behavior."
         );
         setText(
           "settingsAiContextHelper",
@@ -1063,7 +1450,7 @@
           "settingsCalendarSectionSubtitle",
           isAdmin
             ? "Business owners can edit this directly. AI uses these windows when offering meeting times."
-            : `Set the times new leads can book.${clientConfig?.timezone ? ` Displayed in ${clientConfig.timezone}.` : ""}`
+            : `Set the times new contacts can book.${clientConfig?.timezone ? ` Displayed in ${clientConfig.timezone}.` : ""}`
         );
         setText(
           "settingsCalendarHelper",
@@ -1075,8 +1462,8 @@
         );
         setText("saveSettingsCalendarButton", isAdmin ? "Save calendar availability" : "Save booking availability");
         document.getElementById("settingsAiContextInput").placeholder = isAdmin
-          ? "Example:\n- We help local service businesses run paid ads and AI follow-up.\n- Prioritize qualified booked calls over raw lead count.\n- Never guarantee exact lead numbers.\n- Ask one focused question at a time.\n- Tone: concise, direct, practical."
-          : "Example:\n- Sound warm, confident, and practical.\n- Qualify for budget, timeline, and service area before offering times.\n- Never promise exact results or fixed pricing over text.\n- Escalate to a human if a lead asks for custom pricing or sounds upset.";
+          ? "Example:\n- We help local service businesses run paid ads and AI follow-up.\n- Prioritize qualified booked calls over raw volume.\n- Never guarantee exact numbers.\n- Ask one focused question at a time.\n- Tone: concise, direct, practical."
+          : "Example:\n- Sound warm, confident, and practical.\n- Qualify for budget, timeline, and service area before offering times.\n- Never promise exact results or fixed pricing over text.\n- Escalate to a human if a contact asks for custom pricing or sounds upset.";
         document.getElementById("settingsFaqContextInput").placeholder = isAdmin
           ? "Services, process, constraints, pricing ranges, policies."
           : "Facts the assistant can safely reference: services, neighborhoods served, hours, pricing ranges, warranty notes, and policies.";
@@ -1104,7 +1491,7 @@
           setText(
             "settingsClientOverviewNote",
             clientConfig
-              ? "The controls below affect future AI replies, new booking offers, and test leads for this business. They do not rewrite past messages."
+              ? "The controls below affect future AI replies, new booking offers, and test scenarios for this business. They do not rewrite past messages."
               : "Workspace details are loading."
           );
           document.getElementById("settingsClientChecklistSummary").innerHTML = readinessItems.length
@@ -1125,11 +1512,11 @@
 
         const demoClients = state.clients.filter((client) => client.client_key.startsWith("demo-"));
         document.getElementById("settingsDemoSummary").innerHTML = demoClients.length
-          ? demoClients.map((client) => `<div class="preview-item"><div class="item-title-row"><div class="item-title">${escapeHtml(client.business_name)}</div>${renderBadge(client.client_key, "info")}</div><div class="item-snippet">${escapeHtml(`${client.lead_count} leads · ${client.open_conversations} open`)}</div></div>`).join("")
+          ? demoClients.map((client) => `<div class="preview-item"><div class="item-title-row"><div class="item-title">${escapeHtml(client.business_name)}</div>${renderBadge(client.client_key, "info")}</div><div class="item-snippet">${escapeHtml(`${client.lead_count} records · ${client.open_conversations} open`)}</div></div>`).join("")
           : '<div class="empty-state">No seeded demo clients detected.</div>';
         const showcaseHint = state.selectedClientKey
           ? `Target client: ${state.selectedClientKey}`
-          : "Select a client to seed showcase leads into that business.";
+          : "Select a client to seed showcase records into that business.";
         setText("settingsClientSeedHint", showcaseHint);
         ["seedDemoButton", "reseedDemoButton", "resetDemoButton"].forEach((id) => {
           document.getElementById(id).disabled = !state.session?.can_seed_demo;
@@ -1200,8 +1587,8 @@
         const phoneInput = document.getElementById("labLeadPhone");
         const emailInput = document.getElementById("labLeadEmail");
         const cityInput = document.getElementById("labLeadCity");
-        if (nameInput && !nameInput.value) nameInput.value = "Strategy Call Lead";
-        if (emailInput && !emailInput.value) emailInput.value = "lead@example.com";
+        if (nameInput && !nameInput.value) nameInput.value = "Strategy Call Contact";
+        if (emailInput && !emailInput.value) emailInput.value = "contact@example.com";
         if (cityInput && !cityInput.value) cityInput.value = "Toronto";
         if (phoneInput && !phoneInput.value) phoneInput.value = "";
 
@@ -1226,7 +1613,7 @@
         if (!document.getElementById("labStartStatus").textContent) {
           setText(
             "labStartStatus",
-            state.sandboxLeadId ? `Last sandbox lead: ${state.sandboxLeadId}. Starting a new one will create a fresh inbox thread.` : ""
+            state.sandboxLeadId ? `Last sandbox contact: ${state.sandboxLeadId}. Starting a new one will create a fresh inbox thread.` : ""
           );
         }
       }
@@ -1253,7 +1640,7 @@
           const stamp = formatDateTime(item.created_at);
           const leadRef = item.lead_id ?? "-";
           const decision = JSON.stringify(item.decision || {});
-          return `[${stamp}] ${item.event_type} · lead ${leadRef}\n${decision}`;
+          return `[${stamp}] ${item.event_type} · record ${leadRef}\n${decision}`;
         });
         output.textContent = `Endpoint: ${webhookUrl}\n\n${lines.join("\n\n")}`;
       }

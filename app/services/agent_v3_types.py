@@ -23,10 +23,11 @@ _ALLOWED_STATES = {
     ConversationStateEnum.HANDOFF,
 }
 _BOOKED_CONFIRM_PATTERN = re.compile(
-    r"\b(i booked|we booked|booked already|already booked|appointment booked|scheduled it|i scheduled|i'm booked|im booked)\b",
+    r"\b(i booked|we booked|booked already|already booked|appointment booked|scheduled it|i scheduled|i'm booked|im booked|"
+    r"j'ai r[ée]serv[ée]|nous avons r[ée]serv[ée]|d[ée]j[àa] r[ée]serv[ée]|rendez-vous confirm[ée])\b",
     re.IGNORECASE,
 )
-_HANDOFF_PATTERN = re.compile(r"\b(human|person|call me|someone from your team|manager|representative)\b", re.IGNORECASE)
+_HANDOFF_PATTERN = re.compile(r"\b(human|person|call me|someone from your team|manager|representative|humain|personne|appelez-moi|quelqu'un|repr[ée]sentant|g[ée]rant)\b", re.IGNORECASE)
 _IDENTITY_QUESTION_PATTERN = re.compile(
     r"\b("
     r"who (?:are you|is this|runs?|owns?|founded|started|is behind)|"
@@ -46,7 +47,7 @@ _ASSISTANT_OWNERSHIP_CLAIM_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-_CLOSING_PATTERN = re.compile(r"^(thanks|thank you|ok|okay|cool|great|perfect|sounds good)[.! ]*$", re.IGNORECASE)
+_CLOSING_PATTERN = re.compile(r"^(thanks|thank you|ok|okay|cool|great|perfect|sounds good|merci|parfait|d'accord|super)[.! ]*$", re.IGNORECASE)
 _TIMELINE_PATTERN = re.compile(
     r"\b(asap|immediately|this week|next week|within \d+\s+(?:day|days|week|weeks|month|months)|\d+\s+(?:day|days|week|weeks|month|months))\b",
     re.IGNORECASE,
@@ -56,10 +57,11 @@ _DECISION_MAKER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _BOOKING_INTENT_PATTERN = re.compile(
-    r"\b(yes|yeah|yep|sure|sounds good|works for me|let'?s do it|book it|go ahead|schedule|book|set it up|confirm)\b",
+    r"\b(yes|yeah|yep|sure|sounds good|works for me|let'?s do it|book it|go ahead|schedule|book|set it up|confirm|"
+    r"oui|certainement|ça marche|ca marche|allons-y|r[ée]server?|planifier|confirmer?|prenez le rendez-vous)\b",
     re.IGNORECASE,
 )
-_PRICING_PATTERN = re.compile(r"\b(price|pricing|cost|quote|estimate|how much|rates?|budget)\b", re.IGNORECASE)
+_PRICING_PATTERN = re.compile(r"\b(price|pricing|cost|quote|estimate|how much|rates?|budget|prix|tarif|co[ûu]t|soumission|combien|estimation)\b", re.IGNORECASE)
 _PRICE_AMOUNT_PATTERN = re.compile(
     r"(\$\s?\d|(?:under|over|around|about|roughly|starts? at|between)\s+\$?\d[\d,]*(?:\.\d+)?\s?(?:k|cad|usd|dollars?)\b|"
     r"\b\d[\d,]*(?:\.\d+)?\s?(?:cad|usd|dollars?)\b)",
@@ -68,18 +70,19 @@ _PRICE_AMOUNT_PATTERN = re.compile(
 _BUDGET_TALK_PATTERN = re.compile(r"\b(target (?:budget|range)|range in mind|spend|investment)\b", re.IGNORECASE)
 _RESCHEDULE_PATTERN = re.compile(
     r"\b(reschedule|re-schedule|move (?:it|the meeting|the call)|change (?:it|the time|the meeting|the call)|"
-    r"different time|another time|new time|instead|can we do|could we do)\b",
+    r"different time|another time|new time|instead|can we do|could we do|"
+    r"replanifier|d[ée]placer|changer (?:l'heure|le rendez-vous|l'appel)|autre moment|une autre heure)\b",
     re.IGNORECASE,
 )
 _LOW_INTENT_PATTERN = re.compile(
     r"\b(just looking|just browsing|browsing|researching|early stages?|curious|not ready|"
-    r"not sure yet|general idea|learn more|info only|information only)\b",
+    r"not sure yet|general idea|learn more|info only|information only|je regarde|curieux|pas pr[êe]t|information seulement|juste des infos)\b",
     re.IGNORECASE,
 )
 _CALL_REFUSAL_PATTERN = re.compile(
     r"\b(no call|no meeting|don'?t want (?:a )?(?:call|meeting)|do not want (?:a )?(?:call|meeting)|"
     r"not ready to (?:book|schedule)|don'?t schedule|do not schedule|email only|text only|"
-    r"prefer email|rather email|stop asking)\b",
+    r"prefer email|rather email|stop asking|pas d'appel|pas de rencontre|pas de rendez-vous|courriel seulement|texto seulement|je pr[ée]f[èe]re par courriel)\b",
     re.IGNORECASE,
 )
 _MEETING_CTA_PATTERN = re.compile(
@@ -90,14 +93,14 @@ _MEETING_CTA_PATTERN = re.compile(
 )
 _BUYING_SIGNAL_PATTERN = re.compile(
     r"\b(ready to start|ready now|need this soon|asap|urgent|this week|next week|call me|"
-    r"someone call|can someone call|can we talk|move forward|next step|send me times)\b",
+    r"someone call|can someone call|can we talk|move forward|next step|send me times|urgent|d[èe]s que possible|cette semaine|semaine prochaine|appelez-moi|prochaine [ée]tape|envoyez-moi des disponibilit[ée]s)\b",
     re.IGNORECASE,
 )
 _SCOPE_QUANTITY_PATTERN = re.compile(
     r"\b(\d[\d,]*(?:\.\d+)?\s?(?:locations?|units?|rooms?|users?|seats?|employees?|items?|orders?|accounts?))\b",
     re.IGNORECASE,
 )
-_DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
 _TOOL_JSON_SCHEMA = (
     '{"reply_text":"string","next_state":"QUALIFYING|BOOKING_SENT|BOOKED|HANDOFF",'
     '"collected_fields":{"service_needed":"string|null","timeline":"string|null","locations":"string|null",'

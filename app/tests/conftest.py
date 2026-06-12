@@ -34,9 +34,9 @@ class FakeSMSService:
             values.update(context)
         return template.format(**values)
 
-    def send_message(self, to_number: str, body: str) -> str:
+    def send_message(self, to_number: str, body: str, media_urls: list[str] | None = None) -> str:
         sid = f"SM{len(self.sent) + 1:06d}"
-        self.sent.append({"to": to_number, "body": body, "sid": sid})
+        self.sent.append({"to": to_number, "body": body, "sid": sid, "media_urls": media_urls or []})
         return sid
 
 
@@ -390,6 +390,7 @@ def test_context(tmp_path, monkeypatch) -> TestContext:
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "")
     monkeypatch.setenv("ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setenv("AUTO_CREATE_TABLES", "false")
+    monkeypatch.setenv("MESSAGE_MEDIA_STORAGE_DIR", str(tmp_path / "message_media"))
 
     get_settings.cache_clear()
     clear_dependency_caches()

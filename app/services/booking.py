@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import CalendarBooking, Client, ConversationStateEnum, Lead, Message
 from app.db.session import get_session_factory
+from app.services.i18n import client_language, format_datetime_for_language, normalize_language
 
 _CALENDLY_API_BASE = "https://api.calendly.com"
 _EMAIL_RE = re.compile(r"(?P<email>[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", re.IGNORECASE)
@@ -67,6 +68,8 @@ def ensure_booking_link(reply_text: str, client: Client) -> str:
 def handoff_suffix(client: Client) -> str:
     if not client.fallback_handoff_number:
         return ""
+    if client_language(client) == "fr":
+        return f" Pour une aide immédiate, appelez le {client.fallback_handoff_number}."
     return f" For immediate help, call {client.fallback_handoff_number}."
 
 
@@ -236,9 +239,8 @@ def _internal_slot_key(slot: dict[str, Any]) -> tuple[str, str]:
     return (str(slot.get("start_time", "")).strip(), str(slot.get("end_time", "")).strip())
 
 
-def _format_internal_booking_time(start_at: datetime, *, timezone_name: str) -> str:
-    local_dt = start_at.astimezone(_tzinfo(timezone_name))
-    return local_dt.strftime("%a %b %d at %I:%M %p").replace(" 0", " ")
+def _format_internal_booking_time(start_at: datetime, *, timezone_name: str, language: str = "en") -> str:
+    return format_datetime_for_language(start_at, timezone_name=timezone_name, language=language)
 
 
 def _as_session_context(db: Session | None):
@@ -380,6 +382,7 @@ class BookingService:
         limit: int = 3,
         db: Session | None = None,
     ) -> SlotOffer:
+        language = client_language(client, lead=lead)
         if not automated_booking_enabled(client):
             raise BookingProviderError("Automated booking is not configured for this client.")
 
@@ -393,7 +396,11 @@ class BookingService:
             slots = self._list_calendly_slots(client=client, limit=expanded_limit)
         all_available_slots = list(slots)
         if not slots:
-            fallback = "I am not seeing open times right now. Share a day and time window and I can check alternatives."
+            fallback = (
+                "Je ne vois pas de disponibilités pour le moment. Envoyez-moi une journée et une plage horaire, et je peux vérifier d'autres options."
+                if language == "fr"
+                else "I am not seeing open times right now. Share a day and time window and I can check alternatives."
+            )
             return SlotOffer(
                 reply_text=fallback,
                 slots=[],
@@ -410,18 +417,31 @@ class BookingService:
             slots=all_available_slots,
             timezone_name=client.timezone or "UTC",
             day_limit=3,
+            language=language,
         )
         timezone_label = self._timezone_abbreviation(client.timezone)
-        lines = ["I can book a call directly."]
-        if coverage_summary:
-            lines.append(f"I have call openings including {coverage_summary}.")
-        lines.extend(
-            [
-                "Here are a few spread-out call times to lock in now:",
-                *[f"{slot.index}) {slot.display_time}" for slot in slots],
-                f"{_slot_selection_prompt(slots)}. If none of those work, just send me a time that's better for you. Times shown in {timezone_label}.",
-            ]
-        )
+        if language == "fr":
+            lines = ["Je peux réserver un appel directement."]
+            if coverage_summary:
+                lines.append(f"J'ai des disponibilités notamment {coverage_summary}.")
+            lines.extend(
+                [
+                    "Voici quelques options réparties pour confirmer maintenant:",
+                    *[f"{slot.index}) {slot.display_time}" for slot in slots],
+                    f"{_slot_selection_prompt(slots, language=language)}. Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux. Heures affichées en {timezone_label}.",
+                ]
+            )
+        else:
+            lines = ["I can book a call directly."]
+            if coverage_summary:
+                lines.append(f"I have call openings including {coverage_summary}.")
+            lines.extend(
+                [
+                    "Here are a few spread-out call times to lock in now:",
+                    *[f"{slot.index}) {slot.display_time}" for slot in slots],
+                    f"{_slot_selection_prompt(slots)}. If none of those work, just send me a time that's better for you. Times shown in {timezone_label}.",
+                ]
+            )
         raw_payload = {
             "booking_offer": {
                 "provider": provider,
@@ -446,6 +466,7 @@ class BookingService:
         limit: int = 3,
         db: Session | None = None,
     ) -> SlotOffer:
+        language = client_language(client, lead=lead)
         if not automated_booking_enabled(client):
             raise BookingProviderError("Automated booking is not configured for this client.")
 
@@ -511,7 +532,11 @@ class BookingService:
             match_mode = "exact"
 
         if not slots:
-            fallback = "I am not seeing open times right now. Share a day and time window and I can check alternatives."
+            fallback = (
+                "Je ne vois pas de disponibilités pour le moment. Envoyez-moi une journée et une plage horaire, et je peux vérifier d'autres options."
+                if language == "fr"
+                else "I am not seeing open times right now. Share a day and time window and I can check alternatives."
+            )
             return SlotOffer(
                 reply_text=fallback,
                 slots=[],
@@ -533,32 +558,50 @@ class BookingService:
 
         slots = _reindex_slots(slots)
         timezone_label = self._timezone_abbreviation(client.timezone)
-        intro = "I found a few call times that should work:"
+        intro = "J'ai trouvé quelques moments qui devraient fonctionner:" if language == "fr" else "I found a few call times that should work:"
         if not specific_request:
             coverage_summary = _availability_coverage_summary(
                 slots=all_available_slots,
                 timezone_name=client.timezone or "UTC",
                 day_limit=3,
+                language=language,
             )
             if coverage_summary:
-                intro = f"I have call openings including {coverage_summary}."
+                intro = f"J'ai des disponibilités notamment {coverage_summary}." if language == "fr" else f"I have call openings including {coverage_summary}."
         elif preferred_day:
-            intro = f"I found a few {preferred_day.strip().title()} call options:"
+            day_label = preferred_day.strip().title()
+            intro = f"J'ai trouvé quelques options pour {day_label}:" if language == "fr" else f"I found a few {day_label} call options:"
             if not matched_preference:
                 if match_mode == "same_day_alternative":
-                    intro = f"I found {preferred_day.strip().title()} call openings, but not in that exact window. Here are the closest {preferred_day.strip().title()} times:"
+                    intro = (
+                        f"J'ai trouvé des disponibilités pour {day_label}, mais pas dans cette plage exacte. Voici les moments les plus proches pour {day_label}:"
+                        if language == "fr"
+                        else f"I found {day_label} call openings, but not in that exact window. Here are the closest {day_label} times:"
+                    )
                 else:
-                    intro = f"I’m not seeing {preferred_day.strip().title()} call openings that match that request, but here are the next closest times:"
+                    intro = (
+                        f"Je ne vois pas de disponibilités pour {day_label} qui correspondent à cette demande, mais voici les prochains moments les plus proches:"
+                        if language == "fr"
+                        else f"I’m not seeing {day_label} call openings that match that request, but here are the next closest times:"
+                    )
         elif avoid_day and not matched_preference:
-            intro = f"I skipped {avoid_day.strip().title()} and found the next closest times:"
+            intro = (
+                f"J'ai évité {avoid_day.strip().title()} et trouvé les prochains moments les plus proches:"
+                if language == "fr"
+                else f"I skipped {avoid_day.strip().title()} and found the next closest times:"
+            )
         elif (preferred_period or range_start or range_end) and not matched_preference:
-            intro = f"I’m not seeing that exact window, but here are the closest times I have:"
+            intro = "Je ne vois pas cette plage exacte, mais voici les moments les plus proches disponibles:" if language == "fr" else "I’m not seeing that exact window, but here are the closest times I have:"
         elif exact_time and not matched_preference:
-            intro = f"I’m not seeing that exact time, but here are the closest options:"
+            intro = "Je ne vois pas cette heure exacte, mais voici les options les plus proches:" if language == "fr" else "I’m not seeing that exact time, but here are the closest options:"
         lines = [
             intro,
             *[f"{slot.index}) {slot.display_time}" for slot in slots],
-            f"{_slot_selection_prompt(slots)}. If none of those work, just send me a time that's better for you. Times shown in {timezone_label}.",
+            (
+                f"{_slot_selection_prompt(slots, language=language)}. Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux. Heures affichées en {timezone_label}."
+                if language == "fr"
+                else f"{_slot_selection_prompt(slots)}. If none of those work, just send me a time that's better for you. Times shown in {timezone_label}."
+            ),
         ]
         return SlotOffer(
             reply_text="\n".join(lines),
@@ -613,8 +656,13 @@ class BookingService:
             matched = self._match_slot(slot_text, slots)
 
         if matched is None:
+            language = client_language(client, lead=lead)
             return {
-                "reply_text": "I couldn’t match that to one of the current call options. I can check that time and send fresh call times.",
+                "reply_text": (
+                    "Je n'ai pas pu associer ça à une des options actuelles. Je peux vérifier ce moment et envoyer de nouvelles disponibilités."
+                    if language == "fr"
+                    else "I couldn’t match that to one of the current call options. I can check that time and send fresh call times."
+                ),
                 "slots": slots,
                 "runtime_payload": {
                     "booking_offer": latest_offer or {},
@@ -629,7 +677,11 @@ class BookingService:
             booking = self._book_calendly_slot(client=client, lead=lead, slot=matched)
 
         was_rescheduled = bool(booking.get("rescheduled_from_booking_ids") or booking.get("rescheduled_from_event_uri"))
-        reply_prefix = "Updated. Your call is now set" if was_rescheduled else "Booked. Your call is set"
+        language = client_language(client, lead=lead)
+        if language == "fr":
+            reply_prefix = "Mis à jour. Votre appel est maintenant prévu" if was_rescheduled else "Réservé. Votre appel est prévu"
+        else:
+            reply_prefix = "Updated. Your call is now set" if was_rescheduled else "Booked. Your call is set"
         return {
             "reply_text": f"{reply_prefix} for {matched.get('display_time')}.",
             "booking": booking,
@@ -661,13 +713,21 @@ class BookingService:
         slots = latest_offer.get("slots", [])
         matched = self._match_slot(inbound_text, slots)
         if matched is None:
+            language = client_language(client, lead=lead)
             timezone_label = self._timezone_abbreviation(client.timezone)
             indexed_slots = _reindex_dict_slots(slots)
-            lines = [
-                "I did not catch which slot you want.",
-                *[f"{slot.get('index')}) {slot.get('display_time')}" for slot in indexed_slots],
-                f"{_slot_selection_prompt_from_dict_slots(indexed_slots, allow_exact_time=False)} Times shown in {timezone_label}.",
-            ]
+            if language == "fr":
+                lines = [
+                    "Je n'ai pas saisi quelle option vous voulez.",
+                    *[f"{slot.get('index')}) {slot.get('display_time')}" for slot in indexed_slots],
+                    f"{_slot_selection_prompt_from_dict_slots(indexed_slots, allow_exact_time=False, language=language)} Heures affichées en {timezone_label}.",
+                ]
+            else:
+                lines = [
+                    "I did not catch which slot you want.",
+                    *[f"{slot.get('index')}) {slot.get('display_time')}" for slot in indexed_slots],
+                    f"{_slot_selection_prompt_from_dict_slots(indexed_slots, allow_exact_time=False)} Times shown in {timezone_label}.",
+                ]
             return BookingSelectionResult(
                 handled=True,
                 reply_text="\n".join(lines),
@@ -696,15 +756,27 @@ class BookingService:
         else:
             booking = self._book_calendly_slot(client=client, lead=lead, slot=matched)
         was_rescheduled = bool(booking.get("rescheduled_from_booking_ids") or booking.get("rescheduled_from_event_uri"))
-        confirmation = [
-            f"{'Updated. Your call is now set' if was_rescheduled else 'Booked. Your call is set'} for {matched.get('display_time')}.",
-        ]
-        if lead.email.strip():
-            confirmation.append(f"Confirmation will be sent to {lead.email}.")
-        if booking.get("reschedule_url"):
-            confirmation.append(f"Reschedule: {booking['reschedule_url']}")
-        if booking.get("booking_id"):
-            confirmation.append("Saved on our calendar.")
+        language = client_language(client, lead=lead)
+        if language == "fr":
+            confirmation = [
+                f"{'Mis à jour. Votre appel est maintenant prévu' if was_rescheduled else 'Réservé. Votre appel est prévu'} pour {matched.get('display_time')}.",
+            ]
+            if lead.email.strip():
+                confirmation.append(f"La confirmation sera envoyée à {lead.email}.")
+            if booking.get("reschedule_url"):
+                confirmation.append(f"Replanifier: {booking['reschedule_url']}")
+            if booking.get("booking_id"):
+                confirmation.append("Ajouté à notre calendrier.")
+        else:
+            confirmation = [
+                f"{'Updated. Your call is now set' if was_rescheduled else 'Booked. Your call is set'} for {matched.get('display_time')}.",
+            ]
+            if lead.email.strip():
+                confirmation.append(f"Confirmation will be sent to {lead.email}.")
+            if booking.get("reschedule_url"):
+                confirmation.append(f"Reschedule: {booking['reschedule_url']}")
+            if booking.get("booking_id"):
+                confirmation.append("Saved on our calendar.")
         return BookingSelectionResult(
             handled=True,
             reply_text=" ".join(confirmation),
@@ -762,7 +834,8 @@ class BookingService:
             if not start_time:
                 continue
             local_dt = _to_local_datetime(start_time, tz_name)
-            display_time = local_dt.strftime("%a %b %d at %I:%M %p").replace(" 0", " ")
+            language = client_language(client)
+            display_time = format_datetime_for_language(local_dt, timezone_name=tz_name, language=language)
             search_blob = _slot_search_blob(local_dt)
             slots.append(
                 BookingSlot(
@@ -869,7 +942,8 @@ class BookingService:
                         if _slot_occupied(start_at=start_at, end_at=end_at, existing=existing):
                             continue
 
-                        display_time = _format_internal_booking_time(start_at, timezone_name=tz_name)
+                        language = client_language(client)
+                        display_time = _format_internal_booking_time(start_at, timezone_name=tz_name, language=language)
                         local_dt = start_at.astimezone(tz)
                         slots.append(
                             BookingSlot(
@@ -1073,7 +1147,24 @@ def _to_local_datetime(iso_value: str, tz_name: str) -> datetime:
 
 
 def _normalize_slot_text(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(text or "").strip().lower()).strip()
+    value = str(text or "").strip().lower()
+    replacements = {
+        "lundi": "monday",
+        "mardi": "tuesday",
+        "mercredi": "wednesday",
+        "jeudi": "thursday",
+        "vendredi": "friday",
+        "samedi": "saturday",
+        "dimanche": "sunday",
+        "avant-midi": "morning",
+        "matin": "morning",
+        "apres-midi": "afternoon",
+        "après-midi": "afternoon",
+        "soir": "evening",
+    }
+    for source, target in replacements.items():
+        value = value.replace(source, target)
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
 
 
 def _slot_search_blob(local_dt: datetime) -> str:
@@ -1270,7 +1361,9 @@ def _availability_coverage_summary(
     slots: Sequence[BookingSlot],
     timezone_name: str,
     day_limit: int = 3,
+    language: str = "en",
 ) -> str:
+    language = normalize_language(language)
     if not slots:
         return ""
     ordered = sorted(list(slots), key=_slot_sort_key)
@@ -1285,7 +1378,7 @@ def _availability_coverage_summary(
             day_key,
             {
                 "date": local_dt.date(),
-                "day_name": local_dt.strftime("%A"),
+                "day_name": _localized_weekday(local_dt, language=language),
                 "periods": [],
             },
         )
@@ -1300,22 +1393,23 @@ def _availability_coverage_summary(
     day_summaries: list[str] = []
     for payload in sorted(day_periods.values(), key=lambda item: item["date"])[:limit]:
         periods = [str(item) for item in payload.get("periods", [])]
-        period_phrase = _period_coverage_phrase(periods)
+        period_phrase = _period_coverage_phrase(periods, language=language)
         if period_phrase:
             day_summaries.append(f"{payload['day_name']} {period_phrase}")
         else:
             day_summaries.append(str(payload["day_name"]))
-    return _join_with_and(day_summaries)
+    return _join_with_and(day_summaries, language=language)
 
 
-def _slot_selection_prompt(slots: Sequence[BookingSlot]) -> str:
-    return _slot_selection_prompt_from_indices([slot.index for slot in slots], allow_exact_time=True)
+def _slot_selection_prompt(slots: Sequence[BookingSlot], *, language: str = "en") -> str:
+    return _slot_selection_prompt_from_indices([slot.index for slot in slots], allow_exact_time=True, language=language)
 
 
 def _slot_selection_prompt_from_dict_slots(
     slots: Sequence[dict[str, Any]],
     *,
     allow_exact_time: bool,
+    language: str = "en",
 ) -> str:
     indexes: list[int] = []
     for slot in slots:
@@ -1323,10 +1417,11 @@ def _slot_selection_prompt_from_dict_slots(
             indexes.append(int(slot.get("index")))
         except Exception:
             continue
-    return _slot_selection_prompt_from_indices(indexes, allow_exact_time=allow_exact_time)
+    return _slot_selection_prompt_from_indices(indexes, allow_exact_time=allow_exact_time, language=language)
 
 
-def _slot_selection_prompt_from_indices(indices: Sequence[int], *, allow_exact_time: bool) -> str:
+def _slot_selection_prompt_from_indices(indices: Sequence[int], *, allow_exact_time: bool, language: str = "en") -> str:
+    language = normalize_language(language)
     cleaned_set: set[int] = set()
     for value in indices:
         try:
@@ -1337,18 +1432,22 @@ def _slot_selection_prompt_from_indices(indices: Sequence[int], *, allow_exact_t
             cleaned_set.add(parsed)
     cleaned = sorted(cleaned_set)
     if not cleaned:
-        return "Share a preferred day and time"
+        return "Envoyez une journée et une heure préférées" if language == "fr" else "Share a preferred day and time"
 
     labels = [str(item) for item in cleaned]
     if len(labels) == 1:
         choice_part = labels[0]
     elif len(labels) == 2:
-        choice_part = f"{labels[0]} or {labels[1]}"
+        choice_part = f"{labels[0]} ou {labels[1]}" if language == "fr" else f"{labels[0]} or {labels[1]}"
     else:
-        choice_part = f"{', '.join(labels[:-1])}, or {labels[-1]}"
+        choice_part = f"{', '.join(labels[:-1])}, ou {labels[-1]}" if language == "fr" else f"{', '.join(labels[:-1])}, or {labels[-1]}"
 
     if allow_exact_time:
+        if language == "fr":
+            return f"Répondez {choice_part} pour réserver l'appel, ou envoyez l'heure exacte souhaitée"
         return f"Reply with {choice_part} to book the call, or send the exact time you want"
+    if language == "fr":
+        return f"Répondez {choice_part} pour réserver l'appel"
     return f"Reply with {choice_part} to book the call"
 
 
@@ -1430,12 +1529,30 @@ def _time_period(local_dt: datetime) -> str:
     return "evening"
 
 
-def _period_coverage_phrase(periods: Sequence[str]) -> str:
+def _localized_weekday(local_dt: datetime, *, language: str) -> str:
+    if normalize_language(language) == "fr":
+        names = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+        return names[local_dt.weekday()]
+    return local_dt.strftime("%A")
+
+
+def _period_coverage_phrase(periods: Sequence[str], *, language: str = "en") -> str:
+    language = normalize_language(language)
     order = {"morning": 0, "afternoon": 1, "evening": 2}
     unique = [item for item in periods if item in order]
     if not unique:
         return ""
     normalized = sorted(set(unique), key=lambda item: order[item])
+    if language == "fr":
+        labels = {"morning": "le matin", "afternoon": "l'après-midi", "evening": "le soir"}
+        translated = [labels[item] for item in normalized]
+        if len(translated) == 1:
+            return translated[0]
+        if len(translated) == 3:
+            return "du matin au soir"
+        if len(translated) == 2:
+            return f"{translated[0]} et {translated[1]}"
+        return _join_with_and(translated, language=language)
     if len(normalized) == 1:
         return normalized[0]
     if len(normalized) == 3:
@@ -1449,12 +1566,15 @@ def _period_coverage_phrase(periods: Sequence[str]) -> str:
     return _join_with_and(normalized)
 
 
-def _join_with_and(items: Sequence[str]) -> str:
+def _join_with_and(items: Sequence[str], *, language: str = "en") -> str:
     cleaned = [str(item).strip() for item in items if str(item).strip()]
     if not cleaned:
         return ""
     if len(cleaned) == 1:
         return cleaned[0]
     if len(cleaned) == 2:
-        return f"{cleaned[0]} and {cleaned[1]}"
+        joiner = " et " if normalize_language(language) == "fr" else " and "
+        return f"{cleaned[0]}{joiner}{cleaned[1]}"
+    if normalize_language(language) == "fr":
+        return f"{', '.join(cleaned[:-1])}, et {cleaned[-1]}"
     return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"

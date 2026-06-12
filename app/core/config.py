@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     rate_limit_window_minutes: int = 1
     after_hours_followup_minutes: int = 720
     request_timeout_seconds: int = 20
+    message_media_storage_dir: str = "storage/message_media"
+    message_media_max_bytes: int = 25 * 1024 * 1024
 
 
 @lru_cache

@@ -32,12 +32,17 @@ from app.services.crm import (
     TASK_STATUS_OPEN,
 )
 from app.services.portal_auth import hash_portal_password
+from app.services.preciscan_demo_seed import (
+    CLIENT_KEY as PRECISCAN_CLIENT_KEY,
+    seed_preciscan_demo_data,
+)
 
 DEMO_CLIENT_KEYS = {
     "demo-roofing",
     "demo-medspa",
     "demo-legal",
 }
+ALL_DEMO_CLIENT_KEYS = DEMO_CLIENT_KEYS | {PRECISCAN_CLIENT_KEY}
 DEMO_PORTAL_PASSWORD = "demo-portal-2026"
 SHOWCASE_EXTERNAL_PREFIX = "showcase"
 
@@ -197,6 +202,7 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, Any]:
         reset_result = {"clients_deleted": 0}
         if demo_data_present(db):
             portal_backfill = _backfill_demo_client_portals(db)
+            preciscan_result = seed_preciscan_demo_data(db, reset=False)
             return {
                 **reset_result,
                 **portal_backfill,
@@ -207,9 +213,14 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, Any]:
                 "audit_logs_created": 0,
                 "crm_tags_created": 0,
                 "crm_tasks_created": 0,
-                "client_keys": sorted(DEMO_CLIENT_KEYS),
-                "seeded": False,
-                "reason": "demo_data_already_present",
+                "client_keys": sorted(ALL_DEMO_CLIENT_KEYS),
+                "preciscan": preciscan_result,
+                "seeded": bool(preciscan_result.get("seeded")),
+                "reason": (
+                    "demo_data_already_present"
+                    if not preciscan_result.get("seeded")
+                    else "core_demo_data_already_present_preciscan_seeded"
+                ),
             }
 
     counters = {
@@ -257,10 +268,13 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, Any]:
             counters=counters,
         )
 
+    preciscan_result = seed_preciscan_demo_data(db, reset=reset)
+
     return {
         **reset_result,
         **counters,
-        "client_keys": [spec.client_key for spec in DEMO_CLIENT_SPECS],
+        "client_keys": [spec.client_key for spec in DEMO_CLIENT_SPECS] + [PRECISCAN_CLIENT_KEY],
+        "preciscan": preciscan_result,
         "seeded": True,
     }
 

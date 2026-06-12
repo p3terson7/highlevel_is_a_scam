@@ -1,7 +1,40 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import FileResponse
+
 from .shared import *
+from app.services.message_media import (
+    MessageMediaError,
+    attachment_file_path,
+    attachment_public_url,
+    create_message_attachment,
+    provider_public_base_url,
+    store_message_media,
+)
 
 router = APIRouter()
+
+
+@router.get("/media/public/{public_token}")
+def public_message_media(
+    public_token: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> FileResponse:
+    attachment = db.scalar(select(MessageAttachment).where(MessageAttachment.public_token == public_token))
+    if attachment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found")
+    try:
+        path = attachment_file_path(settings, attachment)
+    except MessageMediaError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media file not found")
+    return FileResponse(
+        path,
+        media_type=attachment.content_type or "application/octet-stream",
+        filename=attachment.filename or None,
+    )
+
 
 @router.get("/ui/api/conversations")
 def ui_conversations(
@@ -56,6 +89,7 @@ def ui_conversation_thread(
         .where(Message.lead_id == lead.id)
         .order_by(Message.created_at.asc(), Message.id.asc())
     ).all()
+    attachments_by_message = _attachments_by_message(db, [message.id for message in messages])
     state_history = db.scalars(
         select(ConversationState)
         .where(ConversationState.lead_id == lead.id)
@@ -87,6 +121,7 @@ def ui_conversation_thread(
                 "direction": message.direction.value,
                 "body": message.body,
                 "provider_message_sid": message.provider_message_sid,
+                "attachments": attachments_by_message.get(message.id, []),
             }
         )
     for state_row in state_history:
@@ -221,6 +256,7 @@ def ui_conversation_thread(
                 "direction": message.direction.value,
                 "body": message.body,
                 "provider_message_sid": message.provider_message_sid,
+                "attachments": attachments_by_message.get(message.id, []),
                 "created_at": message.created_at.isoformat(),
             }
             for message in messages
@@ -399,6 +435,134 @@ def ui_send_manual_message(
     }
 
 
+@router.post("/ui/api/conversations/{lead_id}/messages/manual-media")
+async def ui_send_manual_media_message(
+    lead_id: int,
+    request: Request,
+    body: str = Form(default=""),
+    media: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    sms_service: SMSService = Depends(get_sms_service),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    lead = _load_lead_for_actor(db, actor, lead_id)
+    if lead.opted_out:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lead has opted out")
+    if not lead.phone:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lead has no phone number")
+
+    delivery_mode = _manual_delivery_mode(settings, db, client=lead.client)
+    if delivery_mode == "twilio" and not provider_public_base_url(settings, lead.client.provider_config if lead.client else {}):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Public base URL is required before Twilio can send uploaded media.",
+        )
+
+    content = await media.read()
+    now = datetime.now(timezone.utc)
+    message = Message(
+        lead_id=lead.id,
+        client_id=lead.client_id,
+        direction=MessageDirection.OUTBOUND,
+        body=body.strip(),
+        provider_message_sid="",
+        raw_payload={"source": "owner_workspace", "action": "manual_media_message", "actor_role": actor.role},
+        created_at=now,
+    )
+    db.add(message)
+    db.flush()
+    try:
+        stored = store_message_media(
+            settings=settings,
+            client_id=lead.client_id,
+            message_id=message.id,
+            filename=media.filename or "",
+            content_type=media.content_type or "",
+            content=content,
+            raw_payload={"source": "owner_upload", "actor_role": actor.role},
+        )
+    except MessageMediaError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    attachment = create_message_attachment(message=message, lead=lead, stored=stored)
+    db.add(attachment)
+    db.flush()
+    provider_media_url = attachment_public_url(settings, attachment, lead.client.provider_config if lead.client else {})
+    media_urls = [provider_media_url] if provider_media_url else []
+    resolved_sms_service = _sms_service_for_client(
+        sms_service=sms_service,
+        settings=settings,
+        db=db,
+        client=lead.client,
+    )
+    provider_sid = _send_mms_or_http_error(
+        sms_service=resolved_sms_service,
+        to_number=lead.phone,
+        body=message.body,
+        media_urls=media_urls,
+    )
+    attachment.provider_media_url = provider_media_url
+    message.provider_message_sid = provider_sid
+    serialized_attachment = _serialize_attachment(attachment)
+    message.raw_payload = {
+        **(message.raw_payload or {}),
+        "provider_media_urls": media_urls,
+        "attachments": [serialized_attachment],
+    }
+    lead.last_outbound_at = now
+    lead.updated_at = now
+    if lead.initial_sms_sent_at is None:
+        lead.initial_sms_sent_at = now
+    _set_crm_stage(
+        db=db,
+        lead=lead,
+        new_stage=CRM_STAGE_CONTACTED,
+        actor_role="system",
+        reason="manual_media_outbound_sent" if actor.role == "admin" else "portal_manual_media_outbound_sent",
+        allow_backward=False,
+        event_type="crm_stage_auto_updated",
+        now=now,
+    )
+    if lead.conversation_state == ConversationStateEnum.NEW:
+        _create_state_transition(
+            db,
+            lead=lead,
+            new_state=ConversationStateEnum.GREETED,
+            reason="owner_manual_media_outbound",
+            created_at=now,
+            metadata_json={"source": "owner_workspace"},
+        )
+    event_type = "manual_media_outbound_sent" if actor.role == "admin" else "portal_manual_media_outbound_sent"
+    db.add(
+        AuditLog(
+            client_id=lead.client_id,
+            lead_id=lead.id,
+            event_type=event_type,
+            decision={
+                "body": message.body,
+                "provider_sid": provider_sid,
+                "actor_role": actor.role,
+                "attachments": [serialized_attachment],
+                "delivery_mode": delivery_mode,
+                "request_url": str(request.url),
+            },
+            created_at=now,
+        )
+    )
+    db.commit()
+    return {
+        "status": "ok",
+        "lead_id": lead.id,
+        "provider_sid": provider_sid,
+        "state": lead.conversation_state.value,
+        "delivery_mode": delivery_mode,
+        "attachments": [serialized_attachment],
+    }
+
+
 @router.post("/ui/api/conversations/{lead_id}/actions/handoff")
 def ui_mark_handoff(
     lead_id: int,
@@ -503,4 +667,3 @@ def ui_delete_conversation(
     db.delete(lead)
     db.commit()
     return {"status": "ok", "deleted_lead_id": lead_id}
-

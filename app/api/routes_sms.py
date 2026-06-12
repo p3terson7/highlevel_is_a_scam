@@ -21,6 +21,7 @@ from app.db.models import (
     Lead,
     LeadSource,
     Message,
+    MessageAttachment,
     MessageDirection,
 )
 from app.db.session import get_db
@@ -37,6 +38,13 @@ from app.services.crm import (
 from app.services.lead_intake import normalize_phone
 from app.services.inbound_sms import process_inbound_turn
 from app.services.llm_agent import LLMAgent
+from app.services.message_media import (
+    MessageMediaError,
+    create_message_attachment,
+    download_twilio_media,
+    filename_from_url,
+    store_message_media,
+)
 from app.services.runtime_config import (
     client_runtime_overrides,
     get_effective_runtime_map_for_client,
@@ -152,6 +160,83 @@ def _inbound_sid_already_seen(*, db: Session, client_id: int, inbound_sid: str) 
     return existing_id is not None
 
 
+def _twilio_media_items(payload: dict[str, str]) -> list[dict[str, str]]:
+    try:
+        count = min(max(int(payload.get("NumMedia") or 0), 0), 10)
+    except ValueError:
+        count = 0
+    items: list[dict[str, str]] = []
+    for index in range(count):
+        media_url = str(payload.get(f"MediaUrl{index}") or "").strip()
+        content_type = str(payload.get(f"MediaContentType{index}") or "").strip()
+        if media_url:
+            items.append({"index": str(index), "url": media_url, "content_type": content_type})
+    return items
+
+
+async def _store_inbound_media_attachments(
+    *,
+    db: Session,
+    settings: Settings,
+    client: Client,
+    lead: Lead,
+    message: Message,
+    media_items: list[dict[str, str]],
+    effective_runtime: dict[str, str],
+) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    for item in media_items:
+        index = int(item.get("index") or 0)
+        media_url = str(item.get("url") or "")
+        content_type = str(item.get("content_type") or "")
+        try:
+            content = await download_twilio_media(
+                media_url=media_url,
+                content_type=content_type,
+                account_sid=effective_runtime.get("twilio_account_sid", ""),
+                auth_token=effective_runtime.get("twilio_auth_token", ""),
+                timeout_seconds=settings.request_timeout_seconds,
+            )
+            stored = store_message_media(
+                settings=settings,
+                client_id=client.id,
+                message_id=message.id,
+                filename=filename_from_url(media_url, content_type, index=index),
+                content_type=content_type,
+                content=content,
+                provider_media_url=media_url,
+                raw_payload={"source": "twilio_mms", "media_index": index, "provider_media_url": media_url},
+            )
+            attachment = create_message_attachment(message=message, lead=lead, stored=stored)
+            db.add(attachment)
+            db.flush()
+            attachments.append(
+                {
+                    "id": attachment.id,
+                    "filename": attachment.filename,
+                    "content_type": attachment.content_type,
+                    "media_kind": attachment.media_kind,
+                    "size_bytes": attachment.size_bytes,
+                    "url": f"/media/public/{attachment.public_token}",
+                }
+            )
+        except (MessageMediaError, Exception) as exc:
+            db.add(
+                AuditLog(
+                    client_id=client.id,
+                    lead_id=lead.id,
+                    event_type="inbound_media_download_failed",
+                    decision={
+                        "media_index": index,
+                        "media_url": media_url,
+                        "content_type": content_type,
+                        "error": str(exc),
+                    },
+                )
+            )
+    return attachments
+
+
 @router.post("/inbound/{client_key}")
 async def inbound_sms(
     client_key: str,
@@ -183,6 +268,7 @@ async def inbound_sms(
     from_phone = normalize_phone(payload.get("From"))
     body = str(payload.get("Body", "")).strip()
     inbound_sid = str(payload.get("MessageSid", "")).strip()
+    media_items = _twilio_media_items(payload)
 
     if not from_phone:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing sender phone")
@@ -206,6 +292,21 @@ async def inbound_sms(
     except IntegrityError:
         db.rollback()
         return _empty_twiml_response()
+    media_attachments = await _store_inbound_media_attachments(
+        db=db,
+        settings=settings,
+        client=client,
+        lead=lead,
+        message=inbound_message,
+        media_items=media_items,
+        effective_runtime=effective_runtime,
+    )
+    if media_attachments:
+        inbound_message.raw_payload = {
+            **(inbound_message.raw_payload or {}),
+            "attachments": media_attachments,
+            "num_media_saved": len(media_attachments),
+        }
     lead.last_inbound_at = now
     incr("sms_inbound_total")
 
@@ -265,6 +366,18 @@ async def inbound_sms(
                 lead_id=lead.id,
                 event_type="opted_out_message_ignored",
                 decision={"inbound": body},
+            )
+        )
+        db.commit()
+        return _empty_twiml_response()
+
+    if media_attachments and not body:
+        db.add(
+            AuditLog(
+                client_id=client.id,
+                lead_id=lead.id,
+                event_type="inbound_media_received",
+                decision={"attachments": media_attachments, "auto_reply": "skipped_media_only"},
             )
         )
         db.commit()

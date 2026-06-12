@@ -16,6 +16,9 @@
         calendar: { items: [], total: 0, timezone: "UTC", booking_mode: "link" },
         calendarMonth: localStorage.getItem("lead-ui-calendar-month") || "",
         calendarSelectedDate: localStorage.getItem("lead-ui-calendar-day") || "",
+        crmAddLeadOpen: false,
+        calendarMeetingPanelOpen: false,
+        calendarLeadPanelOpen: false,
         thread: null,
         selectedClientKey: localStorage.getItem("lead-ui-selected-client") || "",
         activeLeadId: Number(localStorage.getItem("lead-ui-active-lead") || 0) || null,
@@ -26,7 +29,9 @@
         conversationMobilePanel: localStorage.getItem("lead-ui-conv-mobile-panel") || "list",
         conversationFiltersExpanded: localStorage.getItem("lead-ui-conv-filters-open") === "true",
         threadTimelineLeadId: null,
+        threadTimelineSignature: "",
         clientTab: localStorage.getItem("lead-ui-client-tab") || "overview",
+        clientWizardStep: localStorage.getItem("lead-ui-client-wizard-step") || "business",
         sidebarCollapsed: localStorage.getItem("lead-ui-sidebar-collapsed") === "true",
         theme: localStorage.getItem("lead-ui-theme") || "dark",
         density: localStorage.getItem("lead-ui-density") || "compact",
@@ -100,6 +105,7 @@
         localStorage.setItem("lead-ui-conv-mobile-panel", state.conversationMobilePanel || "list");
         localStorage.setItem("lead-ui-conv-filters-open", String(Boolean(state.conversationFiltersExpanded)));
         localStorage.setItem("lead-ui-client-tab", state.clientTab);
+        localStorage.setItem("lead-ui-client-wizard-step", state.clientWizardStep || "business");
         localStorage.setItem("lead-ui-sidebar-collapsed", String(state.sidebarCollapsed));
         localStorage.setItem("lead-ui-theme", state.theme);
         localStorage.setItem("lead-ui-density", state.density);
@@ -165,14 +171,14 @@
 
       function setText(id, value) {
         const el = document.getElementById(id);
-        if (el) el.textContent = value;
+        if (el) el.textContent = typeof translateTextValue === "function" ? translateTextValue(value) : value;
       }
 
       function formatDateTime(value) {
         if (!value) return "-";
         const date = new Date(value);
         if (Number.isNaN(date.getTime())) return String(value);
-        return new Intl.DateTimeFormat(undefined, {
+        return new Intl.DateTimeFormat(typeof uiLocale === "function" ? uiLocale() : undefined, {
           month: "short",
           day: "numeric",
           hour: "numeric",
@@ -259,7 +265,7 @@
         const parts = parseMonthKey(monthKey);
         if (!parts) return "Month";
         const anchor = new Date(Date.UTC(parts.year, parts.month - 1, 15, 12));
-        return new Intl.DateTimeFormat(undefined, {
+        return new Intl.DateTimeFormat(typeof uiLocale === "function" ? uiLocale() : undefined, {
           timeZone: timeZone || undefined,
           month: "long",
           year: "numeric",
@@ -269,7 +275,7 @@
       function formatDateLabel(dateKey, timeZone, options = {}) {
         const anchor = calendarDateFromKey(dateKey);
         if (!anchor) return dateKey || "-";
-        return new Intl.DateTimeFormat(undefined, {
+        return new Intl.DateTimeFormat(typeof uiLocale === "function" ? uiLocale() : undefined, {
           timeZone: timeZone || undefined,
           month: options.month || "short",
           day: options.day || "numeric",
@@ -281,7 +287,7 @@
         if (!value) return "-";
         const date = new Date(value);
         if (Number.isNaN(date.getTime())) return String(value);
-        return new Intl.DateTimeFormat(undefined, {
+        return new Intl.DateTimeFormat(typeof uiLocale === "function" ? uiLocale() : undefined, {
           timeZone: timeZone || undefined,
           hour: "numeric",
           minute: "2-digit",
@@ -302,6 +308,9 @@
         if (totalMinutes == null) return "-";
         const hour24 = Math.floor(totalMinutes / 60);
         const minute = totalMinutes % 60;
+        if (typeof getUiLanguage === "function" && getUiLanguage() === "fr") {
+          return `${hour24} h ${String(minute).padStart(2, "0")}`;
+        }
         const suffix = hour24 >= 12 ? "PM" : "AM";
         const hour12 = hour24 % 12 || 12;
         return `${hour12}:${String(minute).padStart(2, "0")} ${suffix}`;
@@ -415,7 +424,7 @@
         if (!value) return "-";
         const date = new Date(value);
         if (Number.isNaN(date.getTime())) return String(value);
-        return new Intl.DateTimeFormat(undefined, {
+        return new Intl.DateTimeFormat(typeof uiLocale === "function" ? uiLocale() : undefined, {
           month: "short",
           day: "numeric",
           year: "numeric",
@@ -440,6 +449,23 @@
         return raw;
       }
 
+      function formatCompactCurrency(value) {
+        const number = Number(value || 0);
+        if (!Number.isFinite(number) || number <= 0) return "";
+        return new Intl.NumberFormat(typeof uiLocale === "function" ? uiLocale() : "en-US", {
+          style: "currency",
+          currency: "CAD",
+          notation: Math.abs(number) >= 10000 ? "compact" : "standard",
+          maximumFractionDigits: Math.abs(number) >= 10000 ? 1 : 0,
+        }).format(number);
+      }
+
+      function formatScoreLabel(value) {
+        const score = Number(value || 0);
+        if (!Number.isFinite(score) || score <= 0) return "";
+        return `${Math.round(score)}/100`;
+      }
+
       function stateTone(value) {
         if (["BOOKED", "BOOKING_SENT"].includes(value)) return "ok";
         if (["HANDOFF", "OPTED_OUT"].includes(value)) return "warn";
@@ -454,6 +480,11 @@
         if (stage === "Lost") return "warn";
         if (["Contacted", "Qualified", "Meeting Completed"].includes(stage)) return "info";
         return "";
+      }
+
+      function formatCrmStageDisplay(value) {
+        const stage = String(value || "").trim();
+        return stage === "New Lead" ? "New" : stage;
       }
 
       function isConversationStateRedundant(crmStage, conversationState) {
@@ -523,17 +554,97 @@
       }
 
       function lastMessageLabel(direction) {
-        return String(direction || "").toUpperCase() === "INBOUND" ? "Lead" : "Latest";
+        return String(direction || "").toUpperCase() === "INBOUND" ? "Contact" : "Latest";
       }
 
       function renderLabeledSnippet(item, fallback = "No messages yet.", maxLen = 170) {
-        const label = lastMessageLabel(item?.last_message_direction || "");
+        const label = typeof t === "function" ? t(lastMessageLabel(item?.last_message_direction || "")) : lastMessageLabel(item?.last_message_direction || "");
         const snippet = summarizeText(item?.last_message_snippet || fallback, maxLen) || fallback;
         return `<span class="snippet-label">${escapeHtml(label)}:</span>${escapeHtml(snippet)}`;
       }
 
+      function formatBytes(value) {
+        const bytes = Number(value || 0);
+        if (!Number.isFinite(bytes) || bytes <= 0) return "";
+        if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+      }
+
+      function renderMessageAttachments(attachments = []) {
+        const items = Array.isArray(attachments) ? attachments : [];
+        if (!items.length) return "";
+        return `
+          <div class="message-attachments">
+            ${items.map((attachment) => {
+              const kind = String(attachment.media_kind || "").toLowerCase();
+              const url = String(attachment.url || "");
+              const filename = String(attachment.filename || "media");
+              const size = formatBytes(attachment.size_bytes);
+              const caption = [filename, size].filter(Boolean).join(" · ");
+              if (kind === "image") {
+                return `
+                  <figure class="message-attachment image">
+                    <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">
+                      <img src="${escapeHtml(url)}" alt="${escapeHtml(filename)}" loading="lazy" />
+                    </a>
+                    <figcaption>${escapeHtml(caption)}</figcaption>
+                  </figure>
+                `;
+              }
+              if (kind === "video") {
+                return `
+                  <figure class="message-attachment video">
+                    <video src="${escapeHtml(url)}" controls preload="metadata"></video>
+                    <figcaption>${escapeHtml(caption)}</figcaption>
+                  </figure>
+                `;
+              }
+              return `
+                <a class="message-attachment file" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">
+                  ${escapeHtml(caption || "Attachment")}
+                </a>
+              `;
+            }).join("")}
+          </div>
+        `;
+      }
+
+      function threadTimelineSignature(items = []) {
+        const timelineItems = Array.isArray(items) ? items : [];
+        return JSON.stringify(timelineItems.map((item) => {
+          if (item?.type === "message") {
+            return {
+              type: item.type,
+              direction: item.direction,
+              body: item.body || "",
+              provider_message_sid: item.provider_message_sid || "",
+              created_at: item.created_at || "",
+              attachments: (item.attachments || []).map((attachment) => ({
+                id: attachment.id,
+                url: attachment.url || "",
+                media_kind: attachment.media_kind || "",
+                size_bytes: attachment.size_bytes || 0,
+              })),
+            };
+          }
+          return {
+            type: item?.type || "",
+            body: item?.body || "",
+            title: item?.title || "",
+            previous_state: item?.previous_state || "",
+            new_state: item?.new_state || "",
+            previous_stage: item?.previous_stage || "",
+            new_stage: item?.new_stage || "",
+            reason: item?.reason || "",
+            created_at: item?.created_at || "",
+          };
+        }));
+      }
+
       function renderBadge(label, tone = "") {
-        return `<span class="badge ${tone}">${escapeHtml(label)}</span>`;
+        const rawLabel = formatCrmStageDisplay(label);
+        const text = typeof translateTextValue === "function" ? translateTextValue(rawLabel) : rawLabel;
+        return `<span class="badge ${tone}">${escapeHtml(text)}</span>`;
       }
 
       function renderTag(label, tone = "") {
@@ -542,7 +653,38 @@
       }
 
       function renderStatePill(label, tone = "") {
-        return `<span class="state-pill ${tone}">${escapeHtml(formatConversationStateLabel(label))}</span>`;
+        const text = formatConversationStateLabel(label);
+        return `<span class="state-pill ${tone}">${escapeHtml(typeof translateTextValue === "function" ? translateTextValue(text) : text)}</span>`;
+      }
+
+      function renderDataAttributes(attrs = {}) {
+        return Object.entries(attrs)
+          .filter(([, value]) => value !== undefined && value !== null && value !== false)
+          .map(([key, value]) => `${escapeHtml(key)}="${escapeHtml(value)}"`)
+          .join(" ");
+      }
+
+      function renderEmptyState(message, actions = [], options = {}) {
+        const title = typeof translateTextValue === "function" ? translateTextValue(message) : message;
+        const detail = options.detail
+          ? (typeof translateTextValue === "function" ? translateTextValue(options.detail) : options.detail)
+          : "";
+        const actionMarkup = actions.length
+          ? `<div class="empty-state-actions">${actions.map((action) => `
+              <button
+                type="button"
+                class="small ${action.className || "ghost"}"
+                ${renderDataAttributes(action.attrs || {})}
+              >${escapeHtml(typeof translateTextValue === "function" ? translateTextValue(action.label) : action.label)}</button>
+            `).join("")}</div>`
+          : "";
+        return `
+          <div class="empty-state empty-state-rich ${options.compact ? "compact" : ""}">
+            <div class="empty-state-title">${escapeHtml(title)}</div>
+            ${detail ? `<div class="empty-state-detail">${escapeHtml(detail)}</div>` : ""}
+            ${actionMarkup}
+          </div>
+        `;
       }
 
       function formatConversationTransitionReason(rawReason) {
@@ -550,7 +692,7 @@
         const labels = {
           "agent_transition": "Updated automatically from the latest conversation step.",
           "calendar_booking_created": "Updated automatically after the meeting was booked.",
-          "stop keyword": "Lead requested to stop messages.",
+          "stop keyword": "Contact requested to stop messages.",
           "admin_booking_link_sent": "Updated after a booking link was sent manually.",
           "admin_marked_handoff": "Marked for human follow-up by admin.",
           "portal_marked_handoff": "Marked for human follow-up by client owner.",
@@ -565,7 +707,7 @@
       function formatCrmTransitionReason(rawReason) {
         const key = String(rawReason || "").trim().toLowerCase();
         const labels = {
-          "meaningful_inbound": "Lead sent a meaningful response.",
+          "meaningful_inbound": "Contact sent a meaningful response.",
           "outbound_sms_sent": "Pipeline advanced after outbound response.",
           "booking_confirmed": "Pipeline advanced after booking confirmation.",
           "initial_outbound_sms": "Pipeline advanced after first outreach.",
@@ -598,15 +740,68 @@
           return;
         }
         el.className = `notice show ${tone}`;
-        el.textContent = message;
+        const visibleMessage = typeof translateTextValue === "function" ? translateTextValue(message) : message;
+        el.textContent = visibleMessage;
         const delay = tone === "err" ? 6500 : tone === "warn" ? 5000 : 3200;
         state.noticeTimer = window.setTimeout(() => {
-          if (el.textContent === message) {
+          if (el.textContent === visibleMessage) {
             el.className = "notice";
             el.textContent = "";
           }
           state.noticeTimer = null;
         }, delay);
+      }
+
+      function closeConfirmPopover(result = false) {
+        const existing = document.querySelector(".confirm-popover");
+        if (existing) existing.remove();
+        if (typeof state.pendingConfirmResolve === "function") {
+          const resolve = state.pendingConfirmResolve;
+          state.pendingConfirmResolve = null;
+          resolve(Boolean(result));
+        }
+      }
+
+      function confirmAction({ title = "Please confirm", message = "", confirmText = "Confirm", cancelText = "Cancel", tone = "warn" } = {}) {
+        closeConfirmPopover(false);
+        return new Promise((resolve) => {
+          state.pendingConfirmResolve = resolve;
+          const popover = document.createElement("div");
+          popover.className = `confirm-popover ${tone}`;
+          popover.setAttribute("role", "alertdialog");
+          popover.setAttribute("aria-modal", "false");
+          popover.setAttribute("aria-labelledby", "confirmPopoverTitle");
+          popover.innerHTML = `
+            <div class="confirm-popover-copy">
+              <div id="confirmPopoverTitle" class="confirm-popover-title">${escapeHtml(typeof translateTextValue === "function" ? translateTextValue(title) : title)}</div>
+              <div class="confirm-popover-message">${escapeHtml(typeof translateTextValue === "function" ? translateTextValue(message) : message)}</div>
+            </div>
+            <div class="confirm-popover-actions">
+              <button type="button" class="small ghost" data-confirm-cancel>${escapeHtml(typeof translateTextValue === "function" ? translateTextValue(cancelText) : cancelText)}</button>
+              <button type="button" class="small ${tone === "err" ? "warn" : "primary"}" data-confirm-ok>${escapeHtml(typeof translateTextValue === "function" ? translateTextValue(confirmText) : confirmText)}</button>
+            </div>
+          `;
+          document.body.appendChild(popover);
+          const cancelButton = popover.querySelector("[data-confirm-cancel]");
+          const confirmButton = popover.querySelector("[data-confirm-ok]");
+          const keyHandler = (event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              document.removeEventListener("keydown", keyHandler);
+              closeConfirmPopover(false);
+            }
+          };
+          document.addEventListener("keydown", keyHandler);
+          cancelButton.addEventListener("click", () => {
+            document.removeEventListener("keydown", keyHandler);
+            closeConfirmPopover(false);
+          });
+          confirmButton.addEventListener("click", () => {
+            document.removeEventListener("keydown", keyHandler);
+            closeConfirmPopover(true);
+          });
+          window.requestAnimationFrame(() => cancelButton.focus());
+        });
       }
 
       function selectedClient() {
@@ -620,22 +815,41 @@
           "loginTitleSubtitle",
           isAdmin
             ? "Clean operations workspace for admin oversight and client lead handling."
-            : "Review leads, manage follow-ups, and update your assistant settings."
+            : "Review contacts, manage follow-ups, and update your assistant settings."
         );
+      }
+
+      function activeViewLabel() {
+        const labels = {
+          dashboard: "Dashboard",
+          today: "Today",
+          clients: "Clients",
+          conversations: "Inbox",
+          crm: "Pipeline",
+          leads: "Records",
+          calendar: "Calendar",
+          tasks: "Tasks",
+          logs: "Logs",
+          settings: "Settings",
+          "test-lab": "Test Lab",
+        };
+        const label = labels[state.activeView] || "Workspace";
+        return typeof translateTextValue === "function" ? translateTextValue(label) : label;
       }
 
       function updateChromeContext() {
         const client = selectedClient();
         const clientName = state.ownerWorkspace?.client?.business_name || state.session?.client_name || client?.business_name || "Client Portal";
         const timezone = state.ownerWorkspace?.client?.timezone || client?.timezone || "";
+        const viewLabel = activeViewLabel();
         if (isClientRole()) {
           setText("chromeTitle", clientName);
-          setText("chromeSubtitle", timezone ? `Client portal · ${timezone}` : "Client portal");
+          setText("chromeSubtitle", timezone ? `${viewLabel} · ${timezone}` : viewLabel);
           document.title = `${clientName} Client Portal`;
           return;
         }
         setText("chromeTitle", "lead-ops-console");
-        setText("chromeSubtitle", client ? `${client.business_name} · admin workspace` : "Admin workspace");
+        setText("chromeSubtitle", client ? `${viewLabel} · ${client.business_name}` : `${viewLabel} · admin workspace`);
         document.title = "Lead Ops Console";
       }
 
@@ -787,11 +1001,28 @@
       }
 
       function formatFormKey(rawKey) {
-        return String(rawKey || "")
+        const cleaned = String(rawKey || "")
           .replaceAll("_", " ")
-          .replaceAll("?", "")
+          .replace(/[?¿]/g, "")
           .trim()
           .replace(/\s+/g, " ");
+        const canonicalFrench = {
+          "quel service vous interesse": "Quel service vous intéresse",
+          "quel service vous int resse": "Quel service vous intéresse",
+          "quelle est votre situation actuelle": "Quelle est votre situation actuelle",
+          "quel livrable souhaitez vous obtenir": "Quel livrable souhaitez-vous obtenir",
+          "quel livrable souhaitez-vous obtenir": "Quel livrable souhaitez-vous obtenir",
+          "quelle est l urgence du projet": "Quelle est l’urgence du projet",
+          "quelle est lurgence du projet": "Quelle est l’urgence du projet",
+        };
+        const normalized = cleaned
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[’']/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+        return canonicalFrench[normalized] || cleaned;
       }
 
       function formatFormValue(value) {
@@ -799,6 +1030,13 @@
         if (Array.isArray(value)) return value.map((item) => String(item)).join(", ");
         if (typeof value === "object") return JSON.stringify(value);
         return String(value);
+      }
+
+      function formatSummaryLabel(value) {
+        const text = String(value || "-").trim();
+        if (!text) return "-";
+        const locale = typeof uiLocale === "function" ? uiLocale() : "fr-CA";
+        return text.toLocaleUpperCase(locale);
       }
 
       function summarizeText(value, maxLen = 180) {
@@ -832,20 +1070,40 @@
           .filter((line) => !isDuplicateLeadNameSummaryLine(line, leadName));
       }
 
+      function normalizedSummaryLabelKey(value) {
+        return formatFormKey(value)
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[’'`_-]/g, " ")
+          .replace(/[^a-z0-9\s]/gi, "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+      }
+
+      function uniqueSummaryRows(rows = []) {
+        const seen = new Set();
+        return rows.filter((row) => {
+          const key = normalizedSummaryLabelKey(row?.label || "");
+          if (!key || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      }
+
       function mergeSummaryRows(summaryLines = [], formAnswers = {}, leadName = "") {
-        const normalizedLabel = (value) => String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
-        const normalizedSummaryRows = (summaryLines || [])
+        const normalizedSummaryRows = uniqueSummaryRows((summaryLines || [])
           .filter((line) => !isDuplicateLeadNameSummaryLine(line, leadName))
-          .filter((line) => String(line?.value || "").trim() !== "");
-        const normalizedFormRows = summaryRowsFromFormAnswers(formAnswers, leadName);
+          .filter((line) => String(line?.value || "").trim() !== ""));
+        const normalizedFormRows = uniqueSummaryRows(summaryRowsFromFormAnswers(formAnswers, leadName));
 
         if (!normalizedFormRows.length) {
           return normalizedSummaryRows;
         }
 
-        const seenLabels = new Set(normalizedFormRows.map((row) => normalizedLabel(row.label)));
+        const seenLabels = new Set(normalizedFormRows.map((row) => normalizedSummaryLabelKey(row.label)));
         const supplementalSummaryRows = normalizedSummaryRows.filter((row) => {
-          const key = normalizedLabel(row.label);
+          const key = normalizedSummaryLabelKey(row.label);
           if (!key || seenLabels.has(key)) return false;
           seenLabels.add(key);
           return true;
@@ -862,8 +1120,8 @@
 
       function renderSummaryFacts(lines) {
         return (lines || []).map((line) => `
-          <div class="summary-line">
-            <div class="summary-line-label">${escapeHtml(line.label || "-")}</div>
+          <div class="summary-line" data-i18n-skip="true">
+            <div class="summary-line-label">${escapeHtml(formatSummaryLabel(line.label || "-"))}</div>
             <div class="summary-line-value">${escapeHtml(line.value || "-")}</div>
           </div>
         `).join("");
@@ -961,16 +1219,16 @@
         if (eventType === "crm_stage_changed" || eventType === "crm_stage_auto_updated") {
           const from = decision.previous_stage || "-";
           const to = decision.new_stage || "-";
-          lines.push(`Stage: ${from} -> ${to}`);
-          if (decision.reason) lines.push(`Reason: ${formatFormKey(decision.reason)}`);
-          if (decision.inbound) lines.push(`Lead message: "${summarizeText(decision.inbound, 120)}"`);
+          lines.push(`${t("Stage")}: ${formatCrmStageDisplay(from)} -> ${formatCrmStageDisplay(to)}`);
+          if (decision.reason) lines.push(`${t("Reason")}: ${formatFormKey(decision.reason)}`);
+          if (decision.inbound) lines.push(`${t("Contact message")}: "${summarizeText(decision.inbound, 120)}"`);
           return lines;
         }
         if (eventType === "agent_decision") {
-          if (decision.inbound) lines.push(`Lead message: "${summarizeText(decision.inbound, 120)}"`);
-          if (decision.outbound) lines.push(`AI reply: "${summarizeText(decision.outbound, 140)}"`);
-          if (decision.next_state) lines.push(`Conversation state: ${formatConversationStateLabel(decision.next_state)}`);
-          if (decision.provider) lines.push(`Provider: ${String(decision.provider).toUpperCase()}`);
+          if (decision.inbound) lines.push(`${t("Contact message")}: "${summarizeText(decision.inbound, 120)}"`);
+          if (decision.outbound) lines.push(`${t("AI reply")}: "${summarizeText(decision.outbound, 140)}"`);
+          if (decision.next_state) lines.push(`${t("Conversation state")}: ${t(formatConversationStateLabel(decision.next_state))}`);
+          if (decision.provider) lines.push(`${t("Provider")}: ${String(decision.provider).toUpperCase()}`);
           return lines;
         }
         if (eventType === "internal_note") {

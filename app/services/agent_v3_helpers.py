@@ -68,9 +68,23 @@ def _identity_reply(context: dict[str, Any]) -> str:
     identity = context.get("agent_identity") if isinstance(context.get("agent_identity"), dict) else {}
     assistant_name = str(identity.get("name") or _ASSISTANT_NAME).strip()
     business_name = str(identity.get("business_name") or context.get("business_name") or "the business").strip()
+    language = str(context.get("response_language") or "en")
     inbound = str(context.get("latest_inbound_message") or "")
     asks_if_assistant_owns = bool(re.search(r"\b(are you|you(?:'re| are))\b.*\b(founder|owner|co-?founder)\b", inbound, re.IGNORECASE))
     asks_business_identity = bool(re.search(r"\b(who|founder|owner|behind|runs?|owns?|started|founded)\b", inbound, re.IGNORECASE))
+
+    if language == "fr":
+        prefix = (
+            f"Non - ici {assistant_name}, l'assistante de {business_name}."
+            if asks_if_assistant_owns
+            else f"Ici {assistant_name}, l'assistante de {business_name}."
+        )
+        source_fact = _extract_business_identity_fact(context) if asks_business_identity else ""
+        if source_fact:
+            return f"{prefix} Selon les infos de l'entreprise que j'ai: {source_fact} Je peux répondre aux questions ou aider à réserver un moment."
+        if asks_business_identity:
+            return f"{prefix} Je n'ai pas de détails confirmés sur le fondateur ou propriétaire dans mon contexte, mais je peux répondre aux questions ou aider à réserver un moment."
+        return f"{prefix} Je peux répondre aux questions et aider à réserver un moment pratique quand vous êtes prêt."
 
     prefix = f"No - I'm {assistant_name}, the assistant for {business_name}." if asks_if_assistant_owns else f"I'm {assistant_name}, the assistant for {business_name}."
     source_fact = _extract_business_identity_fact(context) if asks_business_identity else ""
@@ -727,6 +741,20 @@ def _strip_meeting_cta(text: str, *, fallback: str) -> str:
 
 
 def _non_booking_bridge_reply(context: dict[str, Any]) -> str:
+    language = str(context.get("response_language") or "en")
+    if language == "fr":
+        if context.get("call_refusal") or (context.get("cta_state") or {}).get("meeting_rejected"):
+            return "Pas de problème. Je peux continuer à vous aider ici. Qu'aimeriez-vous clarifier ensuite?"
+        if context.get("pricing_question"):
+            if context.get("pricing_context_available"):
+                return "Je peux répondre à partir des détails fournis par l'entreprise. Quelle partie voulez-vous clarifier?"
+            return "Je n'ai pas de détails de forfait confirmés ici. Je peux aider avec l'adéquation, le processus ou trouver un moment pratique pour un appel."
+        if str(context.get("intent_level") or "") == "LOW_INTENT":
+            return "Pas de problème. Je peux vous aider à vous faire une idée générale d'abord. Cherchez-vous surtout à comprendre le processus, les délais ou l'adéquation?"
+        missing = context.get("recommended_missing_field")
+        if isinstance(missing, dict) and missing.get("question"):
+            return str(missing["question"])
+        return "Ça fait du sens. Qu'est-ce qui serait le plus utile à clarifier en premier?"
     if context.get("call_refusal") or (context.get("cta_state") or {}).get("meeting_rejected"):
         return "No problem. I can keep helping here instead. What would you like to understand next?"
     if context.get("pricing_question"):
@@ -789,8 +817,11 @@ def _ensure_initial_intro(text: str, context: dict[str, Any]) -> str:
 
 def _initial_intro_prefix(context: dict[str, Any]) -> str:
     lead_name = str(context.get("lead_name") or "").strip()
-    first_name = lead_name.split()[0] if lead_name else "there"
-    business_name = str(context.get("business_name") or "the business").strip() or "the business"
+    language = str(context.get("response_language") or "en")
+    first_name = lead_name.split()[0] if lead_name else ("bonjour" if language == "fr" else "there")
+    business_name = str(context.get("business_name") or ("l'entreprise" if language == "fr" else "the business")).strip() or ("l'entreprise" if language == "fr" else "the business")
+    if language == "fr":
+        return f"Bonjour {first_name}, ici {_ASSISTANT_NAME}, l'assistante de {business_name}."
     return f"Hi {first_name}, I'm {_ASSISTANT_NAME}, the assistant for {business_name}."
 
 

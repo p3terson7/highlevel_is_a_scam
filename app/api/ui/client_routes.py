@@ -103,29 +103,11 @@ def ui_client_calendar(
     rows = db.execute(
         select(CalendarBooking, Lead)
         .outerjoin(Lead, Lead.id == CalendarBooking.lead_id)
-        .where(CalendarBooking.client_id == client.id, CalendarBooking.status == "scheduled")
+        .where(CalendarBooking.client_id == client.id)
         .order_by(CalendarBooking.start_at.asc(), CalendarBooking.id.asc())
         .limit(limit)
     ).all()
-    items = [
-        {
-            "id": booking.id,
-            "lead_id": booking.lead_id,
-            "lead_name": _lead_display_name(lead) if lead else "",
-            "phone": lead.phone if lead else "",
-            "email": lead.email if lead else "",
-            "provider": booking.provider,
-            "source": booking.source,
-            "status": booking.status,
-            "start_at": booking.start_at.isoformat(),
-            "end_at": booking.end_at.isoformat(),
-            "timezone": booking.timezone,
-            "title": booking.title,
-            "notes": booking.notes,
-            "created_at": booking.created_at.isoformat(),
-        }
-        for booking, lead in rows
-    ]
+    items = [_serialize_calendar_booking(booking, lead) for booking, lead in rows]
     return {
         "client_key": client.client_key,
         "booking_mode": client.booking_mode,
@@ -133,6 +115,205 @@ def ui_client_calendar(
         "total": len(items),
         "items": items,
     }
+
+
+@router.post("/ui/api/clients/{client_key}/calendar/meetings")
+def ui_create_manual_meeting(
+    client_key: str,
+    payload: ManualMeetingCreateRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    client = actor.client if actor.role == "client" else _load_client_by_key(db, client_key)
+    if actor.role == "client" and client.client_key != client_key:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Meeting title is required")
+    start_at = _parse_local_datetime(payload.start_at, payload.timezone)
+    end_at = start_at + timedelta(minutes=payload.duration_minutes)
+    now = datetime.now(timezone.utc)
+
+    if payload.lead_id:
+        lead = _load_lead_for_actor(db, actor, payload.lead_id)
+        if lead.client_id != client.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lead not found")
+    elif payload.new_lead is not None:
+        full_name = payload.new_lead.full_name.strip()
+        if not full_name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lead name is required")
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id=f"manual-{uuid4().hex}",
+            source=LeadSource.MANUAL,
+            full_name=full_name,
+            phone=normalize_phone(payload.new_lead.phone or ""),
+            email=(payload.new_lead.email or "").strip(),
+            city=(payload.new_lead.city or "").strip(),
+            form_answers={},
+            raw_payload={"source": "ui_manual_meeting_inline_lead", "created_by": actor.role},
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.NEW,
+            crm_stage="Meeting Booked",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(lead)
+        db.flush()
+        db.add(
+            AuditLog(
+                client_id=client.id,
+                lead_id=lead.id,
+                event_type="manual_lead_created",
+                decision={"actor_role": actor.role, "source": "calendar_inline"},
+                created_at=now,
+            )
+        )
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose an existing lead or create one")
+
+    previous_stage = normalize_crm_stage(lead.crm_stage)
+    if previous_stage == "New Lead":
+        lead.crm_stage = "Meeting Booked"
+    if lead.conversation_state != ConversationStateEnum.BOOKED:
+        _create_state_transition(
+            db,
+            lead=lead,
+            new_state=ConversationStateEnum.BOOKED,
+            reason="manual_meeting_created",
+            created_at=now,
+            metadata_json={"source": "ui_calendar", "actor_role": actor.role},
+        )
+    lead.updated_at = now
+
+    booking = CalendarBooking(
+        client_id=client.id,
+        lead_id=lead.id,
+        provider="manual",
+        source="manual",
+        status="scheduled",
+        start_at=start_at,
+        end_at=end_at,
+        timezone=payload.timezone.strip(),
+        title=title,
+        notes=(payload.notes or "").strip(),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(booking)
+    db.flush()
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type="manual_calendar_booking_created",
+            decision={
+                "booking_id": booking.id,
+                "title": booking.title,
+                "start_at": booking.start_at.isoformat(),
+                "end_at": booking.end_at.isoformat(),
+                "timezone": booking.timezone,
+                "previous_stage": previous_stage,
+                "new_stage": normalize_crm_stage(lead.crm_stage),
+                "options": _manual_meeting_options(payload),
+                "actor_role": actor.role,
+            },
+            created_at=now,
+        )
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This lead already has a scheduled manual meeting. Update or cancel it before adding another.",
+        ) from exc
+    db.refresh(booking)
+    return {"status": "ok", "meeting": _serialize_calendar_booking(booking, lead)}
+
+
+@router.patch("/ui/api/calendar/meetings/{booking_id}")
+def ui_update_manual_meeting_status(
+    booking_id: int,
+    payload: ManualMeetingStatusRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    booking = _load_booking_for_actor(db, actor, booking_id)
+    allowed = {"scheduled", "completed", "no_show", "cancelled"}
+    next_status = payload.status.strip().lower().replace("-", "_").replace(" ", "_")
+    if next_status not in allowed:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid meeting status")
+    previous_status = booking.status
+    now = datetime.now(timezone.utc)
+    booking.status = next_status
+    booking.updated_at = now
+    lead = db.scalar(select(Lead).where(Lead.id == booking.lead_id)) if booking.lead_id else None
+    if lead is not None:
+        if next_status == "completed":
+            lead.crm_stage = "Meeting Completed"
+        elif next_status == "no_show":
+            lead.crm_stage = "Contacted"
+        elif next_status == "cancelled" and normalize_crm_stage(lead.crm_stage) == "Meeting Booked":
+            lead.crm_stage = "Qualified"
+        lead.updated_at = now
+    db.add(
+        AuditLog(
+            client_id=booking.client_id,
+            lead_id=booking.lead_id,
+            event_type="manual_calendar_booking_status_changed",
+            decision={
+                "booking_id": booking.id,
+                "previous_status": previous_status,
+                "new_status": next_status,
+                "actor_role": actor.role,
+            },
+            created_at=now,
+        )
+    )
+    db.commit()
+    db.refresh(booking)
+    return {"status": "ok", "meeting": _serialize_calendar_booking(booking, lead)}
+
+
+@router.delete("/ui/api/calendar/meetings/{booking_id}")
+def ui_delete_manual_meeting(
+    booking_id: int,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    booking = _load_booking_for_actor(db, actor, booking_id)
+    decision = {
+        "booking_id": booking.id,
+        "title": booking.title,
+        "status": booking.status,
+        "start_at": booking.start_at.isoformat(),
+        "actor_role": actor.role,
+    }
+    db.add(
+        AuditLog(
+            client_id=booking.client_id,
+            lead_id=booking.lead_id,
+            event_type="manual_calendar_booking_deleted",
+            decision=decision,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    db.delete(booking)
+    db.commit()
+    return {"status": "ok", "deleted": True, "booking_id": booking_id}
 
 
 @router.get("/ui/api/clients/{client_key}/zapier-results")
@@ -362,4 +543,3 @@ def ui_owner_update_calendar(
         "internal_calendar": internal_calendar_preview_config(client),
         "updated_at": client.updated_at.isoformat(),
     }
-

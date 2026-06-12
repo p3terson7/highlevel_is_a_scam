@@ -354,11 +354,27 @@ python -m app.scripts.seed_stackleads_demo --reset
 python -m app.scripts.seed_stackleads_demo --reset-portal
 ```
 
+3D PreciScan showcase seed:
+
+```bash
+python -m app.scripts.seed_preciscan_demo --reset
+python -m app.scripts.seed_preciscan_demo --reset-portal
+```
+
 When running the app through Docker, run those inside the API container:
 
 ```bash
 docker compose exec api python -m app.scripts.seed_stackleads_demo --reset
 docker compose exec api python -m app.scripts.seed_stackleads_demo --reset-portal
+docker compose exec api python -m app.scripts.seed_preciscan_demo --reset
+docker compose exec api python -m app.scripts.seed_preciscan_demo --reset-portal
+```
+
+For direct local SQLite runs, migrate the database first and pass it explicitly:
+
+```bash
+DATABASE_URL=sqlite:///./local.db alembic upgrade head
+python -m app.scripts.seed_preciscan_demo --reset --database-url sqlite:///./local.db
 ```
 
 Default StackLeads portal login after `--reset` or `--reset-portal`:
@@ -366,6 +382,10 @@ Default StackLeads portal login after `--reset` or `--reset-portal`:
 - password: `StackLeadsDemo2026!`
 
 Regular StackLeads reseeds preserve a password changed through the UI. Use `--reset-portal` only when you want to force the known demo login back.
+
+Default 3D PreciScan portal login after `--reset` or `--reset-portal`:
+- email: `demo@3dpreciscan.local`
+- password: `PreciScanDemo2026!`
 
 UI controls:
 - Open `/ui`

@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import HTMLResponse
@@ -27,6 +28,7 @@ from app.db.models import (
     LeadTask,
     LeadSource,
     Message,
+    MessageAttachment,
     MessageDirection,
 )
 from app.db.session import get_db
@@ -167,6 +169,17 @@ class CRMStageUpdateRequest(BaseModel):
     stage: str
 
 
+class ManualLeadCreateRequest(BaseModel):
+    client_key: str | None = None
+    full_name: str
+    phone: str | None = None
+    email: str | None = None
+    city: str | None = None
+    owner_name: str | None = None
+    crm_stage: str | None = None
+    notes: str | None = None
+
+
 class CRMTagRequest(BaseModel):
     tag: str
 
@@ -186,6 +199,31 @@ class CRMTaskUpdateRequest(BaseModel):
 
 class ConversationArchiveRequest(BaseModel):
     archived: bool = True
+
+
+class ManualMeetingLeadCreateRequest(BaseModel):
+    full_name: str
+    phone: str | None = None
+    email: str | None = None
+    city: str | None = None
+
+
+class ManualMeetingCreateRequest(BaseModel):
+    lead_id: int | None = None
+    new_lead: ManualMeetingLeadCreateRequest | None = None
+    start_at: str
+    duration_minutes: int = Field(default=30, ge=5, le=480)
+    timezone: str
+    title: str
+    notes: str | None = None
+    create_conference_link: bool = False
+    send_email_invite: bool = False
+    include_meeting_link: bool = False
+    send_sms_reminders: bool = False
+
+
+class ManualMeetingStatusRequest(BaseModel):
+    status: str
 
 
 @dataclass(frozen=True)
@@ -243,6 +281,25 @@ def _load_lead_for_actor(db: Session, actor: UIActor, lead_id: int) -> Lead:
     return lead
 
 
+def _client_for_actor(db: Session, actor: UIActor, client_key: str | None) -> Client:
+    if actor.role == "client":
+        if actor.client is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+        return actor.client
+    if not client_key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Client is required")
+    return _load_client_by_key(db, client_key)
+
+
+def _load_booking_for_actor(db: Session, actor: UIActor, booking_id: int) -> CalendarBooking:
+    booking = db.scalar(select(CalendarBooking).where(CalendarBooking.id == booking_id))
+    if booking is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    if actor.role == "client" and actor.client and booking.client_id != actor.client.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    return booking
+
+
 def _load_task_for_actor(db: Session, actor: UIActor, task_id: int) -> LeadTask:
     task = db.scalar(select(LeadTask).where(LeadTask.id == task_id))
     if task is None:
@@ -280,6 +337,51 @@ def _load_lead(db: Session, lead_id: int) -> Lead:
     if lead is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lead not found")
     return lead
+
+
+def _parse_local_datetime(value: str, timezone_name: str) -> datetime:
+    try:
+        tz = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid timezone") from exc
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid meeting date/time") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=tz)
+    return parsed.astimezone(timezone.utc)
+
+
+def _manual_meeting_options(payload: ManualMeetingCreateRequest) -> dict[str, bool]:
+    create_link = bool(payload.create_conference_link)
+    return {
+        "create_conference_link": create_link,
+        "send_email_invite": bool(payload.send_email_invite),
+        "include_meeting_link": bool(payload.include_meeting_link and create_link),
+        "send_sms_reminders": bool(payload.send_sms_reminders),
+        "zapier_pending": True,
+    }
+
+
+def _serialize_calendar_booking(booking: CalendarBooking, lead: Lead | None = None) -> dict[str, Any]:
+    return {
+        "id": booking.id,
+        "lead_id": booking.lead_id,
+        "lead_name": _lead_display_name(lead) if lead else "",
+        "phone": lead.phone if lead else "",
+        "email": lead.email if lead else "",
+        "provider": booking.provider,
+        "source": booking.source,
+        "status": booking.status,
+        "start_at": booking.start_at.isoformat(),
+        "end_at": booking.end_at.isoformat(),
+        "timezone": booking.timezone,
+        "title": booking.title,
+        "notes": booking.notes,
+        "created_at": booking.created_at.isoformat(),
+        "updated_at": booking.updated_at.isoformat(),
+    }
 
 
 def _webhook_urls(client_key: str) -> dict[str, str]:
@@ -575,6 +677,50 @@ def _serialize_task(task: LeadTask) -> dict[str, Any]:
     }
 
 
+def _serialize_attachment(attachment: MessageAttachment) -> dict[str, Any]:
+    return {
+        "id": attachment.id,
+        "filename": attachment.filename,
+        "content_type": attachment.content_type,
+        "media_kind": attachment.media_kind,
+        "size_bytes": attachment.size_bytes,
+        "url": f"/media/public/{attachment.public_token}",
+        "created_at": attachment.created_at.isoformat(),
+    }
+
+
+def _attachments_by_message(db: Session, message_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    if not message_ids:
+        return {}
+    rows = db.scalars(
+        select(MessageAttachment)
+        .where(MessageAttachment.message_id.in_(message_ids))
+        .order_by(MessageAttachment.created_at.asc(), MessageAttachment.id.asc())
+    ).all()
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for attachment in rows:
+        grouped[attachment.message_id].append(_serialize_attachment(attachment))
+    return grouped
+
+
+def _message_preview_text(message: Message | None) -> str:
+    if message is None:
+        return "No messages yet."
+    body = str(message.body or "").strip()
+    if body:
+        return body
+    raw_payload = message.raw_payload if isinstance(message.raw_payload, dict) else {}
+    attachments = raw_payload.get("attachments") if isinstance(raw_payload.get("attachments"), list) else []
+    first_kind = str(attachments[0].get("media_kind") or "") if attachments and isinstance(attachments[0], dict) else ""
+    if first_kind == "image":
+        return "Image attachment"
+    if first_kind == "video":
+        return "Video attachment"
+    if attachments:
+        return "Media attachment"
+    return "No message body."
+
+
 def _set_crm_stage(
     *,
     db: Session,
@@ -771,6 +917,13 @@ def _send_sms_or_http_error(*, sms_service: SMSService, to_number: str, body: st
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
+def _send_mms_or_http_error(*, sms_service: SMSService, to_number: str, body: str, media_urls: list[str]) -> str:
+    try:
+        return sms_service.send_message(to_number=to_number, body=body, media_urls=media_urls)
+    except SMSDeliveryError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
 def _build_conversation_items(
     db: Session,
     leads: list[Lead],
@@ -819,7 +972,7 @@ def _build_conversation_items(
                 "opted_out": lead.opted_out,
                 "tags": tags,
                 "notes_count": notes_count,
-                "last_message_snippet": _snippet(latest_message.body if latest_message else "No messages yet."),
+                "last_message_snippet": _snippet(_message_preview_text(latest_message)),
                 "last_message_direction": latest_message.direction.value if latest_message else None,
                 "last_activity_at": last_activity_at.isoformat(),
                 "created_at": lead.created_at.isoformat(),

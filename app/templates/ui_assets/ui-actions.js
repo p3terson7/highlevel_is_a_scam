@@ -110,7 +110,13 @@
           const confirmMessage = payload.ai_context
             ? "Save these assistant instructions? New AI replies will use them immediately."
             : "Save with blank assistant guidance? New AI replies may become less specific.";
-          if (!window.confirm(confirmMessage)) return;
+          const confirmed = await confirmAction({
+            title: "Save assistant guidance?",
+            message: confirmMessage,
+            confirmText: "Save",
+            tone: "info",
+          });
+          if (!confirmed) return;
         }
         try {
           const result = await apiJson(`/ui/api/owner/${encodeURIComponent(state.selectedClientKey)}/ai-context`, {
@@ -145,7 +151,13 @@
           const confirmMessage = currentMode === "internal"
             ? "Save this booking availability? New booking offers will use it right away."
             : "Save this availability and switch new booking offers to the internal calendar?";
-          if (!window.confirm(confirmMessage)) return;
+          const confirmed = await confirmAction({
+            title: "Save booking availability?",
+            message: confirmMessage,
+            confirmText: "Save",
+            tone: "info",
+          });
+          if (!confirmed) return;
         }
         try {
           const result = await apiJson(`/ui/api/owner/${encodeURIComponent(state.selectedClientKey)}/calendar`, {
@@ -172,6 +184,188 @@
         await Promise.all([loadCrmLeads(), loadCrmTasks()]);
         if (keepDetail && state.activeCrmLeadId) {
           await loadCrmLeadDetail(state.activeCrmLeadId);
+        }
+      }
+
+      function selectedClientKeyForManualActions() {
+        return state.session?.role === "client" ? state.session.client_key : state.selectedClientKey;
+      }
+
+      function clearManualLeadForm(prefix) {
+        ["Name", "Phone", "Email", "City"].forEach((suffix) => {
+          const el = document.getElementById(`${prefix}${suffix}`);
+          if (el) el.value = "";
+        });
+        const owner = document.getElementById(`${prefix}Owner`);
+        if (owner) owner.value = "";
+        const notes = document.getElementById(`${prefix}Notes`);
+        if (notes) notes.value = "";
+        const stage = document.getElementById(`${prefix}Stage`);
+        if (stage) stage.value = "New Lead";
+      }
+
+      async function createManualLead(source = "crm") {
+        const clientKey = selectedClientKeyForManualActions();
+        if (!clientKey) {
+          showNotice("Select a client before adding a contact.", "warn");
+          return null;
+        }
+        const prefix = source === "calendar" ? "calendarLead" : "manualLead";
+        const name = document.getElementById(`${prefix}Name`).value.trim();
+        if (!name) {
+          setText(source === "calendar" ? "calendarLeadStatus" : "manualLeadStatus", "Contact name is required.");
+          return null;
+        }
+        const payload = {
+          client_key: clientKey,
+          full_name: name,
+          phone: document.getElementById(`${prefix}Phone`).value.trim(),
+          email: document.getElementById(`${prefix}Email`).value.trim(),
+          city: document.getElementById(`${prefix}City`).value.trim(),
+        };
+        const stage = document.getElementById(`${prefix}Stage`);
+        if (stage) payload.crm_stage = stage.value;
+        const owner = document.getElementById(`${prefix}Owner`);
+        if (owner) payload.owner_name = owner.value.trim();
+        const notes = document.getElementById(`${prefix}Notes`);
+        if (notes) payload.notes = notes.value.trim();
+        const statusId = source === "calendar" ? "calendarLeadStatus" : "manualLeadStatus";
+        try {
+          const result = await apiJson("/ui/api/crm/leads", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          clearManualLeadForm(prefix);
+          setText(statusId, "Contact created.");
+          state.activeCrmLeadId = result.lead?.lead_id || result.lead?.id || state.activeCrmLeadId;
+          await Promise.all([loadCrmLeads(), loadConversations(), loadDashboard()]);
+          fillManualMeetingLeadSelect();
+          showNotice("Contact created.", "ok");
+          return result.lead;
+        } catch (error) {
+          setText(statusId, `Contact create failed: ${error.message}`);
+          showNotice(`Contact create failed: ${error.message}`, "err");
+          return null;
+        }
+      }
+
+      function readManualMeetingPayload() {
+        const mode = document.getElementById("manualMeetingLeadMode").value;
+        const payload = {
+          start_at: document.getElementById("manualMeetingStart").value,
+          duration_minutes: Number(document.getElementById("manualMeetingDuration").value || 30),
+          timezone: document.getElementById("manualMeetingTimezone").value.trim(),
+          title: document.getElementById("manualMeetingTitle").value.trim(),
+          notes: document.getElementById("manualMeetingNotes").value.trim(),
+          create_conference_link: document.getElementById("manualMeetingCreateConference").checked,
+          send_email_invite: document.getElementById("manualMeetingSendInvite").checked,
+          include_meeting_link: document.getElementById("manualMeetingIncludeLink").checked,
+          send_sms_reminders: document.getElementById("manualMeetingSmsReminders").checked,
+        };
+        if (mode === "new") {
+          payload.new_lead = {
+            full_name: document.getElementById("manualMeetingNewLeadName").value.trim(),
+            phone: document.getElementById("manualMeetingNewLeadPhone").value.trim(),
+            email: document.getElementById("manualMeetingNewLeadEmail").value.trim(),
+            city: document.getElementById("manualMeetingNewLeadCity").value.trim(),
+          };
+        } else {
+          payload.lead_id = Number(document.getElementById("manualMeetingLeadSelect").value || 0) || null;
+        }
+        return payload;
+      }
+
+      function resetManualMeetingForm() {
+        document.getElementById("manualMeetingLeadMode").value = "existing";
+        document.getElementById("manualMeetingDuration").value = "30";
+        document.getElementById("manualMeetingTitle").value = "";
+        document.getElementById("manualMeetingNotes").value = "";
+        document.getElementById("manualMeetingStart").value = "";
+        document.getElementById("manualMeetingTimezone").value = state.calendar?.timezone || "America/Toronto";
+        ["manualMeetingCreateConference", "manualMeetingSendInvite", "manualMeetingIncludeLink", "manualMeetingSmsReminders"].forEach((id) => {
+          document.getElementById(id).checked = false;
+        });
+        ["manualMeetingNewLeadName", "manualMeetingNewLeadPhone", "manualMeetingNewLeadEmail", "manualMeetingNewLeadCity"].forEach((id) => {
+          document.getElementById(id).value = "";
+        });
+        syncManualMeetingFormDefaults();
+      }
+
+      async function createManualMeeting() {
+        const clientKey = selectedClientKeyForManualActions();
+        if (!clientKey) {
+          setText("manualMeetingStatus", "Select a client first.");
+          return;
+        }
+        const payload = readManualMeetingPayload();
+        if (!payload.title || !payload.start_at || !payload.timezone) {
+          setText("manualMeetingStatus", "Contact, date/time, timezone, and title are required.");
+          return;
+        }
+        if (!payload.lead_id && !payload.new_lead?.full_name) {
+          setText("manualMeetingStatus", "Select a contact or create one inline.");
+          return;
+        }
+        try {
+          const result = await apiJson(`/ui/api/clients/${encodeURIComponent(clientKey)}/calendar/meetings`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          setText("manualMeetingStatus", "Meeting added.");
+          resetManualMeetingForm();
+          state.calendarMeetingPanelOpen = false;
+          await Promise.all([loadCalendar(), loadCrmLeads(), loadCrmTasks(), loadConversations(), loadDashboard()]);
+          if (result.meeting?.lead_id) {
+            state.activeCrmLeadId = result.meeting.lead_id;
+            saveLocalState();
+          }
+          showNotice("Meeting added.", "ok");
+        } catch (error) {
+          setText("manualMeetingStatus", `Meeting failed: ${error.message}`);
+          showNotice(`Meeting failed: ${error.message}`, "err");
+        }
+      }
+
+      async function updateManualMeetingStatus(meetingId, nextStatus) {
+        const labels = { completed: "completed", no_show: "no show", cancelled: "cancelled", scheduled: "scheduled" };
+        if (nextStatus === "cancelled") {
+          const confirmed = await confirmAction({
+            title: "Cancel meeting?",
+            message: "It will stay visible on the calendar as cancelled.",
+            confirmText: "Cancel meeting",
+            tone: "warn",
+          });
+          if (!confirmed) return;
+        }
+        try {
+          await apiJson(`/ui/api/calendar/meetings/${meetingId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: nextStatus }),
+          });
+          await Promise.all([loadCalendar(), loadCrmLeads(), loadCrmTasks(), loadDashboard()]);
+          showNotice(`Meeting marked ${labels[nextStatus] || nextStatus}.`, "ok");
+        } catch (error) {
+          showNotice(`Meeting update failed: ${error.message}`, "err");
+        }
+      }
+
+      async function deleteManualMeeting(meetingId) {
+        const confirmed = await confirmAction({
+          title: "Delete meeting?",
+          message: "Delete this meeting permanently? This cannot be undone.",
+          confirmText: "Delete",
+          tone: "err",
+        });
+        if (!confirmed) return;
+        try {
+          await apiJson(`/ui/api/calendar/meetings/${meetingId}`, { method: "DELETE" });
+          await Promise.all([loadCalendar(), loadCrmLeads(), loadCrmTasks(), loadDashboard()]);
+          showNotice("Meeting deleted.", "ok");
+        } catch (error) {
+          showNotice(`Meeting delete failed: ${error.message}`, "err");
         }
       }
 
@@ -215,10 +409,10 @@
           if (state.activeLeadId === state.activeCrmLeadId) {
             await openThread(state.activeLeadId);
           }
-          showNotice("Lead stage updated.", "ok");
+          showNotice("Stage updated.", "ok");
         } catch (error) {
           setText("crmLeadStatus", `Stage update failed: ${error.message}`);
-          showNotice(`Lead stage update failed: ${error.message}`, "err");
+          showNotice(`Stage update failed: ${error.message}`, "err");
         }
       }
 
@@ -416,26 +610,44 @@
       async function sendManualMessage() {
         if (!state.activeLeadId) return;
         const body = document.getElementById("threadManualMessage").value.trim();
-        if (!body) {
-          setText("threadManualStatus", "Message body is required.");
+        const mediaInput = document.getElementById("threadMediaInput");
+        const mediaFile = mediaInput?.files?.[0] || null;
+        if (!body && !mediaFile) {
+          setText("threadManualStatus", "Message body or media is required.");
           return;
         }
         const sandboxThread = isActiveSandboxThread();
+        if (sandboxThread && mediaFile) {
+          setText("threadManualStatus", "Media attachments are not available in sandbox mode.");
+          return;
+        }
         try {
-          const endpoint = sandboxThread
-            ? `/ui/api/conversations/${state.activeLeadId}/sandbox/messages`
-            : `/ui/api/conversations/${state.activeLeadId}/messages/manual`;
-          const result = await apiJson(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ body }),
-          });
+          let result;
+          if (mediaFile) {
+            const formData = new FormData();
+            formData.append("body", body);
+            formData.append("media", mediaFile);
+            result = await apiJson(`/ui/api/conversations/${state.activeLeadId}/messages/manual-media`, {
+              method: "POST",
+              body: formData,
+            });
+          } else {
+            const endpoint = sandboxThread
+              ? `/ui/api/conversations/${state.activeLeadId}/sandbox/messages`
+              : `/ui/api/conversations/${state.activeLeadId}/messages/manual`;
+            result = await apiJson(endpoint, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ body }),
+            });
+          }
           document.getElementById("threadManualMessage").value = "";
+          clearThreadMediaSelection();
           if (sandboxThread) {
             state.sandboxLeadId = state.activeLeadId;
             saveLocalState();
           }
-          setText("threadManualStatus", sandboxThread ? "AI replied in sandbox." : "Sent.");
+          setText("threadManualStatus", sandboxThread ? "AI replied in sandbox." : (mediaFile ? "Media sent." : "Sent."));
           if (state.session?.role === "client") {
             await loadConversations();
             await loadCrmLeads();
@@ -452,6 +664,49 @@
           setText("threadManualStatus", `Send failed: ${error.message}`);
           showNotice(`${sandboxThread ? "Sandbox turn" : "Manual message"} failed: ${error.message}`, "err");
         }
+      }
+
+      function updateThreadMediaPreview() {
+        const input = document.getElementById("threadMediaInput");
+        const preview = document.getElementById("threadMediaPreview");
+        const clearButton = document.getElementById("threadClearMediaButton");
+        const file = input?.files?.[0] || null;
+        if (!preview || !clearButton) return;
+        if (preview.dataset.objectUrl) {
+          URL.revokeObjectURL(preview.dataset.objectUrl);
+          delete preview.dataset.objectUrl;
+        }
+        if (!file) {
+          preview.classList.add("hidden");
+          preview.innerHTML = "";
+          clearButton.classList.add("hidden");
+          return;
+        }
+        const isImage = file.type.startsWith("image/");
+        const isVideo = file.type.startsWith("video/");
+        const objectUrl = URL.createObjectURL(file);
+        preview.dataset.objectUrl = objectUrl;
+        preview.classList.remove("hidden");
+        clearButton.classList.remove("hidden");
+        preview.innerHTML = `
+          <div class="composer-media-card">
+            <div class="composer-media-thumb">
+              ${isImage ? `<img src="${escapeHtml(objectUrl)}" alt="${escapeHtml(file.name)}" />` : ""}
+              ${isVideo ? `<video src="${escapeHtml(objectUrl)}" muted preload="metadata"></video>` : ""}
+              ${!isImage && !isVideo ? `<div class="composer-media-file">File</div>` : ""}
+            </div>
+            <div class="composer-media-copy">
+              <div class="composer-media-name">${escapeHtml(file.name)}</div>
+              <div class="meta-text">${escapeHtml([file.type || "media", formatBytes(file.size)].filter(Boolean).join(" · "))}</div>
+            </div>
+          </div>
+        `;
+      }
+
+      function clearThreadMediaSelection() {
+        const input = document.getElementById("threadMediaInput");
+        if (input) input.value = "";
+        updateThreadMediaPreview();
       }
 
       async function markHandoff() {
@@ -477,10 +732,14 @@
 
       async function deleteConversation() {
         if (!state.activeLeadId) return;
-        const current = state.thread?.lead?.display_name || `lead ${state.activeLeadId}`;
-        if (!window.confirm(`Delete ${current} and the full conversation history? This cannot be undone.`)) {
-          return;
-        }
+        const current = state.thread?.lead?.display_name || `contact ${state.activeLeadId}`;
+        const confirmed = await confirmAction({
+          title: "Delete conversation?",
+          message: `Delete ${current} and the full conversation history? This cannot be undone.`,
+          confirmText: "Delete",
+          tone: "err",
+        });
+        if (!confirmed) return;
         try {
           const deletedLeadId = state.activeLeadId;
           await apiJson(`/ui/api/conversations/${deletedLeadId}`, {
@@ -504,11 +763,17 @@
         if (!numericLeadId) return;
         const threadName = state.thread?.lead?.display_name;
         const crmName = state.crmLeadDetail?.lead?.display_name;
-        const current = threadName || crmName || `lead ${numericLeadId}`;
+        const current = threadName || crmName || `contact ${numericLeadId}`;
         const confirmMessage = archived
           ? `Archive ${current}? It will be removed from the active inbox but kept in Pipeline.`
           : `Restore ${current} to the active inbox?`;
-        if (!window.confirm(confirmMessage)) return;
+        const confirmed = await confirmAction({
+          title: archived ? "Archive contact?" : "Restore contact?",
+          message: confirmMessage,
+          confirmText: archived ? "Archive" : "Restore",
+          tone: archived ? "warn" : "info",
+        });
+        if (!confirmed) return;
         try {
           await apiJson(`/ui/api/conversations/${numericLeadId}/archive`, {
             method: "PATCH",
@@ -523,7 +788,7 @@
           if ((state.activeLeadId === numericLeadId) && (!archived || state.conversationFilters.showArchived)) {
             await openThread(numericLeadId);
           }
-          showNotice(archived ? "Lead archived from Inbox." : "Lead restored to Inbox.", "ok");
+          showNotice(archived ? "Contact archived from Inbox." : "Contact restored to Inbox.", "ok");
         } catch (error) {
           showNotice(`${archived ? "Archive" : "Restore"} failed: ${error.message}`, "err");
         }
@@ -542,7 +807,13 @@
       }
 
       async function resetDemo() {
-        if (!window.confirm("Delete demo clients and related demo conversations?")) return;
+        const confirmed = await confirmAction({
+          title: "Reset demo data?",
+          message: "Delete demo clients and related demo conversations?",
+          confirmText: "Reset",
+          tone: "err",
+        });
+        if (!confirmed) return;
         try {
           const result = await apiJson("/ui/api/seed-demo", { method: "DELETE" });
           setText("settingsSeedStatus", JSON.stringify(result));
@@ -591,7 +862,7 @@
 
         const payload = {
           mode: state.testLabMode,
-          full_name: document.getElementById("labLeadName").value.trim() || "Strategy Call Lead",
+          full_name: document.getElementById("labLeadName").value.trim() || "Strategy Call Contact",
           phone: document.getElementById("labLeadPhone").value.trim(),
           email: document.getElementById("labLeadEmail").value.trim(),
           city: document.getElementById("labLeadCity").value.trim(),
@@ -600,7 +871,7 @@
 
         const button = document.getElementById("labStartButton");
         button.disabled = true;
-        setText("labStartStatus", "Creating the test lead and asking the agent for the first reply...");
+        setText("labStartStatus", "Creating the test contact and asking the agent for the first reply...");
         try {
           if (clientKey !== state.selectedClientKey) {
             state.selectedClientKey = clientKey;
@@ -614,7 +885,7 @@
           });
           state.sandboxLeadId = result.lead_id;
           saveLocalState();
-          setText("labStartStatus", `Sandbox started. Lead ${result.lead_id} is open in Conversations.`);
+          setText("labStartStatus", `Sandbox started. Contact ${result.lead_id} is open in Conversations.`);
           if (state.session?.role === "client") {
             await Promise.all([loadOwnerWorkspace(clientKey), loadConversations(), loadCrmLeads(), loadCalendar(), loadCrmTasks()]);
           } else {
@@ -622,7 +893,7 @@
           }
           setActiveView("conversations");
           await openThread(result.lead_id);
-          showNotice("GPT sandbox started. Reply in the thread composer as the lead.", "ok");
+          showNotice("GPT sandbox started. Reply in the thread composer as the contact.", "ok");
         } catch (error) {
           setText("labStartStatus", `Sandbox failed: ${error.message}`);
           showNotice(`Sandbox failed: ${error.message}`, "err");
@@ -707,6 +978,7 @@
             }
             renderSettings();
             updateWindowIndicators();
+            if (typeof translatePage === "function") translatePage();
             return;
           }
           if (state.activeView === "dashboard") {
@@ -734,6 +1006,7 @@
             await loadOwnerWorkspace(state.selectedClientKey);
           }
           updateWindowIndicators();
+          if (typeof translatePage === "function") translatePage();
         } catch (error) {
           showNotice(`Refresh failed: ${error.message}`, "err");
         }

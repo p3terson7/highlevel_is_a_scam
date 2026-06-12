@@ -12,6 +12,7 @@ from twilio.rest import Client as TwilioClient
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.db.models import Client
+from app.services.i18n import client_language, normalize_language
 
 logger = get_logger(__name__)
 
@@ -24,7 +25,7 @@ class SMSDeliveryError(RuntimeError):
 
 
 class SMSProvider(Protocol):
-    def send_sms(self, to_number: str, body: str) -> str:
+    def send_sms(self, to_number: str, body: str, media_urls: list[str] | None = None) -> str:
         ...
 
 
@@ -33,8 +34,13 @@ class TwilioSMSProvider:
         self._client = TwilioClient(account_sid, auth_token)
         self._from_number = from_number
 
-    def send_sms(self, to_number: str, body: str) -> str:
-        message = self._client.messages.create(body=body, from_=self._from_number, to=to_number)
+    def send_sms(self, to_number: str, body: str, media_urls: list[str] | None = None) -> str:
+        payload: dict[str, Any] = {"from_": self._from_number, "to": to_number}
+        if body:
+            payload["body"] = body
+        if media_urls:
+            payload["media_url"] = media_urls
+        message = self._client.messages.create(**payload)
         return str(message.sid)
 
 
@@ -48,9 +54,9 @@ def clear_sms_provider_cache() -> None:
 
 
 class LoggingSMSProvider:
-    def send_sms(self, to_number: str, body: str) -> str:
+    def send_sms(self, to_number: str, body: str, media_urls: list[str] | None = None) -> str:
         sid = f"MOCK-{uuid4().hex[:16]}"
-        logger.info("sms_mock_send", extra={"to": to_number, "sid": sid, "body": body})
+        logger.info("sms_mock_send", extra={"to": to_number, "sid": sid, "body": body, "media_urls": media_urls or []})
         return sid
 
 
@@ -66,7 +72,9 @@ class SMSService:
         context: dict[str, Any] | None = None,
     ) -> str:
         merged = {**self._templates, **(client.template_overrides or {})}
-        template = merged.get(template_key, "")
+        language = normalize_language((context or {}).get("language") or client_language(client))
+        localized_key = f"{language}:{template_key}"
+        template = merged.get(localized_key) or merged.get(template_key, "")
         values: dict[str, Any] = {
             "business_name": client.business_name,
             "booking_url": client.booking_url,
@@ -77,9 +85,9 @@ class SMSService:
             values.update(context)
         return template.format(**values).strip()
 
-    def send_message(self, to_number: str, body: str) -> str:
+    def send_message(self, to_number: str, body: str, media_urls: list[str] | None = None) -> str:
         try:
-            return self._provider.send_sms(to_number=to_number, body=body)
+            return self._provider.send_sms(to_number=to_number, body=body, media_urls=media_urls)
         except SMSDeliveryError:
             raise
         except Exception as exc:
@@ -101,11 +109,16 @@ class SMSService:
 
 @lru_cache
 def load_default_templates() -> dict[str, str]:
-    path = Path(__file__).resolve().parents[1] / "templates" / "default_messages.yml"
+    template_dir = Path(__file__).resolve().parents[1] / "templates"
+    path = template_dir / "default_messages.yml"
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        return {}
-    return {str(k): str(v) for k, v in raw.items()}
+    templates = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    fr_path = template_dir / "default_messages.fr.yml"
+    if fr_path.exists():
+        raw_fr = yaml.safe_load(fr_path.read_text(encoding="utf-8"))
+        if isinstance(raw_fr, dict):
+            templates.update({f"fr:{k}": str(v) for k, v in raw_fr.items()})
+    return templates
 
 
 def build_sms_service(settings: Settings, runtime_overrides: dict[str, str] | None = None) -> SMSService:

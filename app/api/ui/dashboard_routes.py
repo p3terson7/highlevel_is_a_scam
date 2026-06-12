@@ -123,7 +123,7 @@ def ui_dashboard(
             "crm_stage": normalize_crm_stage(lead.crm_stage),
             "conversation_state": lead.conversation_state.value,
             "created_at": lead.created_at.isoformat(),
-            "last_message_snippet": _snippet(latest_messages.get(lead.id).body if latest_messages.get(lead.id) else "No messages yet."),
+            "last_message_snippet": _snippet(_message_preview_text(latest_messages.get(lead.id))),
         }
         for lead in recent_lead_rows
     ]
@@ -262,4 +262,3 @@ def ui_dashboard(
             "last_ai_decision_at": last_ai_decision.created_at.isoformat() if last_ai_decision else None,
         },
     }
-

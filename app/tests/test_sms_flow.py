@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from app.core.deps import get_llm_agent
-from app.db.models import Client, ConversationStateEnum, Lead, LeadSource, Message, MessageDirection
+from app.db.models import Client, ConversationStateEnum, Lead, LeadSource, Message, MessageAttachment, MessageDirection
 from app.db.session import get_session_factory
 from app.services.llm_agent import AgentResponse, LLMAgent
 
@@ -122,6 +122,51 @@ def test_sms_inbound_duplicate_messagesid_is_idempotent(test_context):
             )
         ).all()
         assert len(inbound_messages) == 1
+
+
+def test_sms_inbound_media_only_is_stored_without_auto_reply(test_context, monkeypatch):
+    async def fake_download_twilio_media(**kwargs):
+        assert kwargs["media_url"] == "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME"
+        assert kwargs["content_type"] == "image/jpeg"
+        return b"inbound-image"
+
+    monkeypatch.setattr("app.api.routes_sms.download_twilio_media", fake_download_twilio_media)
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 000-4455",
+            "Body": "",
+            "MessageSid": "SM-IN-MEDIA-001",
+            "NumMedia": "1",
+            "MediaUrl0": "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME",
+            "MediaContentType0": "image/jpeg",
+        },
+    )
+
+    assert response.status_code == 200
+    assert test_context.fake_llm.calls == 0
+    assert test_context.fake_sms.sent == []
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15550004455"))
+        assert lead is not None
+        lead_id = lead.id
+        message = db.scalar(select(Message).where(Message.lead_id == lead.id, Message.direction == MessageDirection.INBOUND))
+        assert message is not None
+        assert message.raw_payload["attachments"][0]["media_kind"] == "image"
+        attachment = db.scalar(select(MessageAttachment).where(MessageAttachment.message_id == message.id))
+        assert attachment is not None
+        assert attachment.content_type == "image/jpeg"
+
+    thread = test_context.client.get(
+        f"/ui/api/conversations/{lead_id}/thread",
+        headers={"X-Admin-Token": "test-admin-token"},
+    )
+    assert thread.status_code == 200
+    thread_payload = thread.json()
+    assert thread_payload["messages"][0]["attachments"][0]["media_kind"] == "image"
 
 
 def test_sms_inbound_selection_books_slot_without_backend_short_circuit_loop(test_context):

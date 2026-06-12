@@ -13,7 +13,7 @@
             ].join("")
           : [
               renderBadge("client scope", "info"),
-              renderBadge("lead inbox", ""),
+              renderBadge("inbox", ""),
             ].join("");
         updateChromeContext();
       }
@@ -47,33 +47,37 @@
         document.getElementById("crmLeadArchiveButton").classList.toggle("hidden", isAdmin);
         document.getElementById("settingsClientOverviewCard").classList.toggle("hidden", isAdmin);
         document.querySelector("#navDashboard .nav-meta").textContent = isAdmin ? "Portfolio and queue" : "Overview, calendar, tasks";
-        document.querySelector("#topNavCrm .top-nav-label").textContent = isAdmin ? "CRM" : "Pipeline";
-        document.querySelector("#navCrm .nav-label").textContent = isAdmin ? "CRM" : "Pipeline";
-        document.querySelector("#navCrm .nav-meta").textContent = isAdmin ? "Pipeline board" : "Lead pipeline and restores";
-        document.querySelector("#mobileNavCrm .mobile-tab-label").textContent = isAdmin ? "CRM" : "Pipeline";
-        document.querySelector("#topNavLeads .top-nav-label").textContent = isAdmin ? "Leads" : "Lead Details";
-        document.querySelector("#navLeads .nav-label").textContent = isAdmin ? "Leads" : "Lead Details";
-        document.querySelector("#navLeads .nav-meta").textContent = isAdmin ? "CRM records" : "Full lead records";
+        document.querySelector("#topNavToday .top-nav-label").textContent = t("Today");
+        document.querySelector("#navToday .nav-label").textContent = t("Today");
+        document.querySelector("#navToday .nav-meta").textContent = t("Daily queue");
+        document.querySelector("#mobileNavToday .mobile-tab-label").textContent = t("Today");
+        document.querySelector("#topNavCrm .top-nav-label").textContent = t("Pipeline");
+        document.querySelector("#navCrm .nav-label").textContent = t("Pipeline");
+        document.querySelector("#navCrm .nav-meta").textContent = t(isAdmin ? "Kanban stages" : "Pipeline and restores");
+        document.querySelector("#mobileNavCrm .mobile-tab-label").textContent = t("Pipeline");
+        document.querySelector("#topNavLeads .top-nav-label").textContent = t("Records");
+        document.querySelector("#navLeads .nav-label").textContent = t("Records");
+        document.querySelector("#navLeads .nav-meta").textContent = t(isAdmin ? "Full profiles" : "Full contact records");
         setText("conversationViewTitle", isAdmin ? "Conversations" : "Inbox");
         setText(
           "conversationViewSubtitle",
           isAdmin
             ? "Inbox-first workflow: resizable three-pane on desktop, tap-to-open thread flow on mobile."
-            : "Review messages, reply directly, archive finished leads, and keep private notes for your team."
+            : "Review messages, reply directly, archive finished conversations, and keep private notes for your team."
         );
-        setText("crmViewTitle", isAdmin ? "CRM" : "Pipeline");
+        setText("crmViewTitle", "Pipeline");
         setText(
           "crmViewSubtitle",
           isAdmin
             ? "Stage board for daily pipeline operations. Drag cards between stages to update status."
-            : "Track active leads, restore archived ones, and keep every lead record in one place."
+            : "Track active opportunities, restore archived ones, and keep every record in one place."
         );
-        setText("leadDetailsViewTitle", isAdmin ? "Leads" : "Lead Details");
+        setText("leadDetailsViewTitle", isAdmin ? "Records" : "Contact Details");
         setText(
           "leadDetailsViewSubtitle",
           isAdmin
-            ? "Lead record with CRM stage, notes, tasks, tags, and timeline."
-            : "Open any lead to see the full record, update the stage, and work through notes and follow-ups."
+            ? "CRM record with stage, notes, tasks, tags, and timeline."
+            : "Open any contact to see the full record, update the stage, and work through notes and follow-ups."
         );
         setText("calendarViewTitle", "Calendar");
         setText(
@@ -87,11 +91,11 @@
           "settingsViewSubtitle",
           isAdmin
             ? "Manage provider defaults, client webhooks, AI guidance, booking availability, and live test tools in one workspace."
-            : "Update your assistant guidance, booking availability, and send yourself a live test lead."
+            : "Update your assistant guidance, booking availability, and send yourself a live test."
         );
         setText("threadNotesSummary", isAdmin ? "Internal notes" : "Private notes");
         setText("threadAuditSummary", isAdmin ? "Activity" : "Technical details");
-        setText("threadDetailsTitle", isAdmin ? "Lead" : "Lead details");
+        setText("threadDetailsTitle", isAdmin ? "Contact" : "Contact details");
         setText("threadHandoffButton", isAdmin ? "Handoff" : "Handoff");
         const threadSendButton = document.getElementById("threadSendManualButton");
         if (threadSendButton) {
@@ -100,7 +104,7 @@
           threadSendButton.setAttribute("title", sendLabel);
         }
         if (!isAdmin) {
-          const clientAllowedViews = new Set(["dashboard", "conversations", "crm", "leads", "calendar", "tasks", "settings"]);
+          const clientAllowedViews = new Set(["dashboard", "today", "conversations", "crm", "leads", "calendar", "tasks", "settings"]);
           if (!clientAllowedViews.has(state.activeView)) {
             state.activeView = "dashboard";
             window.location.hash = "dashboard";
@@ -123,6 +127,7 @@
         }
         updateConversationMobileLayout();
         updateConversationFilterUi();
+        updateChromeContext();
         saveLocalState();
       }
 
@@ -184,8 +189,8 @@
       function routeFromHash() {
         const view = (window.location.hash || `#${state.activeView}`).replace(/^#/, "");
         const allowed = state.session?.role === "client"
-          ? ["dashboard", "conversations", "crm", "leads", "calendar", "tasks", "settings"]
-          : ["dashboard", "clients", "conversations", "crm", "leads", "calendar", "tasks", "logs", "settings", "test-lab"];
+          ? ["dashboard", "today", "conversations", "crm", "leads", "calendar", "tasks", "settings"]
+          : ["dashboard", "today", "clients", "conversations", "crm", "leads", "calendar", "tasks", "logs", "settings", "test-lab"];
         setActiveView(allowed.includes(view) ? view : "dashboard", false);
       }
 
@@ -197,7 +202,7 @@
         return `
           <div class="preview-item" data-action="open-thread" data-lead-id="${item.lead_id}">
             <div class="item-title-row">
-              <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Lead ${item.lead_id}`)}</div>
+              <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Contact ${item.lead_id}`)}</div>
               <div class="actions">
                 ${item.crm_stage ? renderBadge(item.crm_stage, "info") : ""}
                 ${maybeRenderConversationState(item.crm_stage, item.state)}
@@ -221,7 +226,7 @@
               <div class="item-title mono">${escapeHtml(log.event_type)}</div>
               <div class="meta-text">${escapeHtml(formatDateTime(log.created_at))}</div>
             </div>
-            <div class="item-snippet mono">lead ${escapeHtml(log.lead_id ?? "-")}</div>
+            <div class="item-snippet mono">record ${escapeHtml(log.lead_id ?? "-")}</div>
           </div>
         `;
       }
@@ -464,7 +469,9 @@
             await openThread(visibleItems[0].lead_id);
           }
         } else {
-          renderThread();
+          if (!state.thread && state.activeLeadId) {
+            await openThread(state.activeLeadId);
+          }
         }
       }
 

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.db.models import CalendarBooking, Client, Lead, LeadSource
+from app.db.models import CalendarBooking, Client, Lead, LeadSource, MessageAttachment
 from app.db.session import get_session_factory
 
 def _admin_headers() -> dict[str, str]:
@@ -409,6 +409,143 @@ def test_calendar_endpoint_returns_internal_bookings(test_context):
     assert any(item["lead_name"] == "Calendar API Lead" for item in payload["items"])
 
 
+def test_manual_lead_creation_adds_pipeline_record(test_context):
+    response = test_context.client.post(
+        "/ui/api/crm/leads",
+        headers=_admin_headers(),
+        json={
+            "client_key": test_context.client_key,
+            "full_name": "Manual Pipeline Lead",
+            "phone": "+1 (555) 222-1010",
+            "email": "manual@example.com",
+            "city": "Toronto",
+            "crm_stage": "Qualified",
+            "notes": "Created by an operator.",
+        },
+    )
+
+    assert response.status_code == 200
+    lead_payload = response.json()["lead"]
+    assert lead_payload["display_name"] == "Manual Pipeline Lead"
+    assert lead_payload["crm_stage"] == "Qualified"
+
+    leads = test_context.client.get(
+        f"/ui/api/crm/leads?client_key={test_context.client_key}",
+        headers=_admin_headers(),
+    )
+    assert leads.status_code == 200
+    assert lead_payload["lead_id"] in {item["lead_id"] for item in leads.json()["items"]}
+
+    inbox = test_context.client.get(
+        f"/ui/api/conversations?client_key={test_context.client_key}",
+        headers=_admin_headers(),
+    )
+    assert inbox.status_code == 200
+    assert lead_payload["lead_id"] in {item["lead_id"] for item in inbox.json()["items"]}
+
+
+def test_manual_calendar_meeting_lifecycle(test_context):
+    lead_create = test_context.client.post(
+        "/ui/api/crm/leads",
+        headers=_admin_headers(),
+        json={
+            "client_key": test_context.client_key,
+            "full_name": "Manual Meeting Lead",
+            "phone": "+1 (555) 222-2020",
+        },
+    )
+    assert lead_create.status_code == 200
+    lead_id = lead_create.json()["lead"]["lead_id"]
+
+    meeting_create = test_context.client.post(
+        f"/ui/api/clients/{test_context.client_key}/calendar/meetings",
+        headers=_admin_headers(),
+        json={
+            "lead_id": lead_id,
+            "start_at": "2026-06-15T10:30",
+            "duration_minutes": 45,
+            "timezone": "America/Toronto",
+            "title": "Manual discovery call",
+            "notes": "Bring pricing context.",
+            "create_conference_link": True,
+            "send_email_invite": True,
+            "include_meeting_link": True,
+            "send_sms_reminders": True,
+        },
+    )
+    assert meeting_create.status_code == 200
+    meeting = meeting_create.json()["meeting"]
+    assert meeting["lead_id"] == lead_id
+    assert meeting["status"] == "scheduled"
+    assert meeting["source"] == "manual"
+    assert meeting["title"] == "Manual discovery call"
+
+    completed = test_context.client.patch(
+        f"/ui/api/calendar/meetings/{meeting['id']}",
+        headers=_admin_headers(),
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["meeting"]["status"] == "completed"
+
+    calendar = test_context.client.get(
+        f"/ui/api/clients/{test_context.client_key}/calendar",
+        headers=_admin_headers(),
+    )
+    assert calendar.status_code == 200
+    assert any(item["id"] == meeting["id"] and item["status"] == "completed" for item in calendar.json()["items"])
+
+    detail = test_context.client.get(f"/ui/api/crm/leads/{lead_id}", headers=_admin_headers())
+    assert detail.status_code == 200
+    assert detail.json()["lead"]["crm_stage"] == "Meeting Completed"
+
+    deleted = test_context.client.delete(
+        f"/ui/api/calendar/meetings/{meeting['id']}",
+        headers=_admin_headers(),
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+
+    after_delete = test_context.client.get(
+        f"/ui/api/clients/{test_context.client_key}/calendar",
+        headers=_admin_headers(),
+    )
+    assert after_delete.status_code == 200
+    assert meeting["id"] not in {item["id"] for item in after_delete.json()["items"]}
+
+
+def test_manual_calendar_meeting_can_create_lead_inline(test_context):
+    meeting_create = test_context.client.post(
+        f"/ui/api/clients/{test_context.client_key}/calendar/meetings",
+        headers=_admin_headers(),
+        json={
+            "new_lead": {
+                "full_name": "Inline Calendar Lead",
+                "phone": "+1 (555) 222-3030",
+                "email": "inline@example.com",
+                "city": "Ottawa",
+            },
+            "start_at": "2026-06-16T14:00",
+            "duration_minutes": 30,
+            "timezone": "America/Toronto",
+            "title": "Inline intro call",
+            "notes": "Created during meeting scheduling.",
+        },
+    )
+
+    assert meeting_create.status_code == 200
+    meeting = meeting_create.json()["meeting"]
+    assert meeting["lead_name"] == "Inline Calendar Lead"
+    assert meeting["lead_id"]
+
+    leads = test_context.client.get(
+        f"/ui/api/crm/leads?client_key={test_context.client_key}",
+        headers=_admin_headers(),
+    )
+    assert leads.status_code == 200
+    assert meeting["lead_id"] in {item["lead_id"] for item in leads.json()["items"]}
+
+
 def test_owner_calendar_settings_endpoint_updates_client_booking_config(test_context):
     response = test_context.client.patch(
         f"/ui/api/owner/{test_context.client_key}/calendar",
@@ -494,6 +631,67 @@ def test_owner_workspace_can_send_manual_message_with_client_provider(test_conte
     thread_payload = thread.json()
     outbound_bodies = [message["body"] for message in thread_payload["messages"] if message["direction"] == "OUTBOUND"]
     assert any("Checking in personally" in body for body in outbound_bodies)
+
+
+def test_owner_workspace_can_send_manual_media_message(test_context):
+    runtime_update = test_context.client.patch(
+        f"/admin/clients/{test_context.client_key}",
+        headers=_admin_headers(),
+        json={"provider_config": {"public_base_url": "https://owner-demo.ngrok-free.app"}},
+    )
+    assert runtime_update.status_code == 200
+
+    session_factory = get_session_factory()
+    with session_factory() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.MANUAL,
+            full_name="Media Contact",
+            phone="+15552224444",
+            email="media@example.com",
+            city="Montreal",
+            form_answers={},
+            raw_payload={"created_from": "manual_media_test"},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.commit()
+        lead_id = lead.id
+
+    response = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/messages/manual-media",
+        headers=_admin_headers(),
+        data={"body": "Voici la photo de la pièce."},
+        files={"media": ("piece.jpg", b"fake-image-bytes", "image/jpeg")},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "GREETED"
+    assert payload["attachments"][0]["media_kind"] == "image"
+    assert payload["attachments"][0]["url"].startswith("/media/public/")
+    assert test_context.fake_sms.sent[-1]["media_urls"][0].startswith("https://owner-demo.ngrok-free.app/media/public/")
+
+    media_response = test_context.client.get(payload["attachments"][0]["url"])
+    assert media_response.status_code == 200
+    assert media_response.content == b"fake-image-bytes"
+    assert media_response.headers["content-type"].startswith("image/jpeg")
+
+    thread = test_context.client.get(
+        f"/ui/api/conversations/{lead_id}/thread",
+        headers=_admin_headers(),
+    )
+    assert thread.status_code == 200
+    thread_payload = thread.json()
+    outbound = [message for message in thread_payload["messages"] if message["direction"] == "OUTBOUND"]
+    assert outbound[-1]["attachments"][0]["filename"] == "piece.jpg"
+    assert outbound[-1]["attachments"][0]["media_kind"] == "image"
+
+    with session_factory() as db:
+        attachment = db.scalar(select(MessageAttachment).where(MessageAttachment.lead_id == lead_id))
+        assert attachment is not None
+        assert attachment.content_type == "image/jpeg"
 
 
 def test_owner_portal_can_view_and_update_ai_context(test_context):

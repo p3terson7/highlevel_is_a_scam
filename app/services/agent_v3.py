@@ -15,6 +15,7 @@ from app.db.models import Client, ConversationStateEnum, Lead, Message, MessageD
 from app.services.agent_v3_helpers import *
 from app.services.agent_v3_types import *
 from app.services.booking import BookingProviderError, BookingService, automated_booking_enabled, booking_mode_label
+from app.services.i18n import client_language, language_instruction
 from app.services.knowledge import build_knowledge_context
 from app.services.lead_summary import normalize_form_answers
 
@@ -202,6 +203,7 @@ class LLMAgentV3:
     def _build_decision_prompt(self, *, client: Client) -> str:
         faq_context = (client.faq_context or "").strip() or "none provided"
         ai_context = (getattr(client, "ai_context", "") or "").strip() or "none provided"
+        workspace_language = client_language(client)
         return (
             f"You are {_ASSISTANT_NAME}, an AI assistant for a client business. "
             "You help leads understand services, answer questions, qualify through conversation, and guide qualified leads to the right next step.\n"
@@ -219,7 +221,11 @@ class LLMAgentV3:
             "- Never ask the lead to repeat a known fact such as scope, service, size, timeline, role, contact preference, or location unless they contradicted it.\n"
             "- acknowledged_form_fact_keys were already mentioned in an outbound reply; do not restate those facts again unless the lead asks or corrects them.\n"
             "- answered_missing_field_keys were already asked and answered; do not ask those same missing-field questions again.\n"
-            f"- On the first outbound SMS, start with: \"Hi {{first_name}}, I'm {_ASSISTANT_NAME}, the assistant for {{business_name}}.\" Then acknowledge the inquiry and help toward an answer or booking.\n"
+            "- Use conversation_context.response_language for the reply language. "
+            f"{language_instruction(workspace_language)}\n"
+            f"- On the first outbound SMS in English, start with: \"Hi {{first_name}}, I'm {_ASSISTANT_NAME}, the assistant for {{business_name}}.\" "
+            f"In French, start with: \"Bonjour {{first_name}}, ici {_ASSISTANT_NAME}, l'assistante de {{business_name}}.\" "
+            "Then acknowledge the inquiry and help toward an answer or booking.\n"
             "- On the first outbound SMS, naturally reference 1-3 important known form facts, then ask one useful missing question or, only for very high intent, offer the next step softly.\n"
             "- Use important_missing_fields and recommended_missing_field to choose the next useful question, but ask only one question at a time.\n"
             "Intent strategy:\n"
@@ -265,10 +271,12 @@ class LLMAgentV3:
     def _build_tool_followup_prompt(self, *, client: Client) -> str:
         faq_context = (client.faq_context or "").strip() or "none provided"
         ai_context = (getattr(client, "ai_context", "") or "").strip() or "none provided"
+        workspace_language = client_language(client)
         return (
             "You are writing the final SMS after a backend tool returned structured booking data.\n"
             "Rules:\n"
             f"- You are {_ASSISTANT_NAME}, the assistant for the business. Never write as the founder, owner, or a human employee.\n"
+            f"- Use conversation_context.response_language for the reply language. {language_instruction(workspace_language)}\n"
             "- Use the tool_result as the source of truth.\n"
             "- Never invent availability or claim a slot is unavailable unless tool_result.match_mode says the request could not be matched exactly.\n"
             "- Mention only times that exist in tool_result.slots.\n"
@@ -298,6 +306,7 @@ class LLMAgentV3:
     ) -> dict[str, Any]:
         normalized_answers = normalize_form_answers(lead.form_answers or {})
         raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+        response_language = client_language(client, lead=lead, inbound_text=inbound_text)
         ai_context = getattr(client, "ai_context", "") or ""
         pricing_context_available = _has_explicit_pricing_context(ai_context)
         prior_memory = QualificationMemory.model_validate(raw_payload.get("qualification_memory") or {})
@@ -351,6 +360,7 @@ class LLMAgentV3:
 
         return {
             "business_name": client.business_name,
+            "response_language": response_language,
             "tone": client.tone,
             "faq_context": client.faq_context or "",
             "ai_context": ai_context,
@@ -898,10 +908,21 @@ class LLMAgentV3:
                 "fallback_reply": result.get("reply_text", ""),
             }
         if tool_call.name == "mark_booked":
-            return {"kind": "booked", "runtime_payload": {"pending_step": None}, "fallback_reply": "Perfect. You're booked."}
+            language = str(context.get("response_language") or "en")
+            return {
+                "kind": "booked",
+                "runtime_payload": {"pending_step": None},
+                "fallback_reply": "Parfait. Votre appel est réservé." if language == "fr" else "Perfect. You're booked.",
+            }
         if tool_call.name == "handoff_to_human":
-            return {"kind": "handoff", "runtime_payload": {"pending_step": None}, "fallback_reply": "Understood. I'll have someone reach out."}
-        return {"kind": "none", "runtime_payload": {}, "fallback_reply": "Understood."}
+            language = str(context.get("response_language") or "en")
+            return {
+                "kind": "handoff",
+                "runtime_payload": {"pending_step": None},
+                "fallback_reply": "Compris. Je vais demander à quelqu'un de vous contacter." if language == "fr" else "Understood. I'll have someone reach out.",
+            }
+        language = str(context.get("response_language") or "en")
+        return {"kind": "none", "runtime_payload": {}, "fallback_reply": "Compris." if language == "fr" else "Understood."}
 
     def _safe_fallback(self, *, client: Client, context: dict[str, Any]) -> AgentResponse:
         _ = client
@@ -925,7 +946,13 @@ class LLMAgentV3:
             asked_question_keys=context.get("asked_question_keys", []),
         )
         if next_key:
-            reply = _QUESTION_SPEC_BY_KEY[next_key].question
+            if str(context.get("response_language") or "en") == "fr":
+                reply = {
+                    "decision_makers": "Êtes-vous la personne qui prend la décision, et est-ce que quelqu'un d'autre devrait participer à l'appel?",
+                    "urgency_driver": "Y a-t-il une échéance ou une date importante derrière cette demande?",
+                }.get(next_key, _QUESTION_SPEC_BY_KEY[next_key].question)
+            else:
+                reply = _QUESTION_SPEC_BY_KEY[next_key].question
             return _finalize_response_with_context(
                 AgentResponse(
                     reply_text=reply,

@@ -58,10 +58,11 @@
         </div>
         <nav class="chrome-nav">
           <button id="topNavDashboard" class="top-nav-item nav-item" data-action="set-view" data-view="dashboard"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg><span class="top-nav-label">Dashboard</span></button>
+          <button id="topNavToday" class="top-nav-item nav-item" data-action="set-view" data-view="today"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/><path d="m5.3 10.3 1.4 1.4 3.8-3.7"/></svg><span class="top-nav-label">Today</span></button>
           <button id="topNavClients" class="top-nav-item nav-item" data-action="set-view" data-view="clients" data-admin-nav="true"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg><span class="top-nav-label">Clients</span></button>
           <button id="topNavConversations" class="top-nav-item nav-item" data-action="set-view" data-view="conversations"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11v7h-6l-3 2v-2h-2z"/></svg><span class="top-nav-label">Inbox</span></button>
-          <button id="topNavCrm" class="top-nav-item nav-item" data-action="set-view" data-view="crm"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5" cy="4.5" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="11.5" r="1"/></svg><span class="top-nav-label">CRM</span></button>
-          <button id="topNavLeads" class="top-nav-item nav-item" data-action="set-view" data-view="leads"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM3 13c0-2.2 2.2-3.5 5-3.5s5 1.3 5 3.5"/></svg><span class="top-nav-label">Leads</span></button>
+          <button id="topNavCrm" class="top-nav-item nav-item" data-action="set-view" data-view="crm"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5" cy="4.5" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="11.5" r="1"/></svg><span class="top-nav-label">Pipeline</span></button>
+          <button id="topNavLeads" class="top-nav-item nav-item" data-action="set-view" data-view="leads"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM3 13c0-2.2 2.2-3.5 5-3.5s5 1.3 5 3.5"/></svg><span class="top-nav-label">Records</span></button>
           <button id="topNavCalendar" class="top-nav-item nav-item" data-action="set-view" data-view="calendar"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/></svg><span class="top-nav-label">Calendar</span></button>
           <button id="topNavTasks" class="top-nav-item nav-item" data-action="set-view" data-view="tasks"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4.5h10v9H3zM5.5 2.5v2M10.5 2.5v2M5.5 8h1.5M5.5 10.5h5"/></svg><span class="top-nav-label">Tasks</span></button>
           <button id="topNavLogs" class="top-nav-item nav-item" data-action="set-view" data-view="logs" data-admin-nav="true"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v11H3zM5.5 5.5h5M5.5 8h5M5.5 10.5h3"/></svg><span class="top-nav-label">Logs</span></button>
@@ -71,13 +72,14 @@
         <div class="chrome-right">
           <div class="search-wrap">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="m10.4 10.4 3.1 3.1"/></svg>
-            <input id="globalSearch" placeholder="Search" />
+            <input id="globalSearch" placeholder="Search workspace" aria-label="Search workspace" />
           </div>
-          <select id="topClientSelector" class="top-client-select"></select>
-          <button id="themeToggle" class="icon-btn ghost" title="Toggle theme">
+          <select id="topClientSelector" class="top-client-select" aria-label="Select client workspace"></select>
+          <button id="topLanguageToggle" class="top-language-toggle" type="button" title="Switch language" aria-label="Switch language">EN</button>
+          <button id="themeToggle" class="icon-btn ghost" title="Toggle theme" aria-label="Toggle theme">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2.5v2M8 11.5v2M3.5 8h2M10.5 8h2M4.7 4.7l1.4 1.4M9.9 9.9l1.4 1.4M11.3 4.7l-1.4 1.4M6.1 9.9l-1.4 1.4"/><circle cx="8" cy="8" r="2.4"/></svg>
           </button>
-          <button id="refreshButton" class="icon-btn ghost" title="Refresh current view">
+          <button id="refreshButton" class="icon-btn ghost" title="Refresh current view" aria-label="Refresh current view">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13 8a5 5 0 1 1-1.2-3.2M13 3.5v3h-3"/></svg>
           </button>
           <button id="logoutButton" class="ghost small">Sign out</button>
@@ -92,7 +94,7 @@
               <div class="brand-title">Lead Ops</div>
               <div class="brand-subtitle">Operator workspace</div>
             </div>
-            <button id="sidebarToggle" class="sidebar-toggle ghost" title="Toggle sidebar">
+            <button id="sidebarToggle" class="sidebar-toggle ghost" title="Toggle sidebar" aria-label="Toggle sidebar">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10M3 8h10M3 12h10"/></svg>
             </button>
           </div>
@@ -102,6 +104,10 @@
             <button id="navDashboard" class="nav-item" data-action="set-view" data-view="dashboard">
               <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg>
               <div class="nav-copy"><div class="nav-label">Dashboard</div><div class="nav-meta">Status and queue</div></div>
+            </button>
+            <button id="navToday" class="nav-item" data-action="set-view" data-view="today">
+              <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/><path d="m5.3 10.3 1.4 1.4 3.8-3.7"/></svg>
+              <div class="nav-copy"><div class="nav-label">Today</div><div class="nav-meta">Daily queue</div></div>
             </button>
             <button id="navClients" class="nav-item" data-action="set-view" data-view="clients">
               <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg>
@@ -113,11 +119,11 @@
             </button>
             <button id="navCrm" class="nav-item" data-action="set-view" data-view="crm">
               <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5" cy="4.5" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="11.5" r="1"/></svg>
-              <div class="nav-copy"><div class="nav-label">CRM</div><div class="nav-meta">Pipeline board</div></div>
+              <div class="nav-copy"><div class="nav-label">Pipeline</div><div class="nav-meta">Kanban stages</div></div>
             </button>
             <button id="navLeads" class="nav-item" data-action="set-view" data-view="leads">
               <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM3 13c0-2.2 2.2-3.5 5-3.5s5 1.3 5 3.5"/></svg>
-              <div class="nav-copy"><div class="nav-label">Leads</div><div class="nav-meta">CRM records</div></div>
+              <div class="nav-copy"><div class="nav-label">Records</div><div class="nav-meta">Full profiles</div></div>
             </button>
             <button id="navCalendar" class="nav-item" data-action="set-view" data-view="calendar">
               <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/></svg>
@@ -153,6 +159,67 @@
           <div class="workspace">
             <div id="globalNotice" class="notice" role="status" aria-live="polite"></div>
 
+            <section id="view-today" class="view">
+              <div class="today-shell">
+                <div class="today-hero">
+                  <div>
+                    <div id="todayKicker" class="dashboard-kicker">Daily command center</div>
+                    <h2 id="todayTitle">Today</h2>
+                    <div id="todaySubtitle" class="surface-subtitle">Meetings, follow-ups, fresh demand, and the opportunities that need attention now.</div>
+                  </div>
+                  <div id="todayHeroPills" class="actions"></div>
+                </div>
+
+                <div id="todayStats" class="today-stat-grid"></div>
+
+                <div class="today-grid">
+                  <div class="surface today-panel">
+                    <div class="surface-title">
+                      <div>
+                        <h3 id="todayTasksTitle">Priority work</h3>
+                        <div id="todayTasksSubtitle" class="surface-subtitle">Overdue and due-today follow-ups.</div>
+                      </div>
+                      <button class="small ghost" data-action="set-view" data-view="tasks">Open tasks</button>
+                    </div>
+                    <div id="todayTaskList" class="today-list"></div>
+                  </div>
+
+                  <div class="surface today-panel">
+                    <div class="surface-title">
+                      <div>
+                        <h3 id="todayMeetingsTitle">Meetings today</h3>
+                        <div id="todayMeetingsSubtitle" class="surface-subtitle">Booked calls and manual meetings for the selected workspace.</div>
+                      </div>
+                      <button class="small ghost" data-action="set-view" data-view="calendar">Open calendar</button>
+                    </div>
+                    <div id="todayMeetingList" class="today-list"></div>
+                  </div>
+
+                  <div class="surface today-panel">
+                    <div class="surface-title">
+                      <div>
+                        <h3 id="todayHotTitle">Hot opportunities</h3>
+                        <div id="todayHotSubtitle" class="surface-subtitle">Highest score and value signals in the active pipeline.</div>
+                      </div>
+                      <button class="small ghost" data-action="set-view" data-view="crm">Open pipeline</button>
+                    </div>
+                    <div id="todayHotList" class="today-list"></div>
+                  </div>
+
+                  <div class="surface today-panel">
+                    <div class="surface-title">
+                      <div>
+                        <h3 id="todayInboxTitle">Recent conversations</h3>
+                        <div id="todayInboxSubtitle" class="surface-subtitle">Fresh messages and recently active contacts.</div>
+                      </div>
+                      <button class="small ghost" data-action="set-view" data-view="conversations">Open inbox</button>
+                    </div>
+                    <div id="todayConversationList" class="today-list"></div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
             <section id="view-dashboard" class="view">
               <div class="dashboard-shell">
                 <div class="dashboard-hero">
@@ -171,7 +238,7 @@
                     <div class="dashboard-trend-card">
                       <div class="surface-title">
                         <div>
-                          <h3>Lead generation</h3>
+                          <h3>Acquisition</h3>
                           <div class="surface-subtitle">Last 6 weeks</div>
                         </div>
                       </div>
@@ -186,7 +253,7 @@
                       <div class="surface-title">
                         <div>
                           <h3>Source mix</h3>
-                          <div class="surface-subtitle">Where lead volume is coming from right now.</div>
+                          <div class="surface-subtitle">Where demand is coming from right now.</div>
                         </div>
                       </div>
                       <div id="dashboardSourceBreakdown" class="dashboard-distribution-list"></div>
@@ -195,7 +262,7 @@
                       <div class="surface-title">
                         <div>
                           <h3>Ad campaign monitor</h3>
-                          <div class="surface-subtitle">Facebook Lead Ads performance imported by Zapier.</div>
+                          <div class="surface-subtitle">Facebook campaign performance imported by Zapier.</div>
                         </div>
                       </div>
                       <div id="dashboardCampaignPerformance" class="dashboard-campaign-card"></div>
@@ -214,11 +281,11 @@
                   <div class="surface dashboard-panel">
                     <div class="surface-title">
                       <div>
-                        <h3>Latest leads acquired</h3>
-                        <div id="dashboardLatestLeadsSubtitle" class="surface-subtitle">See immediately whether fresh leads came in overnight.</div>
+                        <h3>Latest opportunities</h3>
+                        <div id="dashboardLatestLeadsSubtitle" class="surface-subtitle">See immediately whether fresh demand came in overnight.</div>
                       </div>
                       <div class="actions">
-                        <button class="small ghost" data-action="set-view" data-view="leads">Open leads</button>
+                        <button class="small ghost" data-action="set-view" data-view="leads">Open records</button>
                       </div>
                     </div>
                     <div id="dashboardLatestLeadsSummary" class="dashboard-lead-summary"></div>
@@ -231,7 +298,7 @@
                     <div class="surface-title">
                       <div>
                         <h3>Pipeline snapshot</h3>
-                        <div class="surface-subtitle">Compact stage distribution across active leads.</div>
+                        <div class="surface-subtitle">Compact stage distribution across active opportunities.</div>
                       </div>
                       <div class="actions">
                         <button class="small ghost" data-action="set-view" data-view="crm">Open pipeline</button>
@@ -299,7 +366,29 @@
                     </div>
 
                     <div id="clientTabEdit" class="tab-panel">
-                      <div class="form-grid-2">
+                      <div id="clientWizard" class="client-wizard">
+                        <div class="client-wizard-head">
+                          <div>
+                            <div class="dashboard-kicker">Client onboarding</div>
+                            <div id="clientWizardTitle" class="client-wizard-title">Setup wizard</div>
+                            <div id="clientWizardHint" class="surface-subtitle">Move through business details, channels, agent guidance, booking, portal access, and review.</div>
+                          </div>
+                          <div class="client-wizard-nav">
+                            <button class="small ghost" data-action="client-wizard-prev">Previous</button>
+                            <button class="small" data-action="client-wizard-next">Next step</button>
+                          </div>
+                        </div>
+                        <div class="client-wizard-steps" role="list">
+                          <button type="button" class="client-wizard-step" data-action="set-client-wizard-step" data-step="business" role="listitem">Business</button>
+                          <button type="button" class="client-wizard-step" data-action="set-client-wizard-step" data-step="channels" role="listitem">Channels</button>
+                          <button type="button" class="client-wizard-step" data-action="set-client-wizard-step" data-step="agent" role="listitem">Agent</button>
+                          <button type="button" class="client-wizard-step" data-action="set-client-wizard-step" data-step="booking" role="listitem">Booking</button>
+                          <button type="button" class="client-wizard-step" data-action="set-client-wizard-step" data-step="portal" role="listitem">Portal</button>
+                          <button type="button" class="client-wizard-step" data-action="set-client-wizard-step" data-step="review" role="listitem">Review</button>
+                        </div>
+                      </div>
+                      <div id="clientWizardReview" class="client-wizard-review hidden"></div>
+                      <div class="form-grid-2" data-client-wizard-section="business">
                         <div>
                           <label for="clientBusinessName">Business name</label>
                           <input id="clientBusinessName" placeholder="Northwind Roofing Co." />
@@ -309,7 +398,7 @@
                           <input id="clientKeyInput" class="mono" placeholder="demo-roofing" />
                         </div>
                       </div>
-                      <div class="form-grid-3">
+                      <div class="form-grid-3" data-client-wizard-section="business">
                         <div>
                           <label for="clientTone">Tone</label>
                           <input id="clientTone" placeholder="reassuring and direct" />
@@ -319,6 +408,15 @@
                           <input id="clientTimezone" placeholder="America/Chicago" />
                         </div>
                         <div>
+                          <label for="clientLanguage">Workspace language</label>
+                          <select id="clientLanguage">
+                            <option value="en">English</option>
+                            <option value="fr">Français</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div class="form-grid-3" data-client-wizard-section="business">
+                        <div>
                           <label for="clientIsActive">Active</label>
                           <select id="clientIsActive">
                             <option value="true">true</option>
@@ -326,7 +424,7 @@
                           </select>
                         </div>
                       </div>
-                      <div class="form-grid-2">
+                      <div class="form-grid-2" data-client-wizard-section="booking">
                         <div>
                           <label for="clientBookingUrl">Booking URL</label>
                           <input id="clientBookingUrl" class="mono" placeholder="https://example.com/book" />
@@ -340,7 +438,7 @@
                           </select>
                         </div>
                       </div>
-                      <div class="detail-card stack">
+                      <div class="detail-card stack" data-client-wizard-section="booking">
                         <div class="title">Internal calendar</div>
                         <div class="surface-subtitle">Set weekly availability windows. The AI will offer these times and book directly into this app.</div>
                         <div class="form-grid-3">
@@ -399,7 +497,7 @@
                           <div id="clientBookingPreviewStatus" class="meta-text"></div>
                         </div>
                       </div>
-                      <div class="detail-card stack">
+                      <div class="detail-card stack" data-client-wizard-section="channels">
                         <div class="title">Provider credentials (client scoped)</div>
                         <div class="surface-subtitle">Each business gets isolated Twilio, Zapier, Meta, and LinkedIn credentials. OpenAI is centralized globally.</div>
                         <div class="meta-text">Leave any field blank to keep the current saved value.</div>
@@ -410,7 +508,7 @@
                           </div>
                           <div>
                             <label for="clientProviderTwilioToken">Twilio token</label>
-                            <input id="clientProviderTwilioToken" class="mono" placeholder="token" />
+                            <input id="clientProviderTwilioToken" class="mono" type="password" autocomplete="off" placeholder="token" />
                           </div>
                           <div>
                             <label for="clientProviderTwilioFrom">Twilio from number</label>
@@ -420,11 +518,11 @@
                         <div class="form-grid-3">
                           <div>
                             <label for="clientProviderMetaVerify">Meta verify token</label>
-                            <input id="clientProviderMetaVerify" class="mono" placeholder="meta-verify-token" />
+                            <input id="clientProviderMetaVerify" class="mono" type="password" autocomplete="off" placeholder="meta-verify-token" />
                           </div>
                           <div>
                             <label for="clientProviderMetaAccess">Meta access token</label>
-                            <input id="clientProviderMetaAccess" class="mono" placeholder="EAAB..." />
+                            <input id="clientProviderMetaAccess" class="mono" type="password" autocomplete="off" placeholder="EAAB..." />
                           </div>
                           <div>
                             <label for="clientProviderMetaVersion">Meta API version</label>
@@ -434,11 +532,11 @@
                         <div class="form-grid-3">
                           <div>
                             <label for="clientProviderLinkedinVerify">LinkedIn verify token</label>
-                            <input id="clientProviderLinkedinVerify" class="mono" placeholder="linkedin-verify-token" />
+                            <input id="clientProviderLinkedinVerify" class="mono" type="password" autocomplete="off" placeholder="linkedin-verify-token" />
                           </div>
                           <div>
                             <label for="clientProviderZapierSecret">Zapier webhook secret</label>
-                            <input id="clientProviderZapierSecret" class="mono" placeholder="shared secret" />
+                            <input id="clientProviderZapierSecret" class="mono" type="password" autocomplete="off" placeholder="shared secret" />
                           </div>
                           <div>
                             <label for="clientProviderPublicBaseUrl">Public base URL</label>
@@ -446,18 +544,18 @@
                           </div>
                         </div>
                       </div>
-                      <div class="form-grid-2">
+                      <div class="form-grid-2" data-client-wizard-section="channels">
                         <div>
                           <label for="clientHandoffNumber">Handoff number</label>
                           <input id="clientHandoffNumber" class="mono" placeholder="+15551234567" />
                         </div>
                         <div></div>
                       </div>
-                      <div>
+                      <div data-client-wizard-section="channels">
                         <label for="clientConsentText">Consent text</label>
                         <input id="clientConsentText" placeholder="Reply STOP to opt out. Msg/data rates may apply." />
                       </div>
-                      <div class="detail-card stack">
+                      <div class="detail-card stack" data-client-wizard-section="portal">
                         <div class="title">Client portal login</div>
                         <div class="form-grid-3">
                           <div>
@@ -482,20 +580,20 @@
                         </div>
                         <div id="clientPortalStatus" class="meta-text"></div>
                       </div>
-                      <div>
+                      <div data-client-wizard-section="agent">
                         <label for="clientQuestions">Qualification questions</label>
                         <textarea id="clientQuestions"></textarea>
                       </div>
-                      <div>
+                      <div data-client-wizard-section="agent">
                         <label for="clientFaqContext">FAQ / context</label>
                         <textarea id="clientFaqContext"></textarea>
                       </div>
-                      <div>
+                      <div data-client-wizard-section="agent">
                         <label for="clientAiContext">AI Context / Business Playbook</label>
                         <div class="meta-text">Define what you sell, differentiators, pricing rules, guarantees, process, do/don't say guidance, and preferred tone. This is the same per-client field shown in Settings.</div>
-                        <textarea id="clientAiContext" placeholder="Example:\n- We run paid ads + AI follow-up + CRM sync for local service businesses.\n- Emphasize qualified pipeline over vanity lead volume.\n- Never guarantee results or quote fixed pricing over SMS.\n- Ask one diagnostic question per message.\n- Preferred tone: concise, confident, helpful."></textarea>
+                        <textarea id="clientAiContext" placeholder="Example:\n- We run paid ads + AI follow-up + CRM sync for local service businesses.\n- Emphasize qualified pipeline over vanity volume.\n- Never guarantee results or quote fixed pricing over SMS.\n- Ask one diagnostic question per message.\n- Preferred tone: concise, confident, helpful."></textarea>
                       </div>
-                      <div>
+                      <div data-client-wizard-section="agent">
                         <label for="clientTemplateOverrides">Template overrides JSON</label>
                         <textarea id="clientTemplateOverrides" class="mono"></textarea>
                       </div>
@@ -581,7 +679,22 @@
                   <div class="composer">
                     <div class="composer-field">
                       <div class="composer-combo lead-combo-control">
-                        <textarea id="threadManualMessage" placeholder="Type a direct outbound message to this lead."></textarea>
+                        <textarea id="threadManualMessage" placeholder="Type a direct outbound message to this contact."></textarea>
+                        <input id="threadMediaInput" class="hidden" type="file" accept="image/*,video/*" />
+                        <label
+                          id="threadAttachMediaButton"
+                          class="combo-action composer-attach-btn icon-only"
+                          for="threadMediaInput"
+                          aria-label="Attach image/video"
+                          title="Attach image/video"
+                        >
+                          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path d="M2.5 4.5A2 2 0 0 1 4.5 2.5h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-7Z" stroke="currentColor" stroke-width="1.35"/>
+                            <path d="m3.4 11.4 3.1-3.1 2.1 2.1 1.3-1.3 2.7 2.7" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+                            <circle cx="10.8" cy="5.3" r="1.1" fill="currentColor"/>
+                          </svg>
+                          <span class="sr-only">Attach image/video</span>
+                        </label>
                         <button
                           id="threadSendManualButton"
                           class="combo-action composer-send-btn"
@@ -595,6 +708,10 @@
                           </svg>
                         </button>
                       </div>
+                      <div class="composer-media-row">
+                        <button id="threadClearMediaButton" class="small ghost hidden" type="button">Remove media</button>
+                      </div>
+                      <div id="threadMediaPreview" class="composer-media-preview hidden"></div>
                       <div class="composer-foot">
                         <div id="threadComposerHint" class="meta-text"></div>
                         <div id="threadManualStatus" class="meta-text"></div>
@@ -605,7 +722,7 @@
                 <div class="drag-handle" data-split="conversations" data-edge="right"></div>
                 <aside class="pane details-pane">
                   <div class="pane-header">
-                    <div class="pane-title"><h3 id="threadDetailsTitle">Lead</h3></div>
+                    <div class="pane-title"><h3 id="threadDetailsTitle">Contact</h3></div>
                     <div class="actions">
                       <button id="threadHandoffButton" class="small">Handoff</button>
                       <button id="threadArchiveButton" class="small ghost hidden">Archive</button>
@@ -637,7 +754,7 @@
                         </div>
                         <div class="lead-combo-control lead-stage-control">
                           <select id="threadCrmStageSelect">
-                            <option value="New Lead">New Lead</option>
+                            <option value="New Lead">New</option>
                             <option value="Contacted">Contacted</option>
                             <option value="Qualified">Qualified</option>
                             <option value="Meeting Booked">Meeting Booked</option>
@@ -687,7 +804,7 @@
                 <div class="surface-header">
                   <div class="surface-title">
                     <div>
-                      <h2 id="crmViewTitle">CRM</h2>
+                      <h2 id="crmViewTitle">Pipeline</h2>
                       <div id="crmViewSubtitle" class="surface-subtitle">Stage board for daily pipeline operations. Drag cards between stages to update status.</div>
                     </div>
                   </div>
@@ -697,7 +814,7 @@
                     <select id="crmClientFilter"></select>
                     <select id="crmStageFilter">
                       <option value="all">All stages</option>
-                      <option value="New Lead">New Lead</option>
+                      <option value="New Lead">New</option>
                       <option value="Contacted">Contacted</option>
                       <option value="Qualified">Qualified</option>
                       <option value="Meeting Booked">Meeting Booked</option>
@@ -706,7 +823,60 @@
                       <option value="Lost">Lost</option>
                     </select>
                   </div>
-                  <div id="crmCountPills" class="toolbar-right"></div>
+                  <div class="toolbar-right">
+                    <button id="crmAddLeadButton" class="small">Add contact</button>
+                    <div id="crmCountPills" class="chip-row"></div>
+                  </div>
+                </div>
+                <div id="crmAddLeadPanel" class="manual-panel hidden">
+                  <div class="manual-panel-head">
+                    <div>
+                      <div class="title">Add contact</div>
+                      <div class="meta-text">Create a manual record without waiting for the automation.</div>
+                    </div>
+                    <button id="crmCancelAddLeadButton" class="small ghost">Close</button>
+                  </div>
+                  <div class="form-grid-3">
+                    <div>
+                      <label for="manualLeadName">Name</label>
+                      <input id="manualLeadName" placeholder="Jane Smith" />
+                    </div>
+                    <div>
+                      <label for="manualLeadPhone">Phone</label>
+                      <input id="manualLeadPhone" placeholder="+15551234567" />
+                    </div>
+                    <div>
+                      <label for="manualLeadEmail">Email</label>
+                      <input id="manualLeadEmail" placeholder="contact@example.com" />
+                    </div>
+                  </div>
+                  <div class="form-grid-3">
+                    <div>
+                      <label for="manualLeadCity">City</label>
+                      <input id="manualLeadCity" placeholder="Toronto" />
+                    </div>
+                    <div>
+                      <label for="manualLeadStage">Stage</label>
+                      <select id="manualLeadStage">
+                        <option value="New Lead">New</option>
+                        <option value="Contacted">Contacted</option>
+                        <option value="Qualified">Qualified</option>
+                        <option value="Meeting Booked">Meeting Booked</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="manualLeadOwner">Owner</label>
+                      <input id="manualLeadOwner" placeholder="Team member" />
+                    </div>
+                  </div>
+                  <div>
+                    <label for="manualLeadNotes">Notes</label>
+                    <textarea id="manualLeadNotes" placeholder="Optional context for the team."></textarea>
+                  </div>
+                  <div class="actions">
+                    <button id="manualLeadCreateButton" class="primary">Create contact</button>
+                    <div id="manualLeadStatus" class="meta-text"></div>
+                  </div>
                 </div>
               </div>
               <div id="crmBoard" class="crm-board"></div>
@@ -717,8 +887,8 @@
                 <div class="surface-header">
                   <div class="surface-title">
                     <div>
-                      <h2 id="leadDetailsViewTitle">Leads</h2>
-                      <div id="leadDetailsViewSubtitle" class="surface-subtitle">Lead record with CRM stage, notes, tasks, tags, and timeline.</div>
+                      <h2 id="leadDetailsViewTitle">Records</h2>
+                      <div id="leadDetailsViewSubtitle" class="surface-subtitle">CRM record with stage, notes, tasks, tags, and timeline.</div>
                     </div>
                   </div>
                 </div>
@@ -727,7 +897,7 @@
               <div class="two-column-shell split-shell lead-details-shell" style="flex: 1 1 auto; min-height: 0;">
                 <aside class="pane">
                   <div class="pane-header">
-                    <div class="pane-title"><h3>All leads</h3></div>
+                    <div class="pane-title"><h3>All contacts</h3></div>
                     <div class="actions">
                       <button id="crmLeadArchiveToggleButton" class="small ghost">Archived</button>
                       <span id="crmLeadCount" class="badge"></span>
@@ -741,7 +911,7 @@
                   <div class="pane-header">
                     <div class="pane-title lead-detail-header">
                         <div class="lead-detail-title-row">
-                          <h3 id="crmLeadTitle">Lead record</h3>
+                          <h3 id="crmLeadTitle">Contact record</h3>
                           <div id="crmLeadHeaderStageBadge" class="chip-row"></div>
                         </div>
                         <div id="crmLeadHeaderLinePrimary" class="lead-detail-subline"></div>
@@ -753,7 +923,7 @@
                     </div>
                   </div>
                   <div class="pane-body stack">
-                    <div id="crmLeadEmpty" class="empty-state">Select a lead to view CRM details.</div>
+                    <div id="crmLeadEmpty" class="empty-state">Select a contact to view CRM details.</div>
                     <div id="crmLeadDetail" class="lead-record hidden">
                       <div class="lead-record-layout">
                         <div class="lead-record-main stack">
@@ -775,7 +945,7 @@
                             </div>
                             <div class="lead-combo-control lead-stage-control">
                               <select id="crmLeadStageSelect">
-                                <option value="New Lead">New Lead</option>
+                                <option value="New Lead">New</option>
                                 <option value="Contacted">Contacted</option>
                                 <option value="Qualified">Qualified</option>
                                 <option value="Meeting Booked">Meeting Booked</option>
@@ -808,7 +978,7 @@
                                   <div class="form-grid-2">
                                     <div>
                                       <label for="crmTaskTitle">Task title</label>
-                                      <input id="crmTaskTitle" placeholder="Call this lead" />
+                                      <input id="crmTaskTitle" placeholder="Call this contact" />
                                     </div>
                                     <div>
                                       <label for="crmTaskDueDate">Due date</label>
@@ -888,6 +1058,111 @@
                   <div class="surface calendar-side-card">
                     <div class="surface-title">
                       <div>
+                        <h3>Manual controls</h3>
+                        <div class="surface-subtitle">Add meetings or contacts without handing the flow to the agent.</div>
+                      </div>
+                    </div>
+                    <div class="manual-tabs">
+                      <button id="calendarShowMeetingFormButton" class="small">Add meeting</button>
+                      <button id="calendarShowLeadFormButton" class="small ghost">Add contact</button>
+                    </div>
+                    <div id="calendarManualLeadPanel" class="manual-panel hidden">
+                      <div class="form-grid-2">
+                        <div>
+                          <label for="calendarLeadName">Name</label>
+                          <input id="calendarLeadName" placeholder="Jane Smith" />
+                        </div>
+                        <div>
+                          <label for="calendarLeadPhone">Phone</label>
+                          <input id="calendarLeadPhone" placeholder="+15551234567" />
+                        </div>
+                      </div>
+                      <div class="form-grid-2">
+                        <div>
+                          <label for="calendarLeadEmail">Email</label>
+                          <input id="calendarLeadEmail" placeholder="contact@example.com" />
+                        </div>
+                        <div>
+                          <label for="calendarLeadCity">City</label>
+                          <input id="calendarLeadCity" placeholder="Toronto" />
+                        </div>
+                      </div>
+                      <div class="actions">
+                        <button id="calendarCreateLeadButton" class="primary">Create contact</button>
+                        <div id="calendarLeadStatus" class="meta-text"></div>
+                      </div>
+                    </div>
+                    <div id="calendarMeetingPanel" class="manual-panel hidden">
+                      <div>
+                        <label for="manualMeetingLeadMode">Contact</label>
+                        <select id="manualMeetingLeadMode">
+                          <option value="existing">Existing contact</option>
+                          <option value="new">Create new contact inline</option>
+                        </select>
+                      </div>
+                      <div id="manualMeetingExistingLeadWrap">
+                        <label for="manualMeetingLeadSelect">Select contact</label>
+                        <select id="manualMeetingLeadSelect"></select>
+                      </div>
+                      <div id="manualMeetingNewLeadWrap" class="hidden">
+                        <div class="form-grid-2">
+                          <div>
+                            <label for="manualMeetingNewLeadName">New contact name</label>
+                            <input id="manualMeetingNewLeadName" placeholder="Jane Smith" />
+                          </div>
+                          <div>
+                            <label for="manualMeetingNewLeadPhone">Phone</label>
+                            <input id="manualMeetingNewLeadPhone" placeholder="+15551234567" />
+                          </div>
+                        </div>
+                        <div class="form-grid-2">
+                          <div>
+                            <label for="manualMeetingNewLeadEmail">Email</label>
+                            <input id="manualMeetingNewLeadEmail" placeholder="contact@example.com" />
+                          </div>
+                          <div>
+                            <label for="manualMeetingNewLeadCity">City</label>
+                            <input id="manualMeetingNewLeadCity" placeholder="Toronto" />
+                          </div>
+                        </div>
+                      </div>
+                      <div class="form-grid-2">
+                        <div>
+                          <label for="manualMeetingStart">Date/time</label>
+                          <input id="manualMeetingStart" type="datetime-local" />
+                        </div>
+                        <div>
+                          <label for="manualMeetingDuration">Duration</label>
+                          <input id="manualMeetingDuration" type="number" min="5" max="480" step="5" value="30" />
+                        </div>
+                      </div>
+                      <div>
+                        <label for="manualMeetingTimezone">Timezone</label>
+                        <input id="manualMeetingTimezone" placeholder="America/Toronto" />
+                      </div>
+                      <div>
+                        <label for="manualMeetingTitle">Meeting title</label>
+                        <input id="manualMeetingTitle" placeholder="Strategy call" />
+                      </div>
+                      <div>
+                        <label for="manualMeetingNotes">Notes</label>
+                        <textarea id="manualMeetingNotes" placeholder="Internal meeting notes."></textarea>
+                      </div>
+                      <div class="manual-checkbox-list">
+                        <label class="checkbox-inline"><input id="manualMeetingCreateConference" type="checkbox" /> Create Zoom / Google Meet conference link</label>
+                        <label class="checkbox-inline"><input id="manualMeetingSendInvite" type="checkbox" /> Send email invite to both parties</label>
+                        <label class="checkbox-inline"><input id="manualMeetingIncludeLink" type="checkbox" /> Include meeting link in email if created</label>
+                        <label class="checkbox-inline"><input id="manualMeetingSmsReminders" type="checkbox" /> Send SMS reminders to both parties</label>
+                      </div>
+                      <div class="actions">
+                        <button id="manualMeetingCreateButton" class="primary">Add meeting</button>
+                        <div id="manualMeetingStatus" class="meta-text"></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="surface calendar-side-card">
+                    <div class="surface-title">
+                      <div>
                         <h3>At a glance</h3>
                         <div class="surface-subtitle">A quick planning snapshot so clients can log in and know what needs attention.</div>
                       </div>
@@ -901,6 +1176,7 @@
                         <h3 id="calendarSelectedTitle">Selected day</h3>
                         <div id="calendarSelectedSubtitle" class="surface-subtitle">Meetings and due tasks.</div>
                       </div>
+                      <button id="calendarSelectedAddMeetingButton" class="small">Add meeting</button>
                     </div>
                     <div>
                       <label>Meetings</label>
@@ -930,7 +1206,7 @@
                   <div class="surface-title">
                     <div>
                       <h2>Tasks</h2>
-                      <div class="surface-subtitle">Follow-up queue across leads.</div>
+                      <div class="surface-subtitle">Follow-up queue across contacts.</div>
                     </div>
                   </div>
                 </div>
@@ -953,7 +1229,7 @@
                       <tr>
                         <th>Status</th>
                         <th>Title</th>
-                        <th>Lead</th>
+                        <th>Contact</th>
                         <th>Client</th>
                         <th>Due</th>
                         <th>Stage</th>
@@ -991,7 +1267,7 @@
                       <tr>
                         <th>Time</th>
                         <th>Event</th>
-                        <th>Lead</th>
+                        <th>Record</th>
                         <th>Decision</th>
                         <th></th>
                       </tr>
@@ -1025,7 +1301,7 @@
                   <div class="form-grid-3">
                     <div>
                       <label for="settingsOpenAiKey">OpenAI key</label>
-                      <input id="settingsOpenAiKey" class="mono" placeholder="sk-..." />
+                      <input id="settingsOpenAiKey" class="mono" type="password" autocomplete="off" placeholder="sk-..." />
                     </div>
                     <div>
                       <label for="settingsOpenAiModel">OpenAI model</label>
@@ -1046,6 +1322,15 @@
                 </div>
 
                 <div class="settings-column">
+                  <div id="settingsSetupGuideCard" class="surface stack settings-card settings-guide-card">
+                    <div class="surface-title">
+                      <div>
+                        <h3>Setup guide</h3>
+                        <div class="surface-subtitle">A compact checklist for the workspace pieces that affect live conversations and bookings.</div>
+                      </div>
+                    </div>
+                    <div id="settingsSetupGuideSteps" class="compact-list settings-step-list"></div>
+                  </div>
                   <div id="settingsClientOverviewCard" class="surface stack settings-card hidden">
                     <div class="surface-title">
                       <div>
@@ -1078,7 +1363,7 @@
                     <div class="settings-ai-context-grid">
                       <div>
                         <label for="settingsAiContextInput">AI context</label>
-                        <textarea id="settingsAiContextInput" placeholder="Example:\n- We help local service businesses run paid ads and AI follow-up.\n- Prioritize qualified booked calls over raw lead count.\n- Never guarantee exact lead numbers.\n- Ask one focused question at a time.\n- Tone: concise, direct, practical."></textarea>
+                        <textarea id="settingsAiContextInput" placeholder="Example:\n- We help local service businesses run paid ads and AI follow-up.\n- Prioritize qualified booked calls over raw volume.\n- Never guarantee exact numbers.\n- Ask one focused question at a time.\n- Tone: concise, direct, practical."></textarea>
                       </div>
                       <div>
                         <label for="settingsFaqContextInput">FAQ / factual context (optional)</label>
@@ -1281,7 +1566,7 @@
                   <div class="surface-title">
                     <div>
                       <h2>Test Lab</h2>
-                      <div class="surface-subtitle">Create a demo lead for a selected client, then run the business-trained agent in a controlled sandbox.</div>
+                      <div class="surface-subtitle">Create a demo contact for a selected client, then run the business-trained agent in a controlled sandbox.</div>
                     </div>
                   </div>
                 </div>
@@ -1294,7 +1579,7 @@
                       <span class="test-lab-step">1</span>
                       <div>
                         <h3 class="test-lab-section-title">Choose client</h3>
-                        <div class="surface-subtitle">The sandbox lead will use this client's AI training, runtime settings, and business context.</div>
+                        <div class="surface-subtitle">The sandbox contact will use this client's AI training, runtime settings, and business context.</div>
                       </div>
                     </div>
                     <div>
@@ -1308,14 +1593,14 @@
                     <div class="test-lab-section-header">
                       <span class="test-lab-step">2</span>
                       <div>
-                        <h3 class="test-lab-section-title">Customize lead details and form answers</h3>
+                        <h3 class="test-lab-section-title">Customize contact details and form answers</h3>
                         <div class="surface-subtitle">Use the same qualification context you want the agent to react to during the call.</div>
                       </div>
                     </div>
                     <div class="form-grid-2">
                       <div>
-                        <label for="labLeadName">Lead name</label>
-                        <input id="labLeadName" placeholder="Strategy Call Lead" />
+                        <label for="labLeadName">Contact name</label>
+                        <input id="labLeadName" placeholder="Strategy Call Contact" />
                       </div>
                       <div>
                         <label for="labLeadPhone">Phone</label>
@@ -1325,7 +1610,7 @@
                     <div class="form-grid-2">
                       <div>
                         <label for="labLeadEmail">Email</label>
-                        <input id="labLeadEmail" placeholder="lead@example.com" />
+                        <input id="labLeadEmail" placeholder="contact@example.com" />
                       </div>
                       <div>
                         <label for="labLeadCity">City</label>
@@ -1355,7 +1640,7 @@
                       <button type="button" class="test-lab-mode-card active" data-action="set-test-mode" data-mode="gpt_only">
                         <div class="test-lab-mode-kicker">Ready now</div>
                         <strong>GPT only</strong>
-                        <span>Creates the lead and lets you answer as the lead inside the app.</span>
+                        <span>Creates the sandbox contact and lets you answer inside the app.</span>
                       </button>
                       <button type="button" class="test-lab-mode-card disabled" data-action="set-test-mode" data-mode="gpt_twilio" aria-disabled="true">
                         <div class="test-lab-mode-kicker">Coming soon</div>
@@ -1375,7 +1660,7 @@
                       <span class="test-lab-step">4</span>
                       <div>
                         <h3 class="test-lab-section-title">Start sandbox</h3>
-                        <div class="surface-subtitle">Creates the lead, gets the first AI reply, opens the inbox thread, and keeps Twilio out of the loop.</div>
+                        <div class="surface-subtitle">Creates the sandbox contact, gets the first AI reply, opens the inbox thread, and keeps Twilio out of the loop.</div>
                       </div>
                     </div>
                     <button id="labStartButton" class="primary">Start GPT sandbox</button>
@@ -1392,6 +1677,10 @@
           <button id="mobileNavDashboard" class="mobile-tab-item nav-item" data-action="set-view" data-view="dashboard">
             <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg>
             <span class="mobile-tab-label">Home</span>
+          </button>
+          <button id="mobileNavToday" class="mobile-tab-item nav-item" data-action="set-view" data-view="today">
+            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/><path d="m5.3 10.3 1.4 1.4 3.8-3.7"/></svg>
+            <span class="mobile-tab-label">Today</span>
           </button>
           <button id="mobileNavClients" class="mobile-tab-item nav-item" data-action="set-view" data-view="clients" data-admin-nav="true">
             <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg>
@@ -1421,6 +1710,7 @@
       </nav>
     </div>
 
+    <script src="/ui/assets/ui-i18n.js"></script>
     <script src="/ui/assets/ui-core.js"></script>
     <script src="/ui/assets/ui-navigation.js"></script>
     <script src="/ui/assets/ui-dashboard.js"></script>

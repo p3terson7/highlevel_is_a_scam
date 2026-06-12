@@ -1,4 +1,7 @@
 from fastapi import APIRouter
+
+from app.services.preciscan_demo_seed import seed_preciscan_demo_data
+
 from .shared import *
 
 router = APIRouter()
@@ -47,5 +50,21 @@ def ui_seed_showcase_client(
         result = seed_showcase_client_data(db, client_key=client_key, reset=reset)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    db.commit()
+    return result
+
+
+@router.post("/ui/api/seed-preciscan")
+def ui_seed_preciscan_demo(
+    reset: bool = Query(default=False),
+    reset_portal: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    _require_admin(settings, admin_token)
+    if not can_seed_demo(settings):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Demo seed is disabled")
+    result = seed_preciscan_demo_data(db, reset=reset, reset_portal=reset_portal)
     db.commit()
     return result
