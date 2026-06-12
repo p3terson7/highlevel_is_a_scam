@@ -123,10 +123,7 @@
         document.getElementById("threadDeleteButton").addEventListener("click", deleteConversation);
         document.getElementById("threadCrmStageSaveButton").addEventListener("click", updateThreadCrmStage);
         document.getElementById("threadTagAddButton").addEventListener("click", () => addCrmTag("thread"));
-        document.getElementById("crmAddLeadButton").addEventListener("click", () => {
-          state.crmAddLeadOpen = true;
-          renderCrmBoard();
-        });
+        document.getElementById("crmAddLeadButton").addEventListener("click", openCrmAddLeadPanel);
         document.getElementById("crmCancelAddLeadButton").addEventListener("click", () => {
           state.crmAddLeadOpen = false;
           renderCrmBoard();
@@ -366,8 +363,7 @@
             return;
           }
           if (action === "crm-open-add-lead") {
-            state.crmAddLeadOpen = true;
-            renderCrmBoard();
+            openCrmAddLeadPanel();
             return;
           }
           if (action === "open-crm-lead") {

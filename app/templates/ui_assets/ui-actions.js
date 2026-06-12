@@ -213,6 +213,19 @@
         if (stage) stage.value = "New Lead";
       }
 
+      function openCrmAddLeadPanel() {
+        state.crmAddLeadOpen = true;
+        if (state.activeView !== "crm") {
+          setActiveView("crm");
+        }
+        renderCrmBoard();
+        window.requestAnimationFrame(() => {
+          const panel = document.getElementById("crmAddLeadPanel");
+          if (panel) panel.scrollIntoView({ block: "start", behavior: "auto" });
+          document.getElementById("manualLeadName")?.focus({ preventScroll: true });
+        });
+      }
+
       async function createManualLead(source = "crm") {
         const clientKey = selectedClientKeyForManualActions();
         if (!clientKey) {
