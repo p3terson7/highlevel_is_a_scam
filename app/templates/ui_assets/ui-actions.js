@@ -97,6 +97,15 @@
         }
       }
 
+      function toggleOpenAiKeyVisibility() {
+        const input = document.getElementById("settingsOpenAiKey");
+        if (!input) return;
+        const shouldReveal = input.type === "password";
+        input.type = shouldReveal ? "text" : "password";
+        setText("settingsOpenAiRevealButton", shouldReveal ? "Hide" : "Reveal");
+        setText("settingsOpenAiKeyStatus", shouldReveal ? "Key visible. Hide it again before sharing your screen." : "");
+      }
+
       async function saveAiContextSettings() {
         if (!state.selectedClientKey) {
           setText("settingsAiContextStatus", "Select a client first.");

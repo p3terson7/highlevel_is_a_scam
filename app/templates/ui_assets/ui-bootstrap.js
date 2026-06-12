@@ -167,6 +167,11 @@
         document.getElementById("crmLeadNoteAddButton").addEventListener("click", addCrmNote);
         document.getElementById("crmTaskCreateButton").addEventListener("click", createCrmTask);
         document.getElementById("saveRuntimeButton").addEventListener("click", saveRuntimeSettings);
+        document.getElementById("settingsOpenAiRevealButton").addEventListener("click", toggleOpenAiKeyVisibility);
+        document.getElementById("settingsOpenAiKey").addEventListener("input", (event) => {
+          const copyButton = document.getElementById("settingsOpenAiCopyButton");
+          if (copyButton) copyButton.disabled = !event.target.value.trim();
+        });
         document.getElementById("saveAiContextButton").addEventListener("click", saveAiContextSettings);
         document.getElementById("ingestKnowledgeButton").addEventListener("click", ingestKnowledgeUrls);
         document.getElementById("refreshKnowledgeButton").addEventListener("click", refreshKnowledgeSettings);
@@ -379,7 +384,14 @@
             return;
           }
           if (action === "copy") {
-            await copyToClipboard(target.dataset.copy);
+            const copyValue = target.id === "settingsOpenAiCopyButton"
+              ? document.getElementById("settingsOpenAiKey")?.value.trim()
+              : target.dataset.copy;
+            if (!copyValue) {
+              showNotice("Nothing to copy.", "warn");
+              return;
+            }
+            await copyToClipboard(copyValue);
           }
         });
         window.addEventListener("hashchange", routeFromHash);

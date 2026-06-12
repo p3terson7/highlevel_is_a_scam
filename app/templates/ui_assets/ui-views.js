@@ -1356,7 +1356,18 @@
         const isAdmin = !isClientRole();
         const runtime = state.runtime;
         if (isAdmin && runtime) {
-          document.getElementById("settingsOpenAiKey").value = runtime.openai_api_key || "";
+          const openAiKey = runtime.openai_api_key || "";
+          const openAiKeyInput = document.getElementById("settingsOpenAiKey");
+          const openAiCopyButton = document.getElementById("settingsOpenAiCopyButton");
+          if (openAiKeyInput) {
+            openAiKeyInput.value = openAiKey;
+            openAiKeyInput.type = "password";
+          }
+          if (openAiCopyButton) {
+            openAiCopyButton.disabled = !openAiKey;
+          }
+          setText("settingsOpenAiRevealButton", "Reveal");
+          setText("settingsOpenAiKeyStatus", openAiKey ? "Key loaded for admins." : "No OpenAI key configured.");
           document.getElementById("settingsOpenAiModel").value = runtime.openai_model || "gpt-4.1-mini";
           document.getElementById("settingsAiMode").value = "auto";
           document.getElementById("settingsRuntimeSummary").innerHTML = [

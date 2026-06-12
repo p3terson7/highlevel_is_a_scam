@@ -4358,6 +4358,28 @@
         padding: 10px;
       }
 
+      .secret-field {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .secret-field input {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
+      .secret-field .small {
+        min-height: 34px;
+        margin: 0;
+        white-space: nowrap;
+      }
+
+      .secret-field-status {
+        min-height: 16px;
+        margin-top: 5px;
+      }
+
       .settings-guide-card {
         background:
           linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 36%, transparent), transparent 56%),
@@ -5292,6 +5314,14 @@
           display: grid;
           grid-template-columns: minmax(0, 1fr) auto auto;
           gap: 6px;
+        }
+
+        .secret-field {
+          flex-wrap: wrap;
+        }
+
+        .secret-field input {
+          flex-basis: 100%;
         }
 
         #topClientSelector,

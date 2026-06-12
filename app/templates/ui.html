@@ -1301,7 +1301,12 @@
                   <div class="form-grid-3">
                     <div>
                       <label for="settingsOpenAiKey">OpenAI key</label>
-                      <input id="settingsOpenAiKey" class="mono" type="password" autocomplete="off" placeholder="sk-..." />
+                      <div class="secret-field">
+                        <input id="settingsOpenAiKey" class="mono" type="password" autocomplete="off" placeholder="sk-..." />
+                        <button id="settingsOpenAiRevealButton" class="small ghost" type="button">Reveal</button>
+                        <button id="settingsOpenAiCopyButton" class="small ghost" type="button" data-action="copy">Copy</button>
+                      </div>
+                      <div id="settingsOpenAiKeyStatus" class="meta-text secret-field-status"></div>
                     </div>
                     <div>
                       <label for="settingsOpenAiModel">OpenAI model</label>
