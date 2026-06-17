@@ -822,7 +822,6 @@
       function activeViewLabel() {
         const labels = {
           dashboard: "Dashboard",
-          today: "Today",
           clients: "Clients",
           conversations: "Inbox",
           crm: "Pipeline",

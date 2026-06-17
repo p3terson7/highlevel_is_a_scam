@@ -47,10 +47,6 @@
         document.getElementById("crmLeadArchiveButton").classList.toggle("hidden", isAdmin);
         document.getElementById("settingsClientOverviewCard").classList.toggle("hidden", isAdmin);
         document.querySelector("#navDashboard .nav-meta").textContent = isAdmin ? "Portfolio and queue" : "Overview, calendar, tasks";
-        document.querySelector("#topNavToday .top-nav-label").textContent = t("Today");
-        document.querySelector("#navToday .nav-label").textContent = t("Today");
-        document.querySelector("#navToday .nav-meta").textContent = t("Daily queue");
-        document.querySelector("#mobileNavToday .mobile-tab-label").textContent = t("Today");
         document.querySelector("#topNavCrm .top-nav-label").textContent = t("Pipeline");
         document.querySelector("#navCrm .nav-label").textContent = t("Pipeline");
         document.querySelector("#navCrm .nav-meta").textContent = t(isAdmin ? "Kanban stages" : "Pipeline and restores");
@@ -104,7 +100,7 @@
           threadSendButton.setAttribute("title", sendLabel);
         }
         if (!isAdmin) {
-          const clientAllowedViews = new Set(["dashboard", "today", "conversations", "crm", "leads", "calendar", "tasks", "settings"]);
+          const clientAllowedViews = new Set(["dashboard", "conversations", "crm", "leads", "calendar", "tasks", "settings"]);
           if (!clientAllowedViews.has(state.activeView)) {
             state.activeView = "dashboard";
             window.location.hash = "dashboard";
@@ -189,9 +185,13 @@
       function routeFromHash() {
         const view = (window.location.hash || `#${state.activeView}`).replace(/^#/, "");
         const allowed = state.session?.role === "client"
-          ? ["dashboard", "today", "conversations", "crm", "leads", "calendar", "tasks", "settings"]
-          : ["dashboard", "today", "clients", "conversations", "crm", "leads", "calendar", "tasks", "logs", "settings", "test-lab"];
-        setActiveView(allowed.includes(view) ? view : "dashboard", false);
+          ? ["dashboard", "conversations", "crm", "leads", "calendar", "tasks", "settings"]
+          : ["dashboard", "clients", "conversations", "crm", "leads", "calendar", "tasks", "logs", "settings", "test-lab"];
+        const nextView = allowed.includes(view) ? view : "dashboard";
+        setActiveView(nextView, false);
+        if (view !== nextView) {
+          window.location.hash = nextView;
+        }
       }
 
       function renderPreviewConversation(item, includeClient = true) {

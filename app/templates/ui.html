@@ -9,6 +9,9 @@
     <link rel="stylesheet" href="/ui/assets/ui.css" />
   </head>
   <body data-theme="light">
+    <div class="app-background" aria-hidden="true">
+    </div>
+
     <div id="loginOverlay" class="login-overlay">
       <div class="login-card stack">
         <div class="login-title">
@@ -58,7 +61,6 @@
         </div>
         <nav class="chrome-nav">
           <button id="topNavDashboard" class="top-nav-item nav-item" data-action="set-view" data-view="dashboard"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg><span class="top-nav-label">Dashboard</span></button>
-          <button id="topNavToday" class="top-nav-item nav-item" data-action="set-view" data-view="today"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/><path d="m5.3 10.3 1.4 1.4 3.8-3.7"/></svg><span class="top-nav-label">Today</span></button>
           <button id="topNavClients" class="top-nav-item nav-item" data-action="set-view" data-view="clients" data-admin-nav="true"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg><span class="top-nav-label">Clients</span></button>
           <button id="topNavConversations" class="top-nav-item nav-item" data-action="set-view" data-view="conversations"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11v7h-6l-3 2v-2h-2z"/></svg><span class="top-nav-label">Inbox</span></button>
           <button id="topNavCrm" class="top-nav-item nav-item" data-action="set-view" data-view="crm"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5" cy="4.5" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="11.5" r="1"/></svg><span class="top-nav-label">Pipeline</span></button>
@@ -104,10 +106,6 @@
             <button id="navDashboard" class="nav-item" data-action="set-view" data-view="dashboard">
               <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg>
               <div class="nav-copy"><div class="nav-label">Dashboard</div><div class="nav-meta">Status and queue</div></div>
-            </button>
-            <button id="navToday" class="nav-item" data-action="set-view" data-view="today">
-              <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/><path d="m5.3 10.3 1.4 1.4 3.8-3.7"/></svg>
-              <div class="nav-copy"><div class="nav-label">Today</div><div class="nav-meta">Daily queue</div></div>
             </button>
             <button id="navClients" class="nav-item" data-action="set-view" data-view="clients">
               <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg>
@@ -159,73 +157,11 @@
           <div class="workspace">
             <div id="globalNotice" class="notice" role="status" aria-live="polite"></div>
 
-            <section id="view-today" class="view">
-              <div class="today-shell">
-                <div class="today-hero">
-                  <div>
-                    <div id="todayKicker" class="dashboard-kicker">Daily command center</div>
-                    <h2 id="todayTitle">Today</h2>
-                    <div id="todaySubtitle" class="surface-subtitle">Meetings, follow-ups, fresh demand, and the opportunities that need attention now.</div>
-                  </div>
-                  <div id="todayHeroPills" class="actions"></div>
-                </div>
-
-                <div id="todayStats" class="today-stat-grid"></div>
-
-                <div class="today-grid">
-                  <div class="surface today-panel">
-                    <div class="surface-title">
-                      <div>
-                        <h3 id="todayTasksTitle">Priority work</h3>
-                        <div id="todayTasksSubtitle" class="surface-subtitle">Overdue and due-today follow-ups.</div>
-                      </div>
-                      <button class="small ghost" data-action="set-view" data-view="tasks">Open tasks</button>
-                    </div>
-                    <div id="todayTaskList" class="today-list"></div>
-                  </div>
-
-                  <div class="surface today-panel">
-                    <div class="surface-title">
-                      <div>
-                        <h3 id="todayMeetingsTitle">Meetings today</h3>
-                        <div id="todayMeetingsSubtitle" class="surface-subtitle">Booked calls and manual meetings for the selected workspace.</div>
-                      </div>
-                      <button class="small ghost" data-action="set-view" data-view="calendar">Open calendar</button>
-                    </div>
-                    <div id="todayMeetingList" class="today-list"></div>
-                  </div>
-
-                  <div class="surface today-panel">
-                    <div class="surface-title">
-                      <div>
-                        <h3 id="todayHotTitle">Hot opportunities</h3>
-                        <div id="todayHotSubtitle" class="surface-subtitle">Highest score and value signals in the active pipeline.</div>
-                      </div>
-                      <button class="small ghost" data-action="set-view" data-view="crm">Open pipeline</button>
-                    </div>
-                    <div id="todayHotList" class="today-list"></div>
-                  </div>
-
-                  <div class="surface today-panel">
-                    <div class="surface-title">
-                      <div>
-                        <h3 id="todayInboxTitle">Recent conversations</h3>
-                        <div id="todayInboxSubtitle" class="surface-subtitle">Fresh messages and recently active contacts.</div>
-                      </div>
-                      <button class="small ghost" data-action="set-view" data-view="conversations">Open inbox</button>
-                    </div>
-                    <div id="todayConversationList" class="today-list"></div>
-                  </div>
-                </div>
-              </div>
-            </section>
-
             <section id="view-dashboard" class="view">
               <div class="dashboard-shell">
                 <div class="dashboard-hero">
                   <div class="dashboard-hero-grid">
                     <div class="dashboard-hero-main">
-                      <div id="dashboardHeroKicker" class="dashboard-kicker">Overview</div>
                       <div class="dashboard-hero-head">
                         <div class="dashboard-hero-copy">
                           <h2 id="dashboardHeroTitle">Dashboard</h2>
@@ -249,7 +185,7 @@
 
                 <div class="dashboard-main-grid">
                   <div class="stack">
-                    <div class="surface dashboard-panel">
+                    <div class="surface dashboard-panel dashboard-panel-soft dashboard-source-panel">
                       <div class="surface-title">
                         <div>
                           <h3>Source mix</h3>
@@ -258,7 +194,7 @@
                       </div>
                       <div id="dashboardSourceBreakdown" class="dashboard-distribution-list"></div>
                     </div>
-                    <div class="surface dashboard-panel">
+                    <div class="surface dashboard-panel dashboard-panel-medium dashboard-campaign-panel">
                       <div class="surface-title">
                         <div>
                           <h3>Ad campaign monitor</h3>
@@ -267,7 +203,7 @@
                       </div>
                       <div id="dashboardCampaignPerformance" class="dashboard-campaign-card"></div>
                     </div>
-                    <div class="surface dashboard-panel">
+                    <div class="surface dashboard-panel dashboard-panel-medium dashboard-upcoming-panel">
                       <div class="surface-title">
                         <div>
                           <h3>Upcoming</h3>
@@ -278,7 +214,7 @@
                     </div>
                   </div>
 
-                  <div class="surface dashboard-panel">
+                  <div class="surface dashboard-panel dashboard-panel-light dashboard-latest-panel">
                     <div class="surface-title">
                       <div>
                         <h3>Latest opportunities</h3>
@@ -294,7 +230,7 @@
                 </div>
 
                 <div class="dashboard-secondary-grid">
-                  <div class="surface dashboard-panel">
+                  <div class="surface dashboard-panel dashboard-panel-soft dashboard-pipeline-panel">
                     <div class="surface-title">
                       <div>
                         <h3>Pipeline snapshot</h3>
@@ -1683,10 +1619,6 @@
           <button id="mobileNavDashboard" class="mobile-tab-item nav-item" data-action="set-view" data-view="dashboard">
             <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg>
             <span class="mobile-tab-label">Home</span>
-          </button>
-          <button id="mobileNavToday" class="mobile-tab-item nav-item" data-action="set-view" data-view="today">
-            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/><path d="m5.3 10.3 1.4 1.4 3.8-3.7"/></svg>
-            <span class="mobile-tab-label">Today</span>
           </button>
           <button id="mobileNavClients" class="mobile-tab-item nav-item" data-action="set-view" data-view="clients" data-admin-nav="true">
             <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg>

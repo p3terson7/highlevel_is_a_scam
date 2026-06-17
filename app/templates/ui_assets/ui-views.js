@@ -88,7 +88,6 @@
             </div>
           `;
         }).join("");
-        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function manualLeadOptions() {
@@ -408,7 +407,6 @@
               `;
             }).join("")
           : `<tr><td colspan="7">${renderEmptyState("No tasks match the current filters.", [], { compact: true })}</td></tr>`;
-        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function ensureCalendarFocus(timeZone) {
@@ -644,7 +642,6 @@
               return agendaTaskItem(task, timeZone, tone);
             }).join("")
           : renderEmptyState("No open tasks right now.", [], { compact: true });
-        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function readCalendarConfigFromForm(prefix) {
@@ -1133,7 +1130,6 @@
             }).join("")
           : `<div class="empty-state"><div>${isClientRole() && archivedHiddenCount ? "Your active inbox is clear. Archived contacts stay in Pipeline until you restore them." : "No conversations match the current filters."}</div><div class="actions" style="margin-top: 8px;"><button class="small ghost" data-action="clear-conversation-filters">Clear filters</button></div></div>`;
         updateConversationMobileLayout();
-        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function renderThread() {
@@ -1335,7 +1331,7 @@
           ["last inbound", state.logEvents.last_sms_inbound_at],
           ["last outbound", state.logEvents.last_sms_outbound_at],
           ["last AI", state.logEvents.last_ai_decision_at],
-        ].map(([label, value]) => `<div class="surface stat-card"><div class="label">${escapeHtml(label)}</div><div class="value" style="font-size: 14px;">${escapeHtml(formatLongDateTime(value))}</div></div>`).join("");
+        ].map(([label, value]) => `<div class="surface stat-card compact-stat"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(formatLongDateTime(value))}</div></div>`).join("");
 
         const q = state.globalSearch.trim().toLowerCase();
         const logs = state.logs.filter((log) => !q || JSON.stringify(log).toLowerCase().includes(q));
@@ -1497,7 +1493,7 @@
                 ["Timezone", clientConfig.timezone || "-"],
                 ["Messages", formatDeliveryModeLabel(state.ownerWorkspace?.delivery_mode || "mock")],
                 ["Booking", formatBookingModeLabel(clientConfig.booking_mode || "link")],
-              ].map(([label, value]) => `<div class="detail-card"><div class="label">${escapeHtml(label)}</div><div class="value" style="margin-top: 6px; font-size: 18px; font-weight: 600;">${escapeHtml(value)}</div></div>`).join("")
+              ].map(([label, value]) => `<div class="detail-card settings-overview-card"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`).join("")
             : '<div class="empty-state">Workspace details are loading.</div>';
           setText(
             "settingsClientOverviewNote",

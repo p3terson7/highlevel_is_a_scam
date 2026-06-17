@@ -17,6 +17,7 @@ _UI_ASSET_TYPES = {
     "ui-views.js": "application/javascript; charset=utf-8",
     "ui-actions.js": "application/javascript; charset=utf-8",
     "ui-bootstrap.js": "application/javascript; charset=utf-8",
+    "landscape.jpg": "image/jpeg",
 }
 
 
@@ -35,6 +36,10 @@ def ui_asset(asset_name: str) -> Response:
     media_type = _UI_ASSET_TYPES.get(asset_name)
     if media_type is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="UI asset not found")
-    response = Response((_UI_ASSET_DIR / asset_name).read_text(encoding="utf-8"), media_type=media_type)
+    asset_path = _UI_ASSET_DIR / asset_name
+    if media_type.startswith("image/"):
+        response = Response(asset_path.read_bytes(), media_type=media_type)
+    else:
+        response = Response(asset_path.read_text(encoding="utf-8"), media_type=media_type)
     response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
