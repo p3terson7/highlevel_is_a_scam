@@ -710,6 +710,7 @@
           meta_graph_api_version: document.getElementById("clientProviderMetaVersion").value.trim(),
           linkedin_verify_token: document.getElementById("clientProviderLinkedinVerify").value.trim(),
           zapier_webhook_secret: document.getElementById("clientProviderZapierSecret").value.trim(),
+          zapier_booking_webhook_url: document.getElementById("clientProviderZapierBookingWebhookUrl").value.trim(),
           public_base_url: document.getElementById("clientProviderPublicBaseUrl").value.trim(),
         };
         const providerConfig = {};
@@ -768,6 +769,7 @@
         document.getElementById("clientProviderMetaVersion").value = "v22.0";
         document.getElementById("clientProviderLinkedinVerify").value = "";
         document.getElementById("clientProviderZapierSecret").value = "";
+        document.getElementById("clientProviderZapierBookingWebhookUrl").value = "";
         document.getElementById("clientProviderPublicBaseUrl").value = "";
         document.getElementById("clientLanguage").value = "en";
       }
@@ -853,6 +855,7 @@
         document.getElementById("clientProviderMetaVersion").value = provider.meta_graph_api_version || "v22.0";
         document.getElementById("clientProviderLinkedinVerify").value = provider.linkedin_verify_token || "";
         document.getElementById("clientProviderZapierSecret").value = provider.zapier_webhook_secret || "";
+        document.getElementById("clientProviderZapierBookingWebhookUrl").value = provider.zapier_booking_webhook_url || "";
         document.getElementById("clientProviderPublicBaseUrl").value = provider.public_base_url || "";
         document.getElementById("clientHandoffNumber").value = data.client.fallback_handoff_number || "";
         document.getElementById("clientConsentText").value = data.client.consent_text || "";
@@ -948,6 +951,7 @@
               ["Meta", clientWizardStatusLabel(clientWizardFieldValue("clientProviderMetaAccess", ""))],
               ["LinkedIn", clientWizardStatusLabel(clientWizardFieldValue("clientProviderLinkedinVerify", ""))],
               ["Zapier", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierSecret", ""))],
+              ["Zapier booking", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierBookingWebhookUrl", ""))],
               ["Handoff", clientWizardStatusLabel(clientWizardFieldValue("clientHandoffNumber", ""))],
             ],
           },
@@ -1571,8 +1575,8 @@
       }
 
       function setTestLabMode(mode) {
-        if (mode !== "gpt_only") {
-          showNotice("That path is planned, but only GPT only is wired for tomorrow's demo.", "info");
+        if (!["gpt_only", "gpt_zapier"].includes(mode)) {
+          showNotice("That path is planned, but not wired yet.", "info");
           return;
         }
         state.testLabMode = mode;
@@ -1580,6 +1584,16 @@
         document.querySelectorAll(".test-lab-mode-card").forEach((node) => {
           node.classList.toggle("active", node.dataset.mode === mode);
         });
+        const startButton = document.getElementById("labStartButton");
+        if (startButton) {
+          startButton.textContent = mode === "gpt_zapier" ? "Start GPT + Zapier sandbox" : "Start GPT sandbox";
+        }
+        const output = document.getElementById("testLabOutput");
+        if (output && !output.textContent.trim()) {
+          output.textContent = mode === "gpt_zapier"
+            ? "Book a meeting in the sandbox thread to see booking planner debug and the Zapier payload here."
+            : "Ask for availability in the sandbox thread to see booking planner debug here. GPT-only mode will not call Zapier.";
+        }
       }
 
       function renderTestLab() {
@@ -1607,9 +1621,11 @@
           return;
         }
         const runtime = state.ownerWorkspace.runtime || {};
+        const providerConfig = state.ownerWorkspace.client.provider_config || {};
         summary.innerHTML = [
           ["Client", state.ownerWorkspace.client.business_name || state.ownerWorkspace.client.client_key],
           ["AI", runtime.ai_configured ? "Configured" : "Mock/offline"],
+          ["Zapier booking", providerConfig.zapier_booking_webhook_url ? "Configured" : "Missing"],
           ["Training", state.ownerWorkspace.client.ai_context ? "Custom context" : "Default guidance"],
         ].map(([label, value]) => `
           <div class="test-lab-summary-card">

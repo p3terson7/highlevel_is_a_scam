@@ -7,6 +7,7 @@ from typing import Any
 
 from app.db.models import Client, ConversationStateEnum, Lead, Message, MessageDirection
 from app.services.agent_v3_types import *
+from app.services.i18n import normalize_language
 from app.services.lead_summary import build_lead_summary_text
 
 def _serialize_message(message: Message) -> dict[str, Any]:
@@ -207,13 +208,27 @@ def _slot_offer_tool_result(*, offer: Any, availability_query: dict[str, Any]) -
     }
 
 
-def _ensure_slot_fallback_line(text: str) -> str:
+def _ensure_slot_fallback_line(text: str, *, language: str = "en") -> str:
+    language = normalize_language(language)
     clean = " ".join(str(text or "").split()).strip()
+    fallback = (
+        "Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux."
+        if language == "fr"
+        else "If none of those work, just send me a time that's better for you."
+    )
     if not clean:
-        return "If none of those work, just send me a time that's better for you."
-    if "if none of those work" in _normalize_text(clean):
+        return fallback
+    if language == "fr":
+        clean = re.sub(
+            r"\s*If none of those work,[^.?!]*(?:[.?!]|$)",
+            "",
+            clean,
+            flags=re.IGNORECASE,
+        ).strip()
+    normalized = _normalize_text(clean)
+    if "if none of those work" in normalized or "si aucune option ne fonctionne" in normalized:
         return clean
-    return f"{clean} If none of those work, just send me a time that's better for you."
+    return f"{clean} {fallback}"
 
 
 def _should_check_fresh_slots(preferences: dict[str, str]) -> bool:
@@ -1109,7 +1124,7 @@ def _extract_slot_choice(inbound_text: str, latest_offer: dict[str, Any] | None)
         start_time = str(slot.get("start_time", "")).strip()
         if blob and any(part.strip() and part.strip() in normalized for part in blob.split("|")):
             return {"slot_start_time": start_time} if start_time else {}
-    time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm))\b", normalized)
+    time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm)|\d{1,2}\s*h\s*\d{0,2})\b", normalized)
     if time_match:
         for slot in slots:
             haystack = _normalize_text(
@@ -1172,7 +1187,7 @@ def _extract_booking_preferences(text: str) -> dict[str, str]:
         preferences["preferred_period"] = "evening"
 
     range_match = re.search(
-        r"\b(?:between|from)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(?:and|to)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b",
+        r"\b(?:between|from|entre|de)\s+(\d{1,2}(?::\d{2}|\s*h\s*\d{0,2})?\s*(?:am|pm)?)\s+(?:and|to|et|à|a)\s+(\d{1,2}(?::\d{2}|\s*h\s*\d{0,2})?\s*(?:am|pm)?)\b",
         normalized,
     )
     if range_match:
@@ -1182,7 +1197,7 @@ def _extract_booking_preferences(text: str) -> dict[str, str]:
         if range_pair:
             preferences["range_start"], preferences["range_end"] = range_pair
 
-    time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm))\b", normalized)
+    time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm)|\d{1,2}\s*h\s*\d{0,2})\b", normalized)
     if time_match and "range_start" not in preferences:
         preferences["exact_time"] = time_match.group(1)
 
@@ -1220,18 +1235,18 @@ def _normalize_requested_day(value: str | None) -> str | None:
 
 
 def _normalize_time_range(start_raw: str, end_raw: str) -> tuple[str, str] | None:
-    start_match = re.search(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", start_raw)
-    end_match = re.search(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", end_raw)
+    start_match = re.search(r"^(\d{1,2})(?::(\d{2})|\s*h\s*(\d{1,2})?)?\s*(am|pm)?$", start_raw)
+    end_match = re.search(r"^(\d{1,2})(?::(\d{2})|\s*h\s*(\d{1,2})?)?\s*(am|pm)?$", end_raw)
     if not start_match or not end_match:
         return None
 
     start_hour = int(start_match.group(1))
-    start_minute = int(start_match.group(2) or "0")
-    start_meridiem = (start_match.group(3) or "").strip()
+    start_minute = int(start_match.group(2) or start_match.group(3) or "0")
+    start_meridiem = (start_match.group(4) or "").strip()
 
     end_hour = int(end_match.group(1))
-    end_minute = int(end_match.group(2) or "0")
-    end_meridiem = (end_match.group(3) or "").strip()
+    end_minute = int(end_match.group(2) or end_match.group(3) or "0")
+    end_meridiem = (end_match.group(4) or "").strip()
 
     if not start_meridiem and end_meridiem:
         if end_meridiem == "pm" and start_hour > end_hour:

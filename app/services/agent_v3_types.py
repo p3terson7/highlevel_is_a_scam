@@ -57,8 +57,10 @@ _DECISION_MAKER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _BOOKING_INTENT_PATTERN = re.compile(
-    r"\b(yes|yeah|yep|sure|sounds good|works for me|let'?s do it|book it|go ahead|schedule|book|set it up|confirm|"
-    r"oui|certainement|ça marche|ca marche|allons-y|r[ée]server?|planifier|confirmer?|prenez le rendez-vous)\b",
+    r"\b(yes|yeah|yep|sure|sounds good|works for me|let'?s do (?:it|that)|book(?: (?:it|that))?|"
+    r"lock (?:it|that) in|go ahead|schedule|set it up|confirm(?: it| that)?|"
+    r"oui|certainement|ça marche|ca marche|allons-y|r[ée]server?|r[ée]servez(?:-le)?|"
+    r"bloque(?:z|r)?(?:-le)?|planifier|confirmer?|confirmez(?:-le)?|prenez le rendez-vous)\b",
     re.IGNORECASE,
 )
 _PRICING_PATTERN = re.compile(r"\b(price|pricing|cost|quote|estimate|how much|rates?|budget|prix|tarif|co[ûu]t|soumission|combien|estimation)\b", re.IGNORECASE)

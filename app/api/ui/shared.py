@@ -83,6 +83,8 @@ _ZAPIER_CONSOLE_EVENTS = {
     "initial_sms_sent",
     "after_hours_initial_sms_sent",
     "initial_sms_skipped",
+    "zapier_booking_webhook_sent",
+    "zapier_booking_webhook_failed",
 }
 _BOOKING_STATES = {ConversationStateEnum.BOOKING_SENT, ConversationStateEnum.BOOKED}
 _CLOSED_STATES = {ConversationStateEnum.BOOKED, ConversationStateEnum.OPTED_OUT}
@@ -216,10 +218,10 @@ class ManualMeetingCreateRequest(BaseModel):
     timezone: str
     title: str
     notes: str | None = None
-    create_conference_link: bool = False
-    send_email_invite: bool = False
-    include_meeting_link: bool = False
-    send_sms_reminders: bool = False
+    create_conference_link: bool = True
+    send_email_invite: bool = True
+    include_meeting_link: bool = True
+    send_sms_reminders: bool = True
 
 
 class ManualMeetingStatusRequest(BaseModel):
@@ -354,12 +356,12 @@ def _parse_local_datetime(value: str, timezone_name: str) -> datetime:
 
 
 def _manual_meeting_options(payload: ManualMeetingCreateRequest) -> dict[str, bool]:
-    create_link = bool(payload.create_conference_link)
+    _ = payload
     return {
-        "create_conference_link": create_link,
-        "send_email_invite": bool(payload.send_email_invite),
-        "include_meeting_link": bool(payload.include_meeting_link and create_link),
-        "send_sms_reminders": bool(payload.send_sms_reminders),
+        "create_conference_link": True,
+        "send_email_invite": True,
+        "include_meeting_link": True,
+        "send_sms_reminders": True,
         "zapier_pending": True,
     }
 

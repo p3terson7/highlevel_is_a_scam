@@ -280,10 +280,10 @@
           timezone: document.getElementById("manualMeetingTimezone").value.trim(),
           title: document.getElementById("manualMeetingTitle").value.trim(),
           notes: document.getElementById("manualMeetingNotes").value.trim(),
-          create_conference_link: document.getElementById("manualMeetingCreateConference").checked,
-          send_email_invite: document.getElementById("manualMeetingSendInvite").checked,
-          include_meeting_link: document.getElementById("manualMeetingIncludeLink").checked,
-          send_sms_reminders: document.getElementById("manualMeetingSmsReminders").checked,
+          create_conference_link: true,
+          send_email_invite: true,
+          include_meeting_link: true,
+          send_sms_reminders: true,
         };
         if (mode === "new") {
           payload.new_lead = {
@@ -305,9 +305,6 @@
         document.getElementById("manualMeetingNotes").value = "";
         document.getElementById("manualMeetingStart").value = "";
         document.getElementById("manualMeetingTimezone").value = state.calendar?.timezone || "America/Toronto";
-        ["manualMeetingCreateConference", "manualMeetingSendInvite", "manualMeetingIncludeLink", "manualMeetingSmsReminders"].forEach((id) => {
-          document.getElementById(id).checked = false;
-        });
         ["manualMeetingNewLeadName", "manualMeetingNewLeadPhone", "manualMeetingNewLeadEmail", "manualMeetingNewLeadCity"].forEach((id) => {
           document.getElementById(id).value = "";
         });
@@ -335,19 +332,59 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
           });
-          setText("manualMeetingStatus", "Meeting added.");
+          const zapierMessage = manualMeetingZapierMessage(result.zapier_booking_webhook);
+          setText("manualMeetingStatus", zapierMessage ? `Meeting added. ${zapierMessage}` : "Meeting added.");
           resetManualMeetingForm();
           state.calendarMeetingPanelOpen = false;
           await Promise.all([loadCalendar(), loadCrmLeads(), loadCrmTasks(), loadConversations(), loadDashboard()]);
+          if (state.selectedClientKey) {
+            try {
+              await loadOwnerWorkspace(state.selectedClientKey);
+            } catch (_error) {
+              // The meeting was created; failing to refresh Zapier diagnostics should not mask that.
+            }
+          }
           if (result.meeting?.lead_id) {
             state.activeCrmLeadId = result.meeting.lead_id;
             saveLocalState();
           }
-          showNotice("Meeting added.", "ok");
+          showNotice(zapierMessage ? `Meeting added. ${zapierMessage}` : "Meeting added.", "ok");
         } catch (error) {
           setText("manualMeetingStatus", `Meeting failed: ${error.message}`);
           showNotice(`Meeting failed: ${error.message}`, "err");
         }
+      }
+
+      function manualMeetingZapierMessage(result) {
+        if (!result || !result.status) return "";
+        if (result.status === "sent") return "Zapier booking webhook sent.";
+        if (result.status === "skipped") {
+          if (result.reason === "not_configured") return "Zapier booking webhook is not configured for this client.";
+          if (result.reason === "already_sent") return "Zapier booking webhook was already sent for this meeting.";
+          return `Zapier booking webhook skipped${result.reason ? `: ${result.reason}` : ""}.`;
+        }
+        if (result.status === "failed") {
+          return `Zapier booking webhook failed${result.reason ? `: ${result.reason}` : ""}.`;
+        }
+        return `Zapier booking webhook status: ${result.status}.`;
+      }
+
+      function sandboxDebugOutput(result) {
+        if (!result || typeof result !== "object") return result;
+        return {
+          status: result.status,
+          lead_id: result.lead_id,
+          state: result.state,
+          crm_stage: result.crm_stage,
+          reply: result.reply || null,
+          booking_debug: result.booking_debug || null,
+          zapier_booking_webhook: result.zapier_booking_webhook || null,
+        };
+      }
+
+      function writeTestLabOutput(result) {
+        const output = document.getElementById("testLabOutput");
+        if (output) output.textContent = JSON.stringify(sandboxDebugOutput(result), null, 2);
       }
 
       async function updateManualMeetingStatus(meetingId, nextStatus) {
@@ -678,8 +715,7 @@
             await Promise.all([loadConversations(), openThread(state.activeLeadId), loadCrmLeads(), loadLogs(state.selectedClientKey), loadDashboard()]);
           }
           if (sandboxThread) {
-            const output = document.getElementById("testLabOutput");
-            if (output) output.textContent = JSON.stringify(result, null, 2);
+            writeTestLabOutput(result);
           }
           showNotice(sandboxThread ? "Sandbox turn completed." : "Manual message sent.", "ok");
         } catch (error) {
@@ -870,9 +906,9 @@
           setText("labStartStatus", "Select a client first.");
           return;
         }
-        if (state.testLabMode !== "gpt_only") {
-          setText("labStartStatus", "Only GPT only is currently implemented.");
-          showNotice("Only GPT only is wired for tomorrow's sandbox.", "info");
+        if (!["gpt_only", "gpt_zapier"].includes(state.testLabMode)) {
+          setText("labStartStatus", "Only GPT only and GPT + Zapier are currently implemented.");
+          showNotice("That test path is still on the roadmap.", "info");
           return;
         }
 
@@ -908,6 +944,7 @@
           state.sandboxLeadId = result.lead_id;
           saveLocalState();
           setText("labStartStatus", `Sandbox started. Contact ${result.lead_id} is open in Conversations.`);
+          writeTestLabOutput(result);
           if (state.session?.role === "client") {
             await Promise.all([loadOwnerWorkspace(clientKey), loadConversations(), loadCrmLeads(), loadCalendar(), loadCrmTasks()]);
           } else {

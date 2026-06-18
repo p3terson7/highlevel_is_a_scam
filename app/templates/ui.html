@@ -475,6 +475,10 @@
                             <input id="clientProviderZapierSecret" class="mono" type="password" autocomplete="off" placeholder="shared secret" />
                           </div>
                           <div>
+                            <label for="clientProviderZapierBookingWebhookUrl">Zapier booking webhook URL</label>
+                            <input id="clientProviderZapierBookingWebhookUrl" class="mono" type="password" autocomplete="off" placeholder="https://hooks.zapier.com/..." />
+                          </div>
+                          <div>
                             <label for="clientProviderPublicBaseUrl">Public base URL</label>
                             <input id="clientProviderPublicBaseUrl" class="mono" placeholder="https://abc123.ngrok-free.dev" />
                           </div>
@@ -1085,11 +1089,8 @@
                         <label for="manualMeetingNotes">Notes</label>
                         <textarea id="manualMeetingNotes" placeholder="Internal meeting notes."></textarea>
                       </div>
-                      <div class="manual-checkbox-list">
-                        <label class="checkbox-inline"><input id="manualMeetingCreateConference" type="checkbox" /> Create Zoom / Google Meet conference link</label>
-                        <label class="checkbox-inline"><input id="manualMeetingSendInvite" type="checkbox" /> Send email invite to both parties</label>
-                        <label class="checkbox-inline"><input id="manualMeetingIncludeLink" type="checkbox" /> Include meeting link in email if created</label>
-                        <label class="checkbox-inline"><input id="manualMeetingSmsReminders" type="checkbox" /> Send SMS reminders to both parties</label>
+                      <div class="helper-card subtle-card">
+                        Conference link creation, calendar invites, meeting-link delivery, and reminders are handled automatically.
                       </div>
                       <div class="actions">
                         <button id="manualMeetingCreateButton" class="primary">Add meeting</button>
@@ -1575,7 +1576,7 @@
                       <span class="test-lab-step">3</span>
                       <div>
                         <h3 class="test-lab-section-title">Test configuration</h3>
-                        <div class="surface-subtitle">Only GPT only is connected for tomorrow. The others are visible as the roadmap.</div>
+                        <div class="surface-subtitle">Run GPT alone, or run GPT with the booking Zapier webhook while keeping Twilio out of the loop.</div>
                       </div>
                     </div>
                     <div class="test-lab-mode-grid">
@@ -1583,6 +1584,11 @@
                         <div class="test-lab-mode-kicker">Ready now</div>
                         <strong>GPT only</strong>
                         <span>Creates the sandbox contact and lets you answer inside the app.</span>
+                      </button>
+                      <button type="button" class="test-lab-mode-card" data-action="set-test-mode" data-mode="gpt_zapier">
+                        <div class="test-lab-mode-kicker">Ready now</div>
+                        <strong>GPT + Zapier only</strong>
+                        <span>Bypasses Twilio, then posts the booking payload to the client's Zapier hook when a meeting is booked.</span>
                       </button>
                       <button type="button" class="test-lab-mode-card disabled" data-action="set-test-mode" data-mode="gpt_twilio" aria-disabled="true">
                         <div class="test-lab-mode-kicker">Coming soon</div>
@@ -1607,6 +1613,16 @@
                     </div>
                     <button id="labStartButton" class="primary">Start GPT sandbox</button>
                     <div id="labStartStatus" class="meta-text"></div>
+                  </div>
+                  <div class="surface stack test-lab-start-card">
+                    <div class="test-lab-section-header">
+                      <span class="test-lab-step">5</span>
+                      <div>
+                        <h3 class="test-lab-section-title">Sandbox debug output</h3>
+                        <div class="surface-subtitle">Shows booking planner reasoning after availability replies, plus the webhook result and JSON payload in GPT + Zapier mode.</div>
+                      </div>
+                    </div>
+                    <pre id="testLabOutput" class="code-output">Start GPT-only or GPT + Zapier, ask for availability in the sandbox thread, then booking planner debug will appear here.</pre>
                   </div>
                 </div>
               </div>

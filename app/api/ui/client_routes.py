@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from .shared import *
+from app.services.zapier_booking import notify_zapier_booking_webhook
 
 router = APIRouter()
 
@@ -235,7 +236,18 @@ def ui_create_manual_meeting(
             detail="This lead already has a scheduled manual meeting. Update or cancel it before adding another.",
         ) from exc
     db.refresh(booking)
-    return {"status": "ok", "meeting": _serialize_calendar_booking(booking, lead)}
+    zapier_result = notify_zapier_booking_webhook(
+        db=db,
+        client=client,
+        lead=lead,
+        booking=booking,
+        trigger="manual_calendar_booking_created",
+    )
+    return {
+        "status": "ok",
+        "meeting": _serialize_calendar_booking(booking, lead),
+        "zapier_booking_webhook": zapier_result,
+    }
 
 
 @router.patch("/ui/api/calendar/meetings/{booking_id}")

@@ -227,6 +227,10 @@ def test_zapier_webhook_parses_blob_payload_into_context_fields(test_context):
         assert lead.form_answers.get("running_ads") == "Yes, Google Ads"
         assert lead.form_answers.get("when_to_start") == "Immediately"
         assert "Getting more leads" in (lead.form_answers.get("biggest_marketing_challenge") or "")
+        assert {
+            "question": "Business Type",
+            "answer": "Software & Technology",
+        } in lead.raw_payload["submitted_form_answers"]
         assert lead.crm_stage == "Contacted"
 
         outbound_messages = db.scalars(

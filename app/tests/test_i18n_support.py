@@ -5,8 +5,9 @@ from sqlalchemy import select
 from app.db.models import Client, ConversationStateEnum, Lead, LeadSource
 from app.db.session import get_session_factory
 from app.services.agent_v3 import LLMAgentV3
+from app.services.agent_v3_helpers import _ensure_slot_fallback_line
 from app.services.booking import BookingService
-from app.services.i18n import client_language, detect_language, format_datetime_for_language
+from app.services.i18n import client_language, detect_language, format_datetime_for_language, remember_lead_language
 from app.services.sms_service import SMSService, load_default_templates
 
 
@@ -45,6 +46,33 @@ def test_client_language_uses_workspace_setting_then_detects_french(test_context
         client.provider_config = {}
         assert detect_language("Bonjour, j'ai une pièce urgente à scanner") == "fr"
         assert client_language(client, inbound_text="Bonjour, merci") == "fr"
+        assert detect_language("10h00") == "fr"
+
+
+def test_client_language_sticks_to_detected_lead_language(test_context):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.provider_config = {}
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.META,
+            full_name="Marc Tremblay",
+            phone="+15145550109",
+            email="marc-stick@example.com",
+            city="Montreal",
+            form_answers={},
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.flush()
+
+        assert remember_lead_language(client, lead, inbound_text="Bonjour, 10h00 fonctionne") == "fr"
+        assert lead.raw_payload["lead_language"] == "fr"
+        assert client_language(client, lead=lead, inbound_text="lock it in") == "fr"
 
 
 def test_sms_templates_render_in_workspace_language(test_context):
@@ -91,7 +119,29 @@ def test_internal_booking_offer_uses_french_copy_and_time_format(test_context):
 
         assert "Je peux réserver un appel directement" in offer.reply_text
         assert "Répondez" in offer.reply_text
+        assert "If none of those work" not in offer.reply_text
+        assert "Times shown" not in offer.reply_text
         assert any(" à " in slot.display_time and " h " in slot.display_time for slot in offer.slots)
+
+
+def test_slot_fallback_line_respects_french_language():
+    reply = _ensure_slot_fallback_line(
+        "Je peux réserver un appel de consultation. J'ai ces créneaux : 1) mercredi 24 juin à 10 h 00.",
+        language="fr",
+    )
+
+    assert "If none of those work" not in reply
+    assert "Si aucune option ne fonctionne" in reply
+
+
+def test_slot_fallback_line_replaces_existing_english_suffix_in_french():
+    reply = _ensure_slot_fallback_line(
+        "Je peux réserver un appel. If none of those work, just send me a time that's better for you.",
+        language="fr",
+    )
+
+    assert "If none of those work" not in reply
+    assert reply.endswith("Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux.")
 
 
 def test_agent_context_and_prompt_include_response_language(test_context):

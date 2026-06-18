@@ -279,6 +279,7 @@ class FakeBookingService:
         exact_time=None,
         range_start=None,
         range_end=None,
+        request_text=None,
         limit: int = 3,
         db=None,
     ):
@@ -290,6 +291,7 @@ class FakeBookingService:
         _ = exact_time
         _ = range_start
         _ = range_end
+        _ = request_text
         _ = db
         slots = [
             type("Slot", (), {"__dict__": {"index": 1, "display_time": "Tue Apr 07 at 10:00 AM", "start_time": "2026-04-07T14:00:00Z", "end_time": "2026-04-07T14:30:00Z"}})(),
@@ -322,6 +324,7 @@ class ExactTimeFallbackBookingService(FakeBookingService):
         exact_time=None,
         range_start=None,
         range_end=None,
+        request_text=None,
         limit: int = 3,
         db=None,
     ):
@@ -333,6 +336,7 @@ class ExactTimeFallbackBookingService(FakeBookingService):
                 "exact_time": exact_time,
                 "range_start": range_start,
                 "range_end": range_end,
+                "request_text": request_text,
                 "limit": limit,
             }
         )

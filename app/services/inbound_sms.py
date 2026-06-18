@@ -16,17 +16,35 @@ from app.db.models import (
     Message,
     MessageDirection,
 )
-from app.services.booking import BookingService, calendar_booking_confirmed, extract_email, handoff_suffix
+from app.services.booking import (
+    BookingService,
+    calendar_booking_confirmed,
+    extract_email,
+    handoff_suffix,
+    looks_like_booking_commitment,
+    looks_like_slot_selection_message,
+)
 from app.services.crm import (
     CRM_STAGE_CONTACTED,
     CRM_STAGE_MEETING_BOOKED,
     progress_crm_stage,
 )
 from app.services.llm_agent import LLMAgent
+from app.services.i18n import remember_lead_language
 from app.services.sms_service import SMSService
+from app.services.zapier_booking import notify_zapier_booking_webhook
 
 _PENDING_STEP_KEY = "pending_step"
+_PENDING_RESCHEDULE_KEY = "pending_reschedule_confirmation"
+_RESCHEDULE_PENDING_STEP = "reschedule_confirmation_pending"
 _DEFAULT_HISTORY_LIMIT = 40
+
+
+def _booking_webhook_enabled_for_turn(lead: Lead) -> bool:
+    raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    if raw_payload.get("created_from") != "ui_ai_sandbox":
+        return True
+    return str(raw_payload.get("test_configuration") or "").strip().lower() == "gpt_zapier"
 
 
 def _store_outbound_message(
@@ -132,6 +150,148 @@ def already_processed_inbound_message(*, db: Session, lead_id: int, inbound_mess
     return False
 
 
+def _has_pending_reschedule(lead: Lead) -> bool:
+    raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    return isinstance(raw_payload.get(_PENDING_RESCHEDULE_KEY), dict)
+
+
+def _should_try_deterministic_slot_selection(*, lead: Lead, inbound_text: str) -> bool:
+    pending_step = _current_pending_step(lead)
+    if pending_step != "slot_selection_pending":
+        return False
+    return looks_like_slot_selection_message(inbound_text) or looks_like_booking_commitment(inbound_text)
+
+
+def _merge_booking_flow_memory(*, lead: Lead, runtime_payload: dict[str, Any], next_state: ConversationStateEnum) -> None:
+    payload = dict(lead.raw_payload or {})
+    if "booking_offer" in runtime_payload and runtime_payload["booking_offer"]:
+        payload["booking_offer"] = runtime_payload["booking_offer"]
+    if "calendar_booking" in runtime_payload and runtime_payload["calendar_booking"]:
+        payload["calendar_booking"] = runtime_payload["calendar_booking"]
+    if _PENDING_RESCHEDULE_KEY in runtime_payload:
+        pending = runtime_payload.get(_PENDING_RESCHEDULE_KEY)
+        if isinstance(pending, dict) and pending:
+            payload[_PENDING_RESCHEDULE_KEY] = pending
+        else:
+            payload.pop(_PENDING_RESCHEDULE_KEY, None)
+    if runtime_payload.get("pending_step"):
+        payload[_PENDING_STEP_KEY] = str(runtime_payload["pending_step"])
+    elif "pending_step" in runtime_payload or next_state == ConversationStateEnum.BOOKED:
+        payload.pop(_PENDING_STEP_KEY, None)
+    lead.raw_payload = payload
+
+
+def _apply_booking_selection_result(
+    *,
+    db: Session,
+    client: Client,
+    lead: Lead,
+    inbound_text: str,
+    turn_time: datetime,
+    sms_service: SMSService,
+    result,
+    inbound_message_id: int | None,
+    pending_step_before: str,
+) -> None:
+    reply_text = str(result.reply_text or "").strip()
+    runtime_payload = dict(result.raw_payload or {})
+    _merge_booking_flow_memory(lead=lead, runtime_payload=runtime_payload, next_state=result.next_state)
+
+    outbound_raw_payload: dict[str, Any] = {
+        "booking_flow": {
+            "handled_before_llm": True,
+            "event_type": result.audit_event_type,
+            "transition_reason": result.transition_reason,
+        },
+        "pending_step_before": pending_step_before or None,
+        "pending_step_after": runtime_payload.get("pending_step"),
+    }
+    if inbound_message_id is not None:
+        outbound_raw_payload["inbound_message_id"] = int(inbound_message_id)
+    for key in ("booking_offer", "calendar_booking", _PENDING_RESCHEDULE_KEY):
+        if key in runtime_payload and runtime_payload[key]:
+            outbound_raw_payload[key] = runtime_payload[key]
+
+    sid = sms_service.send_message(to_number=lead.phone, body=reply_text)
+    _store_outbound_message(
+        db=db,
+        lead=lead,
+        body=reply_text,
+        provider_sid=sid,
+        raw_payload=outbound_raw_payload,
+        created_at=turn_time,
+    )
+
+    previous_state = lead.conversation_state
+    lead.conversation_state = result.next_state
+    lead.last_outbound_at = turn_time
+    _auto_update_crm_stage(
+        db=db,
+        lead=lead,
+        client_id=client.id,
+        target_stage=CRM_STAGE_CONTACTED,
+        reason="outbound_sms_sent",
+        inbound_text=inbound_text,
+    )
+    if result.next_state == ConversationStateEnum.BOOKED:
+        _auto_update_crm_stage(
+            db=db,
+            lead=lead,
+            client_id=client.id,
+            target_stage=CRM_STAGE_MEETING_BOOKED,
+            reason="booking_confirmed",
+            inbound_text=inbound_text,
+        )
+
+    if previous_state != lead.conversation_state:
+        db.add(
+            ConversationState(
+                lead_id=lead.id,
+                previous_state=previous_state,
+                new_state=lead.conversation_state,
+                reason=result.transition_reason,
+                metadata_json={
+                    **outbound_raw_payload,
+                    "provider": "deterministic_booking_flow",
+                },
+            )
+        )
+
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type=result.audit_event_type,
+            decision=result.audit_decision,
+        )
+    )
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type="agent_decision",
+            decision={
+                "inbound": inbound_text,
+                "outbound": reply_text,
+                "next_state": lead.conversation_state.value,
+                "provider": "deterministic_booking_flow",
+                **outbound_raw_payload,
+            },
+        )
+    )
+    db.commit()
+    incr("sms_outbound_total")
+
+    if runtime_payload.get("calendar_booking") and _booking_webhook_enabled_for_turn(lead):
+        notify_zapier_booking_webhook(
+            db=db,
+            client=client,
+            lead=lead,
+            calendar_booking=runtime_payload["calendar_booking"],
+            trigger="sms_ai_calendar_booking_created",
+        )
+
+
 def process_inbound_turn(
     *,
     db: Session,
@@ -159,7 +319,43 @@ def process_inbound_turn(
     if detected_email and not lead.email:
         lead.email = detected_email
 
+    remember_lead_language(client, lead, inbound_text=inbound_text)
     pending_step_before = _current_pending_step(lead)
+
+    deterministic_result = None
+    if _has_pending_reschedule(lead):
+        handle_reschedule = getattr(booking_service, "handle_reschedule_confirmation", None)
+        if callable(handle_reschedule):
+            deterministic_result = handle_reschedule(
+                client=client,
+                lead=lead,
+                inbound_text=inbound_text,
+                history=history,
+                db=db,
+            )
+    if deterministic_result is None and _should_try_deterministic_slot_selection(lead=lead, inbound_text=inbound_text):
+        handle_slot_selection = getattr(booking_service, "handle_slot_selection", None)
+        if callable(handle_slot_selection):
+            deterministic_result = handle_slot_selection(
+                client=client,
+                lead=lead,
+                inbound_text=inbound_text,
+                history=history,
+                db=db,
+            )
+    if deterministic_result is not None and deterministic_result.handled:
+        _apply_booking_selection_result(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            turn_time=turn_time,
+            sms_service=sms_service,
+            result=deterministic_result,
+            inbound_message_id=inbound_message_id,
+            pending_step_before=pending_step_before,
+        )
+        return
 
     run_turn = getattr(llm_agent, "run_turn", None)
     if callable(run_turn):
@@ -342,3 +538,12 @@ def process_inbound_turn(
     )
     db.commit()
     incr("sms_outbound_total")
+
+    if runtime_payload.get("calendar_booking") and _booking_webhook_enabled_for_turn(lead):
+        notify_zapier_booking_webhook(
+            db=db,
+            client=client,
+            lead=lead,
+            calendar_booking=runtime_payload["calendar_booking"],
+            trigger="sms_ai_calendar_booking_created",
+        )

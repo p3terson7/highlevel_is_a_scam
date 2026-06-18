@@ -10,6 +10,7 @@ from app.services.stackleads_demo_seed import (
     DEMO_PREFIX,
     PORTAL_EMAIL,
     PORTAL_PASSWORD,
+    ZAPIER_BOOKING_WEBHOOK_URL,
     seed_stackleads_demo_data,
 )
 
@@ -34,6 +35,7 @@ def test_stackleads_demo_seed_creates_speed_to_lead_showcase(test_context):
         assert client is not None
         assert client.business_name == "StackLeads"
         assert client.portal_enabled is True
+        assert client.provider_config["zapier_booking_webhook_url"] == ZAPIER_BOOKING_WEBHOOK_URL
         ad_report = client.provider_config["demo_ad_campaign_reports"]
         assert ad_report["platform"] == "Facebook Lead Ads"
         assert len(ad_report["campaigns"]) == 5

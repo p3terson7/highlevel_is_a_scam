@@ -25,6 +25,7 @@ CLIENT_PROVIDER_KEYS = {
     "meta_graph_api_version",
     "linkedin_verify_token",
     "zapier_webhook_secret",
+    "zapier_booking_webhook_url",
 }
 
 RUNTIME_KEYS = GLOBAL_RUNTIME_KEYS | CLIENT_PROVIDER_KEYS
@@ -35,6 +36,7 @@ SECRET_KEYS = {
     "openai_api_key",
     "meta_access_token",
     "zapier_webhook_secret",
+    "zapier_booking_webhook_url",
 }
 
 GLOBAL_SECRET_KEYS = SECRET_KEYS & GLOBAL_RUNTIME_KEYS

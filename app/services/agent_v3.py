@@ -767,7 +767,10 @@ class LLMAgentV3:
         if not final.reply_text:
             final.reply_text = str(tool_result.get("fallback_reply") or decision.reply_text or "Understood.")
         if tool_result.get("kind") == "slots":
-            final.reply_text = _ensure_slot_fallback_line(final.reply_text)
+            final.reply_text = _ensure_slot_fallback_line(
+                final.reply_text,
+                language=str(context.get("response_language") or "en"),
+            )
         return _finalize_response_with_context(final, context)
 
     def _execute_tool(
@@ -804,6 +807,7 @@ class LLMAgentV3:
                 exact_time=exact_time,
                 range_start=range_start,
                 range_end=range_end,
+                request_text=str(context.get("latest_inbound_message") or ""),
                 limit=limit,
                 db=db,
             )
@@ -853,6 +857,7 @@ class LLMAgentV3:
                         exact_time=inferred_preferences.get("exact_time"),
                         range_start=inferred_preferences.get("range_start"),
                         range_end=inferred_preferences.get("range_end"),
+                        request_text=str(context.get("latest_inbound_message") or ""),
                         limit=3,
                         db=db,
                     )
@@ -885,6 +890,7 @@ class LLMAgentV3:
                     exact_time=inferred_preferences.get("exact_time"),
                     range_start=inferred_preferences.get("range_start"),
                     range_end=inferred_preferences.get("range_end"),
+                    request_text=str(context.get("latest_inbound_message") or ""),
                     limit=3,
                     db=db,
                 )

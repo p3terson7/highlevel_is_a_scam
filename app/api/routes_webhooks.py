@@ -61,6 +61,7 @@ def _coerce_zapier_payload(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
     form_answers: dict[str, Any] = {}
+    original_answers: list[dict[str, Any]] = []
 
     # Some Zapier setups send a single text blob under an empty key:
     # {"": "Full Name : \"...\", Email : \"...\", ..."}
@@ -73,14 +74,19 @@ def _coerce_zapier_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if not key or value == "":
                 continue
             form_answers.setdefault(key, value)
+            original_answers.append({"question": key, "answer": value})
             normalized_key = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
             if normalized_key:
                 form_answers.setdefault(normalized_key, value)
 
     if isinstance(payload.get("form_answers"), dict):
         form_answers.update(payload["form_answers"])
+        original_answers.extend(
+            {"question": key, "answer": value} for key, value in payload["form_answers"].items()
+        )
     if isinstance(payload.get("fields"), dict):
         form_answers.update(payload["fields"])
+        original_answers.extend({"question": key, "answer": value} for key, value in payload["fields"].items())
 
     for key in (
         "full_name",
@@ -97,6 +103,7 @@ def _coerce_zapier_payload(payload: dict[str, Any]) -> dict[str, Any]:
         value = payload.get(key)
         if value not in (None, ""):
             form_answers.setdefault(key, value)
+            original_answers.append({"question": key, "answer": value})
 
     if not form_answers:
         for key, value in payload.items():
@@ -104,9 +111,13 @@ def _coerce_zapier_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             if isinstance(value, (str, int, float, bool)):
                 form_answers[key] = value
+                original_answers.append({"question": key, "answer": value})
     form_answers = normalize_form_answers(form_answers)
 
-    lead_payload: dict[str, Any] = {"form_answers": form_answers}
+    lead_payload: dict[str, Any] = {
+        "form_answers": form_answers,
+        "submitted_form_answers": original_answers,
+    }
     if leadgen_id:
         lead_payload["id"] = leadgen_id
     return {"lead": lead_payload}

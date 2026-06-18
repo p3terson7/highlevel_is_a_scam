@@ -1,8 +1,9 @@
 from sqlalchemy import select
 
-from app.core.deps import get_llm_agent
-from app.db.models import Client, ConversationStateEnum, Lead, LeadSource, Message, MessageAttachment, MessageDirection
+from app.core.deps import get_booking_service, get_llm_agent
+from app.db.models import CalendarBooking, Client, ConversationStateEnum, Lead, LeadSource, Message, MessageAttachment, MessageDirection
 from app.db.session import get_session_factory
+from app.services.booking import BookingService
 from app.services.llm_agent import AgentResponse, LLMAgent
 
 
@@ -219,7 +220,7 @@ def test_sms_inbound_selection_books_slot_without_backend_short_circuit_loop(tes
         },
     )
     assert confirm.status_code == 200
-    assert test_context.fake_llm.calls >= 1
+    assert test_context.fake_llm.calls == 0
     assert test_context.fake_booking.selection_calls >= 1
     assert "Booked. You are set" in test_context.fake_sms.sent[-1]["body"]
 
@@ -228,6 +229,118 @@ def test_sms_inbound_selection_books_slot_without_backend_short_circuit_loop(tes
         assert lead is not None
         assert lead.conversation_state.value == "BOOKED"
         assert lead.crm_stage == "Meeting Booked"
+
+
+def test_sms_inbound_booked_lead_reschedule_requires_confirmation_before_cancel(test_context):
+    from app.main import app
+
+    def internal_always_open_config() -> dict:
+        return {
+            "internal_calendar": {
+                "slot_minutes": 30,
+                "notice_minutes": 0,
+                "horizon_days": 7,
+                "availability": [
+                    {"day": day, "enabled": True, "start": "00:00", "end": "23:59"}
+                    for day in range(7)
+                ],
+            }
+        }
+
+    booking_service = BookingService()
+    app.dependency_overrides[get_booking_service] = lambda: booking_service
+    SessionLocal = get_session_factory()
+
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.booking_mode = "internal"
+        client.booking_config = internal_always_open_config()
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="meta-lead-reschedule-confirm",
+            source=LeadSource.META,
+            full_name="SMS Reschedule Lead",
+            phone="+15552224444",
+            email="sms-reschedule@example.com",
+            city="Denver",
+            form_answers={"interest": "consultation"},
+            raw_payload={"source": "seed", "pending_step": "slot_selection_pending"},
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKED,
+            crm_stage="Meeting Booked",
+        )
+        db.add(lead)
+        db.flush()
+
+        first_offer = booking_service.offer_slots(client=client, lead=lead, db=db)
+        first_result = booking_service.book_requested_slot(
+            client=client,
+            lead=lead,
+            latest_offer=first_offer.raw_payload["booking_offer"],
+            slot_index=1,
+            db=db,
+        )
+        old_booking_id = int(first_result["booking"]["booking_id"])
+
+        second_offer = booking_service.offer_slots(client=client, lead=lead, db=db)
+        db.add(
+            Message(
+                client_id=client.id,
+                lead_id=lead.id,
+                direction=MessageDirection.OUTBOUND,
+                body=second_offer.reply_text,
+                provider_message_sid="SM-OFFER-SMS-RESCHEDULE",
+                raw_payload=second_offer.raw_payload,
+            )
+        )
+        db.commit()
+
+    request_confirmation = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 222-4444",
+            "Body": "1",
+            "MessageSid": "SM-IN-RESCHEDULE-1",
+        },
+    )
+
+    assert request_confirmation.status_code == 200
+    assert test_context.fake_llm.calls == 0
+    assert "Should I cancel" in test_context.fake_sms.sent[-1]["body"]
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15552224444"))
+        assert lead is not None
+        assert lead.raw_payload["pending_step"] == "reschedule_confirmation_pending"
+        assert "pending_reschedule_confirmation" in lead.raw_payload
+        bookings = db.scalars(select(CalendarBooking).where(CalendarBooking.lead_id == lead.id)).all()
+        assert len([booking for booking in bookings if booking.status == "scheduled"]) == 1
+
+    confirm = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 222-4444",
+            "Body": "yes",
+            "MessageSid": "SM-IN-RESCHEDULE-2",
+        },
+    )
+
+    assert confirm.status_code == 200
+    assert "Updated. Your call is now set" in test_context.fake_sms.sent[-1]["body"]
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15552224444"))
+        assert lead is not None
+        bookings = db.scalars(select(CalendarBooking).where(CalendarBooking.lead_id == lead.id)).all()
+        scheduled = [booking for booking in bookings if booking.status == "scheduled"]
+        cancelled = [booking for booking in bookings if booking.status == "cancelled"]
+        assert len(scheduled) == 1
+        assert len(cancelled) == 1
+        assert cancelled[0].id == old_booking_id
+        assert "pending_reschedule_confirmation" not in lead.raw_payload
+
+    app.dependency_overrides[get_booking_service] = lambda: test_context.fake_booking
 
 
 def test_sms_inbound_booking_question_uses_agent_not_repeated_slot_menu(test_context):
