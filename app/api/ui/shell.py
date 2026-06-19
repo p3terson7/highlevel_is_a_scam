@@ -10,6 +10,7 @@ _UI_FILE = _UI_DIR / "ui.html"
 _UI_ASSET_DIR = _UI_DIR / "ui_assets"
 _UI_ASSET_TYPES = {
     "ui.css": "text/css; charset=utf-8",
+    "render-inspired-theme.css": "text/css; charset=utf-8",
     "ui-i18n.js": "application/javascript; charset=utf-8",
     "ui-core.js": "application/javascript; charset=utf-8",
     "ui-navigation.js": "application/javascript; charset=utf-8",

@@ -1,0 +1,1552 @@
+/*
+  Render-inspired alternative UI theme.
+  This adapts the supplied design study to the existing Lead Ops DOM without
+  copying Render marks, assets, custom fonts, or proprietary illustrations.
+*/
+
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500;600&family=Inter+Tight:wght@300;400;500&display=swap");
+
+:root {
+  color-scheme: light dark;
+
+  --font-ui: "Geist", "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Inter Tight", "Geist", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+
+  --sidebar-width: 256px;
+  --sidebar-collapsed-width: 72px;
+  --chrome-height: 58px;
+  --topbar-height: 58px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-9: 36px;
+  --space-10: 40px;
+
+  --radius-sharp: 0;
+  --radius-soft: 0;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-pill: 0;
+
+  --shadow: 0 0 0 0 transparent;
+  --shadow-soft: 0 0 0 0 transparent;
+  --shadow-card: 0 0 0 0 transparent;
+  --shadow-nested: 0 0 0 0 transparent;
+  --glass-inset: 0 0 0 0 transparent;
+  --blur: 0px;
+  --blur-depth: 0px;
+  --blur-secondary: 0px;
+  --blur-nested: 0px;
+  --blur-action: 0px;
+
+  --control-height: 40px;
+  --control-height-sm: 34px;
+  --duration-fast: 120ms;
+  --ease-standard: cubic-bezier(.2, .8, .2, 1);
+}
+
+body[data-theme="light"] {
+  color-scheme: light;
+
+  --canvas: #ffffff;
+  --app-bg-base: #ffffff;
+  --bg: #ffffff;
+  --bg-2: #ffffff;
+  --sidebar: #ffffff;
+  --sidebar-2: #f7f7f7;
+  --surface: #ffffff;
+  --surface-2: #f7f7f7;
+  --surface-3: #f0f0f0;
+  --surface-hover: #f7f7f7;
+  --surface-selected: #f4edff;
+  --surface-subtle: #f7f7f7;
+
+  --text: #0d0d0d;
+  --text-soft: #4d4d4d;
+  --text-dim: #6b6b6b;
+  --text-muted: #6b6b6b;
+  --sidebar-text: #4d4d4d;
+
+  --line-subtle: #ededed;
+  --line: #e3e3e3;
+  --line-hover: #c4c4c4;
+  --line-strong: #858585;
+  --line-2: var(--line-hover);
+  --accent: #7200d6;
+  --accent-2: #8a05ff;
+  --accent-3: #d67f2e;
+  --accent-hover: #5600a1;
+  --accent-contrast: #ffffff;
+  --accent-soft: #f0e6ff;
+  --secondary-soft: #e0f4ff;
+  --violet-soft: #f4f0ff;
+
+  --success: #003924;
+  --success-soft: #c7fdda;
+  --warn: #6a4100;
+  --warn-soft: #ffe4a3;
+  --warning: #6a4100;
+  --warning-soft: #ffe4a3;
+  --danger: #d04648;
+  --danger-soft: #ffffff;
+  --badge-success-bg: #003924;
+  --badge-success-fg: #c7fdda;
+  --badge-warning-bg: #452800;
+  --badge-warning-fg: #ffdc9b;
+  --badge-danger-bg: #d04648;
+  --badge-danger-fg: #ffffff;
+  --badge-purple-bg: #360057;
+  --badge-purple-fg: #f2dcff;
+  --badge-neutral-bg: #202020;
+  --badge-neutral-fg: #eeeeee;
+  --chip: transparent;
+  --input: #ffffff;
+  --overlay: rgba(13, 13, 13, 0.36);
+  --focus-ring: color-mix(in srgb, var(--accent) 24%, transparent);
+
+  --glass: var(--surface);
+  --glass-strong: var(--surface);
+  --glass-tint: transparent;
+  --glass-tint-2: transparent;
+  --glass-highlight: linear-gradient(var(--surface), var(--surface));
+  --glass-highlight-strong: linear-gradient(var(--surface), var(--surface));
+  --glass-card: linear-gradient(var(--surface), var(--surface));
+  --glass-card-hover: linear-gradient(var(--surface-hover), var(--surface-hover));
+
+  --surface-primary-bg: var(--surface);
+  --surface-primary-border: var(--line);
+  --surface-primary-shadow: none;
+  --surface-primary-blur: 0px;
+  --surface-focus-bg: var(--surface);
+  --surface-focus-border: var(--line-2);
+  --surface-focus-shadow: none;
+  --surface-secondary-bg: var(--surface);
+  --surface-secondary-border: var(--line);
+  --surface-secondary-shadow: none;
+  --surface-muted-bg: var(--surface-subtle);
+  --surface-muted-border: var(--line);
+  --surface-data-bg: var(--surface);
+
+  --card-bg: var(--surface);
+  --card-bg-hover: var(--surface-hover);
+  --card-bg-soft: var(--surface-subtle);
+  --card-action-bg: var(--surface);
+  --card-action-bg-hover: var(--surface-hover);
+  --card-action-border: var(--line);
+  --interactive-card-bg: var(--surface);
+  --interactive-card-bg-hover: var(--surface-hover);
+  --interactive-card-border: var(--line);
+  --interactive-card-shadow: none;
+  --interactive-card-blur: 0px;
+  --info-card-bg: var(--surface);
+  --info-card-bg-hover: var(--surface-hover);
+  --info-card-border: var(--line);
+  --section-bg: var(--surface);
+  --section-bg-hover: var(--surface-hover);
+  --section-border: var(--line);
+  --nested-card-bg: var(--surface);
+  --nested-card-bg-hover: var(--surface-hover);
+  --nested-card-border: var(--line);
+
+  --row-bg: transparent;
+  --row-bg-hover: var(--surface-hover);
+  --row-border: var(--line-subtle);
+
+  --button-bg: var(--surface);
+  --button-bg-hover: #ffffff;
+  --button-ghost-bg: transparent;
+  --button-ghost-bg-hover: var(--surface-hover);
+  --button-border: var(--line);
+  --button-border-hover: var(--line-2);
+  --button-primary-bg: var(--text);
+  --button-primary-bg-hover: #ffffff;
+  --button-primary-bg-active: #ffffff;
+  --button-primary-border: var(--text);
+  --button-primary-shadow: none;
+  --button-primary-text: var(--canvas);
+
+  --field-bg: var(--input);
+  --field-bg-hover: var(--surface-subtle);
+  --field-bg-focus: var(--surface);
+  --field-border: var(--line);
+  --field-border-hover: var(--line-2);
+  --field-border-focus: var(--accent);
+  --field-focus-ring: color-mix(in srgb, var(--accent) 18%, transparent);
+  --field-shadow: none;
+  --field-focus-shadow: 0 0 0 2px var(--field-focus-ring);
+  --field-blur: 0px;
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%236b6b6b' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m2.5 4.5 3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+}
+
+body[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #0d0d0d;
+  --app-bg-base: #0d0d0d;
+  --bg: #0d0d0d;
+  --bg-2: #101010;
+  --sidebar: #0d0d0d;
+  --sidebar-2: #101010;
+  --surface: #0d0d0d;
+  --surface-2: #0d0d0d;
+  --surface-3: #171717;
+  --surface-hover: #171717;
+  --surface-selected: #20122f;
+  --surface-subtle: #101010;
+
+  --text: #eeeeee;
+  --text-soft: #b8b8b8;
+  --text-dim: #8f8f8f;
+  --text-muted: #8f8f8f;
+  --sidebar-text: #b8b8b8;
+
+  --line-subtle: #292929;
+  --line: #3b3b3b;
+  --line-hover: #565656;
+  --line-strong: #767676;
+  --line-2: var(--line-hover);
+  --accent: #9a35ff;
+  --accent-2: #b66cff;
+  --accent-3: #e2a66e;
+  --accent-hover: #b66cff;
+  --accent-contrast: #ffffff;
+  --accent-soft: #350063;
+  --secondary-soft: #092c43;
+  --violet-soft: #26004c;
+
+  --success: #c7fdda;
+  --success-soft: #003924;
+  --warn: #ffd08a;
+  --warn-soft: #3a2108;
+  --warning: #ffd08a;
+  --warning-soft: #3a2108;
+  --danger: #ffffff;
+  --danger-soft: #d04648;
+  --badge-success-bg: #003924;
+  --badge-success-fg: #c7fdda;
+  --badge-warning-bg: #452800;
+  --badge-warning-fg: #ffdc9b;
+  --badge-danger-bg: #d04648;
+  --badge-danger-fg: #ffffff;
+  --badge-purple-bg: #360057;
+  --badge-purple-fg: #f2dcff;
+  --badge-neutral-bg: #202020;
+  --badge-neutral-fg: #eeeeee;
+  --chip: transparent;
+  --input: #101010;
+  --overlay: rgba(0, 0, 0, 0.72);
+  --focus-ring: color-mix(in srgb, var(--accent-2) 28%, transparent);
+
+  --glass: var(--surface);
+  --glass-strong: var(--surface);
+  --glass-tint: transparent;
+  --glass-tint-2: transparent;
+  --glass-highlight: linear-gradient(var(--surface), var(--surface));
+  --glass-highlight-strong: linear-gradient(var(--surface), var(--surface));
+  --glass-card: linear-gradient(var(--surface), var(--surface));
+  --glass-card-hover: linear-gradient(var(--surface-hover), var(--surface-hover));
+
+  --surface-primary-bg: var(--surface);
+  --surface-primary-border: var(--line);
+  --surface-primary-shadow: none;
+  --surface-primary-blur: 0px;
+  --surface-focus-bg: var(--surface);
+  --surface-focus-border: var(--line-2);
+  --surface-focus-shadow: none;
+  --surface-secondary-bg: var(--surface);
+  --surface-secondary-border: var(--line);
+  --surface-secondary-shadow: none;
+  --surface-muted-bg: var(--surface-subtle);
+  --surface-muted-border: var(--line);
+  --surface-data-bg: var(--surface);
+
+  --card-bg: var(--surface);
+  --card-bg-hover: var(--surface-hover);
+  --card-bg-soft: var(--surface-subtle);
+  --card-action-bg: var(--surface);
+  --card-action-bg-hover: var(--surface-hover);
+  --card-action-border: var(--line);
+  --interactive-card-bg: var(--surface);
+  --interactive-card-bg-hover: var(--surface-hover);
+  --interactive-card-border: var(--line);
+  --interactive-card-shadow: none;
+  --interactive-card-blur: 0px;
+  --info-card-bg: var(--surface);
+  --info-card-bg-hover: var(--surface-hover);
+  --info-card-border: var(--line);
+  --section-bg: var(--surface);
+  --section-bg-hover: var(--surface-hover);
+  --section-border: var(--line);
+  --nested-card-bg: var(--surface);
+  --nested-card-bg-hover: var(--surface-hover);
+  --nested-card-border: var(--line);
+
+  --row-bg: transparent;
+  --row-bg-hover: var(--surface-hover);
+  --row-border: var(--line-subtle);
+
+  --button-bg: var(--surface);
+  --button-bg-hover: #ffffff;
+  --button-ghost-bg: transparent;
+  --button-ghost-bg-hover: var(--surface-hover);
+  --button-border: var(--line);
+  --button-border-hover: var(--line-2);
+  --button-primary-bg: var(--text);
+  --button-primary-bg-hover: #ffffff;
+  --button-primary-bg-active: #ffffff;
+  --button-primary-border: var(--text);
+  --button-primary-shadow: none;
+  --button-primary-text: var(--canvas);
+
+  --field-bg: var(--input);
+  --field-bg-hover: var(--surface-subtle);
+  --field-bg-focus: var(--surface);
+  --field-border: var(--line);
+  --field-border-hover: var(--line-2);
+  --field-border-focus: var(--accent-2);
+  --field-focus-ring: color-mix(in srgb, var(--accent-2) 22%, transparent);
+  --field-shadow: none;
+  --field-focus-shadow: 0 0 0 2px var(--field-focus-ring);
+  --field-blur: 0px;
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%23b8b8b8' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m2.5 4.5 3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+}
+
+body[data-contrast="high"] {
+  --line: currentColor;
+  --line-2: currentColor;
+}
+
+*,
+*::before,
+*::after {
+  letter-spacing: 0 !important;
+}
+
+html {
+  background: var(--canvas);
+}
+
+body {
+  background: var(--canvas);
+  color: var(--text);
+  font: 400 14px/1.45 var(--font-ui);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body .app-background {
+  display: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  min-height: var(--control-height);
+  padding: 8px 12px;
+  border: 1px solid var(--button-border);
+  border-radius: var(--radius-soft);
+  background: var(--button-bg);
+  color: var(--text);
+  box-shadow: none;
+  font-weight: 500;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+button:hover {
+  border-color: var(--button-border-hover);
+  background: var(--button-bg-hover);
+  color: #0d0d0d;
+}
+
+button.primary,
+button.primary:hover,
+button.primary:active {
+  border-color: var(--button-primary-border);
+  border-radius: var(--radius-soft);
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+button.primary:hover {
+  background: var(--button-primary-bg-hover);
+  color: #0d0d0d;
+  opacity: 1;
+}
+
+button.ghost.active,
+.tab-btn.active,
+.client-wizard-step.active,
+.test-lab-mode-card.active {
+  border-color: var(--accent);
+  border-left-width: 2px;
+  background: var(--surface-selected) !important;
+  color: var(--text);
+  box-shadow: none;
+}
+
+button.small {
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+button.icon-btn,
+button.sidebar-toggle,
+.composer-attach-btn.icon-only {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-soft);
+}
+
+button:focus-visible,
+.nav-item:focus-visible,
+.top-nav-item:focus-visible,
+.mobile-tab-item:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--field-border-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+input,
+select,
+textarea,
+.lead-combo-control {
+  border-radius: var(--radius-soft);
+  background: var(--field-bg);
+  border-color: var(--field-border);
+  box-shadow: none;
+}
+
+input[type="checkbox"] {
+  border-radius: var(--radius-soft);
+  background: var(--field-bg);
+  box-shadow: none;
+}
+
+label,
+.surface-subtitle,
+.helper,
+.meta-text,
+.item-subtitle,
+.item-snippet,
+.item-meta-row {
+  color: var(--text-dim);
+}
+
+.mono,
+.dashboard-kpi-label,
+.dashboard-chart-caption,
+.dashboard-trend-label,
+.sidebar-section,
+.snippet-label,
+.kv .k,
+.form-answer-label,
+.drawer-kicker,
+.timeline-event-label {
+  font-family: var(--font-mono);
+}
+
+.window-frame {
+  background: var(--canvas);
+}
+
+.window-chrome {
+  position: sticky;
+  top: 0;
+  z-index: 70;
+  min-height: var(--chrome-height);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--canvas);
+}
+
+.chrome-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.chrome-left {
+  flex: 0 0 180px;
+  max-width: 180px;
+}
+
+.chrome-nav {
+  flex: 1 1 auto;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.chrome-right {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.chrome-subtitle {
+  color: var(--text-dim);
+}
+
+.window-chrome button {
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+.window-chrome button:hover {
+  border-color: var(--line);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.window-chrome #globalSearch,
+.window-chrome .top-client-select {
+  height: 36px;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-soft);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.search-wrap svg {
+  color: var(--text-dim);
+}
+
+.top-language-toggle {
+  height: 34px;
+  min-height: 34px;
+  border-radius: var(--radius-soft);
+  color: var(--text-soft);
+}
+
+.top-language-toggle:hover,
+.top-language-toggle[aria-pressed="true"] {
+  border-color: var(--line);
+  background: var(--surface-selected);
+  color: var(--text);
+}
+
+.chrome-nav .top-nav-item,
+.top-nav-item {
+  min-height: 34px;
+  border-radius: var(--radius-soft);
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
+.top-nav-item:hover,
+.top-nav-item.active,
+.mobile-tab-item.active {
+  border-color: var(--accent);
+  background: var(--surface-selected);
+  color: var(--text);
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: calc(100svh - var(--chrome-height));
+  background: var(--canvas);
+}
+
+.sidebar {
+  display: none;
+}
+
+.sidebar.collapsed {
+  width: var(--sidebar-collapsed-width);
+}
+
+.sidebar-header {
+  height: var(--topbar-height);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-soft);
+  border-color: var(--text);
+  background: var(--text);
+  color: var(--canvas);
+  font-weight: 500;
+}
+
+.brand-title {
+  font-weight: 500;
+}
+
+.brand-subtitle,
+.nav-meta {
+  color: var(--text-dim);
+}
+
+.sidebar-section {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.nav-item {
+  min-height: 38px;
+  border-radius: var(--radius-soft);
+  color: var(--sidebar-text);
+}
+
+.nav-item:hover,
+.nav-item.active {
+  border-color: transparent;
+  background: var(--surface-hover);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.nav-item.active {
+  border-left-width: 2px;
+  border-left-color: var(--accent);
+  background: var(--surface-selected);
+  box-shadow: none;
+}
+
+.nav-label {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.workspace {
+  padding: 32px;
+  gap: 20px;
+}
+
+.view.active {
+  gap: 20px;
+}
+
+.surface,
+.pane,
+.detail-card,
+.glass-shell,
+.glass-panel,
+.focus-surface,
+.flat-card,
+.metric-card,
+.action-card,
+.stat-card,
+.dashboard-hero,
+.dashboard-panel,
+.dashboard-panel-soft,
+.dashboard-panel-light,
+.dashboard-panel-medium,
+.dashboard-trend-card,
+.dashboard-kpi-card,
+.dashboard-lead-stat,
+.dashboard-lead-row-action,
+.dashboard-focus-card,
+.preview-item,
+.client-item,
+.inbox-item,
+.note-item,
+.webhook-row,
+.check-item,
+.client-wizard,
+.client-wizard-review,
+.client-wizard-review-card,
+.lead-fact,
+.summary-line,
+.detail-disclosure,
+.drawer-section,
+.automation-health-summary,
+.automation-health-row,
+.crm-stage-column,
+.crm-card,
+.lead-list-card,
+.lead-hero-card,
+.lead-section,
+.manual-panel,
+.calendar-month-card,
+.calendar-side-card,
+.calendar-day,
+.calendar-event,
+.calendar-agenda-item,
+.audit-item,
+.settings-calendar-card,
+.settings-calendar-metric,
+.settings-calendar-day,
+.test-lab-summary-card,
+.test-lab-mode-card,
+.test-lab-start-card,
+.login-card {
+  border: 0 !important;
+  border-radius: var(--radius-soft) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+[class$="-card"],
+[class*="-card "] {
+  border-radius: var(--radius-soft) !important;
+  box-shadow: none !important;
+}
+
+.surface-header,
+.pane-header,
+.toolbar {
+  border-bottom: 0;
+}
+
+.surface-header::after,
+.pane-header::after,
+.toolbar::before,
+.crm-stage-header::after {
+  display: none;
+  left: 0;
+  right: 0;
+  background: var(--line);
+}
+
+.surface-title h1,
+.surface-title h2,
+.surface-title h3,
+.pane-title h3,
+.pane-title h4,
+.empty-state-title,
+.dashboard-hero-copy h2,
+.client-wizard-title,
+.lead-overview-name,
+.item-title,
+.dashboard-lead-name,
+.dashboard-message-name,
+.dashboard-campaign-name,
+.dashboard-agenda-title,
+.dashboard-client-title,
+.crm-card .item-title,
+.lead-detail-title-row h3,
+.calendar-month-label,
+.login-title h1 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.dashboard-hero {
+  padding: 24px;
+}
+
+.dashboard-hero::before {
+  content: none;
+}
+
+.dashboard-hero-copy h2 {
+  font-size: 32px;
+  line-height: 1.1;
+  font-weight: 300;
+}
+
+.dashboard-hero-copy .surface-subtitle {
+  max-width: 72ch;
+  font-size: 14px;
+  color: var(--text-soft);
+}
+
+.dashboard-kpi-value,
+.dashboard-chart-total,
+.dashboard-focus-value,
+.dashboard-trend-summary strong,
+.dashboard-lead-stat-value,
+.stat-card .value,
+.settings-overview-card .value,
+.calendar-overview-stat .value {
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.dashboard-kpi-card,
+.dashboard-campaign-kpi,
+.dashboard-campaign-step,
+.dashboard-lead-stat,
+.dashboard-lead-row-action,
+.dashboard-focus-card,
+.calendar-overview-stat {
+  border: 0 !important;
+  background: transparent !important;
+}
+
+.dashboard-kpi-card:hover,
+.dashboard-lead-row-action:hover,
+.dashboard-focus-card:hover,
+.preview-item:hover,
+.client-item:hover,
+.inbox-item:hover,
+.lead-list-card:hover,
+.crm-card:hover,
+.calendar-day:hover,
+.calendar-agenda-item:hover,
+.audit-item:hover,
+.test-lab-mode-card:hover {
+  border-color: var(--line-2) !important;
+  background: var(--surface-hover) !important;
+}
+
+.client-item.active,
+.inbox-item.active,
+.lead-list-card.active,
+.crm-card.active {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.window-chip,
+.badge,
+.pill,
+.tag,
+.state-pill {
+  min-height: 32px;
+  padding: 0 14px;
+  gap: 8px;
+  border-radius: 0;
+  border: 0;
+  background: var(--badge-neutral-bg);
+  color: var(--badge-neutral-fg);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+.ok {
+  border: 0;
+  background: var(--badge-success-bg);
+  color: var(--badge-success-fg);
+}
+
+.warn {
+  border: 0;
+  background: var(--badge-warning-bg);
+  color: var(--badge-warning-fg);
+}
+
+.err {
+  border: 0;
+  background: var(--badge-danger-bg);
+  color: var(--badge-danger-fg);
+}
+
+.info {
+  border: 0;
+  background: var(--badge-purple-bg);
+  color: var(--badge-purple-fg);
+}
+
+button.warn {
+  border-color: var(--badge-danger-bg) !important;
+  background: var(--badge-danger-bg) !important;
+  color: var(--badge-danger-fg) !important;
+}
+
+button:not(.top-nav-item):not(.mobile-tab-item):not(.nav-item):not(.top-language-toggle):not(.tab-btn):not(.client-wizard-step):not(.test-lab-mode-card):not(.dashboard-kpi-card):not(.dashboard-lead-row-action):not(.dashboard-focus-card) {
+  border: 1px solid var(--line) !important;
+}
+
+.dashboard-trend-bar,
+.dashboard-campaign-bar-fill,
+.dashboard-distribution-fill,
+.dashboard-stage-stack-segment,
+.dashboard-stage-bar-fill {
+  border-radius: 0;
+  background: var(--accent) !important;
+  box-shadow: none;
+}
+
+.dashboard-trend-bar-wrap,
+.dashboard-campaign-bar,
+.dashboard-stage-stack,
+.dashboard-stage-bar-track,
+.dashboard-distribution-bar {
+  border-radius: 0;
+  background: var(--surface-subtle);
+  border: 0;
+}
+
+.dashboard-chart-swatch {
+  border-radius: var(--radius-soft);
+  box-shadow: none;
+}
+
+.dashboard-lead-card::before {
+  width: 2px;
+  top: 0;
+  bottom: 0;
+  border-radius: 0;
+}
+
+.dashboard-lead-time,
+.dashboard-lead-snippet,
+.crm-card-next,
+.timeline-event,
+.note-event,
+.composer-media-preview,
+.composer-media-thumb,
+.lead-inline-disclosure {
+  border: 0;
+  border-radius: var(--radius-soft);
+  background: transparent;
+  box-shadow: none;
+}
+
+.table-wrap {
+  border-radius: var(--radius-soft);
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+table {
+  background: var(--surface);
+}
+
+th,
+td {
+  border-bottom-color: var(--line);
+}
+
+th {
+  background: var(--surface-subtle);
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+tbody tr:hover td {
+  background: var(--surface-hover);
+}
+
+.confirm-popover,
+.action-menu-panel,
+.contact-action-drawer {
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-soft);
+  background: var(--surface);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.drawer-backdrop {
+  background: var(--overlay);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.tab-bar {
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-soft);
+  overflow: hidden;
+}
+
+.tab-btn {
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.tab-btn:last-child {
+  border-right: 0;
+}
+
+.conversation-shell .focus-surface,
+.lead-detail-pane.focus-surface,
+.calendar-month-card {
+  background: var(--surface) !important;
+  border-color: var(--line) !important;
+}
+
+.bubble,
+.crm-message-bubble {
+  border: 0;
+  border-radius: var(--radius-soft);
+  background: transparent !important;
+  box-shadow: none;
+}
+
+.bubble.outbound,
+.crm-message-row.outbound .crm-message-bubble {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: var(--surface-selected) !important;
+  color: var(--text);
+}
+
+.bubble.outbound .crm-message-body,
+.crm-message-row.outbound .crm-message-body,
+.bubble.outbound .bubble-meta,
+.crm-message-row.outbound .crm-message-author,
+.crm-message-row.outbound .crm-message-time {
+  color: var(--text);
+}
+
+.composer-send-btn:hover {
+  background: var(--text);
+  color: var(--canvas);
+}
+
+.console-output,
+.code-output,
+#view-logs .table-wrap {
+  border-radius: var(--radius-soft);
+  border-color: #3f3f3f;
+  background: #0b0b0b;
+  color: #dedede;
+  box-shadow: none;
+  font: 12px/1.65 var(--font-mono);
+}
+
+#view-logs table,
+#view-logs th {
+  background: #101010;
+  color: #dedede;
+}
+
+#view-logs td {
+  border-bottom-color: #171717;
+  color: #dedede;
+  font-family: var(--font-mono);
+}
+
+#view-logs tbody tr:hover td {
+  background: #171717;
+}
+
+.crm-stage-list.drop-target {
+  outline: 1px dashed var(--accent);
+  background: var(--surface-selected);
+}
+
+.calendar-day-number,
+.test-lab-step {
+  border-radius: var(--radius-soft);
+}
+
+.calendar-day.today,
+.calendar-day.selected,
+.test-lab-mode-card.active {
+  border-color: var(--accent) !important;
+}
+
+.calendar-day.today .calendar-day-number,
+.calendar-day.selected .calendar-day-number,
+.test-lab-step {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.mobile-tabbar {
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.mobile-tabbar .mobile-tab-item {
+  border-radius: var(--radius-soft);
+}
+
+.login-overlay {
+  background:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px),
+    linear-gradient(120deg, var(--canvas) 8%, color-mix(in srgb, var(--accent) 8%, var(--canvas)) 38%, var(--canvas) 78%);
+  background-size: 56px 56px, 56px 56px, auto;
+}
+
+.login-card {
+  position: relative;
+  width: min(460px, 100%);
+  padding: 24px;
+}
+
+.login-title h1 {
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 1.1;
+  font-weight: 300;
+}
+
+.login-title p {
+  color: var(--text-soft);
+}
+
+@media (max-width: 980px) {
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .chrome-nav {
+    display: flex;
+  }
+
+  .workspace {
+    padding: 20px;
+  }
+}
+
+/*
+  Hard cleanup pass: the inherited theme was glassy and rounded in many
+  component-specific selectors. Keep navigation color transitions, but force
+  product surfaces and controls into a strictly square, border-led system.
+*/
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+  filter: none !important;
+}
+
+body * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.chrome-nav {
+  display: flex !important;
+}
+
+.app-shell {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.sidebar {
+  display: none !important;
+}
+
+button:not(.top-nav-item):not(.mobile-tab-item):not(.nav-item):not(.top-language-toggle):not(.tab-btn):not(.client-wizard-step):not(.test-lab-mode-card):not(.dashboard-kpi-card):not(.dashboard-lead-row-action):not(.dashboard-focus-card):hover,
+button:not(.top-nav-item):not(.mobile-tab-item):not(.nav-item):not(.top-language-toggle):not(.tab-btn):not(.client-wizard-step):not(.test-lab-mode-card):not(.dashboard-kpi-card):not(.dashboard-lead-row-action):not(.dashboard-focus-card):active {
+  background: #ffffff !important;
+  color: #0d0d0d !important;
+  border-color: #ffffff !important;
+}
+
+.dashboard-hero,
+.dashboard-panel,
+.dashboard-panel-soft,
+.dashboard-panel-light,
+.dashboard-panel-medium,
+.dashboard-trend-card,
+.dashboard-kpi-card,
+.dashboard-campaign-card,
+.dashboard-campaign-kpi,
+.dashboard-campaign-step,
+.dashboard-empty-guided,
+.dashboard-lead-stat,
+.dashboard-lead-row-action,
+.dashboard-lead-time,
+.dashboard-lead-snippet,
+.conversation-shell .focus-surface,
+.lead-detail-pane.focus-surface,
+.bubble,
+.crm-message-list,
+.crm-message-bubble,
+.timeline-event,
+.note-event,
+.calendar-month-card,
+.settings-calendar-card,
+.test-lab-start-card {
+  background-image: none !important;
+  background: transparent !important;
+}
+
+.bubble.outbound,
+.crm-message-row.outbound .crm-message-bubble {
+  background: transparent !important;
+}
+
+.dashboard-campaign-bar-fill,
+.dashboard-trend-bar,
+.dashboard-distribution-fill,
+.dashboard-stage-stack-segment,
+.dashboard-stage-bar-fill {
+  background-image: none !important;
+}
+
+.dashboard-chart-row,
+.dashboard-stage-row,
+.dashboard-agenda-item,
+.dashboard-empty,
+.dashboard-lead-time,
+.dashboard-lead-snippet,
+.dashboard-client-row,
+.dashboard-lead-row-action,
+.crm-card-next,
+.timeline-event,
+.note-event,
+.lead-inline-disclosure {
+  border: 0 !important;
+}
+
+/* Render-style border hierarchy: structural hairlines, not boxed soup. */
+.surface-header,
+.pane-header,
+.toolbar,
+.window-chrome {
+  border-bottom: 1px solid var(--line) !important;
+}
+
+.dashboard-panel,
+.dashboard-panel-soft,
+.dashboard-panel-light,
+.dashboard-panel-medium,
+.dashboard-trend-card,
+.dashboard-kpi-card,
+.dashboard-campaign-card,
+.dashboard-campaign-kpi,
+.dashboard-campaign-step,
+.dashboard-focus-card,
+.conversation-shell .focus-surface,
+.lead-detail-pane.focus-surface,
+.crm-stage-column,
+.calendar-month-card,
+.calendar-side-card,
+.settings-calendar-card,
+.test-lab-start-card,
+.client-wizard,
+.client-wizard-review,
+.table-wrap,
+.console-output,
+.code-output,
+#view-logs .table-wrap {
+  border: 1px solid var(--line) !important;
+  background: transparent !important;
+}
+
+.confirm-popover,
+.action-menu-panel,
+.contact-action-drawer {
+  border: 1px solid var(--line-hover) !important;
+  background: var(--surface) !important;
+}
+
+.dashboard-chart-row,
+.dashboard-stage-row,
+.dashboard-agenda-item,
+.dashboard-client-row,
+.dashboard-lead-row-action,
+.client-item,
+.inbox-item,
+.lead-list-card,
+.crm-card,
+.calendar-agenda-item,
+.audit-item,
+.automation-health-row,
+.webhook-row,
+.check-item,
+.summary-line,
+.lead-fact,
+.note-item,
+.timeline-event,
+.crm-card-next {
+  border: 0 !important;
+  border-bottom: 1px solid var(--line-subtle) !important;
+  background: transparent !important;
+}
+
+.dashboard-chart-row:last-child,
+.dashboard-stage-row:last-child,
+.dashboard-agenda-item:last-child,
+.dashboard-client-row:last-child,
+.client-item:last-child,
+.inbox-item:last-child,
+.lead-list-card:last-child,
+.crm-stage-list .crm-card:last-child,
+.calendar-agenda-item:last-child,
+.audit-item:last-child,
+.automation-health-row:last-child,
+.webhook-row:last-child,
+.check-item:last-child,
+.summary-line:last-child,
+.lead-fact:last-child,
+.note-item:last-child,
+.timeline-event:last-child {
+  border-bottom: 0 !important;
+}
+
+.dashboard-lead-time,
+.dashboard-lead-snippet,
+.lead-inline-disclosure,
+.composer-media-preview,
+.composer-media-thumb {
+  border: 1px solid var(--line-subtle) !important;
+  background: transparent !important;
+}
+
+.dashboard-kpi-card:hover,
+.dashboard-panel:hover,
+.dashboard-campaign-kpi:hover,
+.dashboard-campaign-step:hover,
+.dashboard-focus-card:hover,
+.crm-stage-column:hover,
+.calendar-month-card:hover,
+.settings-calendar-card:hover,
+.test-lab-start-card:hover {
+  border-color: var(--line-hover) !important;
+  background: transparent !important;
+}
+
+.client-item:hover,
+.inbox-item:hover,
+.lead-list-card:hover,
+.crm-card:hover,
+.dashboard-chart-row:hover,
+.dashboard-stage-row:hover,
+.dashboard-agenda-item:hover,
+.dashboard-client-row:hover,
+.dashboard-lead-row-action:hover,
+.calendar-agenda-item:hover,
+.audit-item:hover {
+  background: var(--surface-hover) !important;
+}
+
+.client-item.active,
+.inbox-item.active,
+.lead-list-card.active,
+.crm-card.active,
+.search-result[aria-selected="true"] {
+  border: 0 !important;
+  border-left: 2px solid var(--accent) !important;
+  border-bottom: 1px solid var(--line-subtle) !important;
+  background: var(--surface-selected) !important;
+}
+
+.top-nav-item,
+.window-chrome button {
+  border: 1px solid transparent !important;
+}
+
+.top-nav-item:hover,
+.window-chrome button:hover {
+  border-color: var(--line-hover) !important;
+  background: var(--surface-hover) !important;
+}
+
+.top-nav-item.active,
+.mobile-tab-item.active {
+  border-color: transparent !important;
+  background: var(--surface-selected) !important;
+  color: var(--text) !important;
+}
+
+button:not(.top-nav-item):not(.mobile-tab-item):not(.nav-item):not(.top-language-toggle):not(.tab-btn):not(.client-wizard-step):not(.test-lab-mode-card):not(.dashboard-kpi-card):not(.dashboard-lead-row-action):not(.dashboard-focus-card) {
+  border: 1px solid var(--line) !important;
+}
+
+button:not(.top-nav-item):not(.mobile-tab-item):not(.nav-item):not(.top-language-toggle):not(.tab-btn):not(.client-wizard-step):not(.test-lab-mode-card):not(.dashboard-kpi-card):not(.dashboard-lead-row-action):not(.dashboard-focus-card):hover {
+  border-color: #ffffff !important;
+}
+
+.bubble,
+.crm-message-bubble {
+  background: var(--surface-3) !important;
+}
+
+.bubble.outbound,
+.crm-message-row.outbound .crm-message-bubble {
+  background: var(--surface-selected) !important;
+}
+
+.dashboard-lead-row-action:hover {
+  background: var(--surface-hover) !important;
+  color: var(--text) !important;
+}
+
+button:focus-visible,
+.control:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+.lead-combo-control:focus-visible {
+  border-color: var(--accent) !important;
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent) !important;
+  outline-offset: 2px !important;
+}
+
+/* Typography reset to match the study's quiet, light editorial feel. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0 !important;
+}
+
+.dashboard-hero-copy h2,
+.login-title h1 {
+  font-weight: 300 !important;
+}
+
+.surface-title h1,
+.surface-title h2,
+.surface-title h3,
+.pane-title h3,
+.pane-title h4,
+.client-wizard-title,
+.calendar-month-label,
+.lead-detail-title-row h3 {
+  font-weight: 400 !important;
+}
+
+.stat-card .value,
+.dashboard-kpi-value,
+.dashboard-chart-total,
+.dashboard-trend-summary strong,
+.dashboard-lead-stat-value,
+.dashboard-focus-value,
+.settings-overview-card .value,
+.calendar-overview-stat .value,
+.dashboard-campaign-kpi-value,
+.dashboard-campaign-step-value,
+.settings-calendar-metric-value,
+.test-lab-summary-card .value {
+  font-family: var(--font-display);
+  font-weight: 400 !important;
+}
+
+.brand-title,
+.nav-label,
+.top-nav-item,
+button,
+.item-title,
+.dashboard-lead-name,
+.dashboard-message-name,
+.dashboard-campaign-name,
+.dashboard-agenda-title,
+.dashboard-client-title,
+.lead-overview-name,
+.lead-fact-value,
+.summary-line-value,
+.crm-card .item-title,
+.crm-message-body,
+.bubble,
+.lead-section .title,
+.test-lab-mode-card strong {
+  font-weight: 500 !important;
+}
+
+label,
+.surface-subtitle,
+.helper,
+.meta-text,
+.item-subtitle,
+.item-snippet,
+.item-meta-row,
+.dashboard-kpi-meta,
+.dashboard-kpi-foot,
+.dashboard-lead-stat-meta,
+.dashboard-empty-detail {
+  font-weight: 400 !important;
+}
+
+.dashboard-kicker,
+.dashboard-kpi-label,
+.dashboard-chart-caption,
+.dashboard-trend-label,
+.dashboard-campaign-kpi-label,
+.dashboard-campaign-step-label,
+.dashboard-lead-stat-label,
+.dashboard-focus-label,
+.snippet-label,
+.kv .k,
+.form-answer-label,
+.drawer-kicker,
+.timeline-event-label,
+.test-lab-summary-card .label,
+.test-lab-mode-kicker,
+.settings-calendar-metric-label,
+.settings-time-label,
+.settings-day-name {
+  font-family: var(--font-mono);
+  font-weight: 500 !important;
+}
+
+@media (max-width: 920px) {
+  .surface,
+  .pane,
+  .detail-card,
+  .empty-state,
+  .calendar-day,
+  .contact-action-drawer,
+  #view-tasks tbody tr:not(.task-group-row),
+  #view-logs tbody tr:not(.task-group-row) {
+    border-radius: var(--radius-soft) !important;
+  }
+
+  .dashboard-hero-copy h2 {
+    font-size: 24px;
+  }
+
+  .workspace {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 680px) {
+  .workspace {
+    padding: 8px;
+  }
+
+  .window-chrome {
+    padding: 8px;
+  }
+
+  #view-tasks tbody tr:not(.task-group-row),
+  #view-logs tbody tr:not(.task-group-row) {
+    background: var(--surface) !important;
+  }
+
+  .mobile-tabbar .mobile-tab-item {
+    min-height: 50px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
