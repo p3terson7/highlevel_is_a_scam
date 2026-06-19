@@ -321,12 +321,26 @@ class FakeBookingService:
             },
         }
 
-    def handle_slot_selection(self, *, client: Client, lead, inbound_text: str, history, db=None):
+    def handle_slot_selection(
+        self,
+        *,
+        client: Client,
+        lead,
+        inbound_text: str,
+        history,
+        active_offer=None,
+        resolved_slot_index=None,
+        resolved_slot_start_time=None,
+        db=None,
+    ):
         _ = client
+        _ = resolved_slot_start_time
         _ = db
         self.selection_calls += 1
-        latest_offer = None
+        latest_offer = active_offer if isinstance(active_offer, dict) else None
         for message in reversed(history):
+            if latest_offer is not None:
+                break
             offer = (message.raw_payload or {}).get("booking_offer")
             if isinstance(offer, dict) and isinstance(offer.get("slots"), list):
                 latest_offer = offer
@@ -351,6 +365,23 @@ class FakeBookingService:
         ]
         slots = (latest_offer or {}).get("slots") or fallback_slots
         lower = inbound_text.strip().lower()
+        if resolved_slot_index:
+            selected = next((slot for slot in slots if int(slot.get("index", 0)) == int(resolved_slot_index)), slots[0] if slots else fallback_slots[0])
+            return BookingSelectionResult(
+                handled=True,
+                reply_text=f"Booked. You are set for {selected.get('display_time', 'Mon Mar 09 at 10:00 AM')}. Confirmation will be sent to {lead.email}.",
+                next_state=ConversationStateEnum.BOOKED,
+                raw_payload={
+                    "calendar_booking": {
+                        "provider": "calendly",
+                        "slot": selected,
+                        "booking": {"event_uri": "https://api.calendly.com/scheduled_events/1"},
+                    }
+                },
+                audit_event_type="calendar_booking_created",
+                audit_decision={"inbound": inbound_text},
+                transition_reason="calendar_booking_created",
+            )
         if "3 pm" in lower or "3pm" in lower:
             return None
         if lower not in {"1", "monday 10am", "monday 10 am"} and "monday 10" not in lower:

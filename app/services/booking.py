@@ -152,9 +152,7 @@ def looks_like_slot_selection_message(inbound_text: str) -> bool:
     if _booked_from_reply(raw):
         return False
 
-    if re.fullmatch(r"(option\s*)?[1-3]", normalized):
-        return True
-    if len(normalized.split()) <= 4 and re.search(r"\b(1|2|3)\b", normalized):
+    if re.fullmatch(r"(option\s*)?\d+", normalized):
         return True
 
     has_time_marker = _has_specific_time_request(raw)
@@ -407,6 +405,10 @@ def _slot_commitment_requested(inbound_text: str) -> bool:
     return bool(_SLOT_COMMITMENT_RE.search(str(inbound_text or "")))
 
 
+def _offer_has_slots(offer: dict[str, Any] | None) -> bool:
+    return isinstance(offer, dict) and isinstance(offer.get("slots"), list) and bool(offer.get("slots"))
+
+
 def _reschedule_confirmed(inbound_text: str) -> bool:
     return bool(_RESCHEDULE_CONFIRM_RE.search(str(inbound_text or "")))
 
@@ -426,7 +428,7 @@ def _has_specific_time_request(inbound_text: str) -> bool:
 
 def _is_numeric_slot_reply(inbound_text: str) -> bool:
     normalized = _normalize_slot_text(inbound_text)
-    return bool(re.fullmatch(r"(option\s*)?[1-3]", normalized))
+    return bool(re.fullmatch(r"(option\s*)?\d+", normalized))
 
 
 def _to_utc_datetime(raw_value: str) -> datetime | None:
@@ -702,17 +704,36 @@ class BookingService:
         lead: Lead,
         inbound_text: str,
         history: Sequence[Message],
+        active_offer: dict[str, Any] | None = None,
+        resolved_slot_index: int | None = None,
+        resolved_slot_start_time: str | None = None,
         db: Session | None = None,
     ) -> BookingSelectionResult | None:
-        latest_offer = self._latest_offer(history)
+        latest_offer = active_offer if _offer_has_slots(active_offer) else self._latest_offer(history)
         if latest_offer is None:
             return None
         commitment_requested = _slot_commitment_requested(inbound_text)
-        if not looks_like_slot_selection_message(inbound_text) and not commitment_requested:
+        resolved_selection = bool(resolved_slot_index or resolved_slot_start_time)
+        if not resolved_selection and not looks_like_slot_selection_message(inbound_text) and not commitment_requested:
             return None
 
         slots = latest_offer.get("slots", [])
-        matched = self._match_slot(inbound_text, slots)
+        matched: dict[str, Any] | None = None
+        if resolved_slot_start_time:
+            for slot in slots:
+                if str(slot.get("start_time", "")).strip() == str(resolved_slot_start_time).strip():
+                    matched = slot
+                    break
+        if matched is None and resolved_slot_index:
+            for slot in slots:
+                try:
+                    if int(slot.get("index")) == int(resolved_slot_index):
+                        matched = slot
+                        break
+                except Exception:
+                    continue
+        if matched is None:
+            matched = self._match_slot(inbound_text, slots)
         if matched is None and commitment_requested and len(slots) == 1:
             matched = slots[0]
         if matched is None:

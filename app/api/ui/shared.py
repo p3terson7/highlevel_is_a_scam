@@ -39,6 +39,7 @@ from app.services.booking import (
     ensure_booking_link,
     internal_calendar_preview_config,
 )
+from app.services.agent_control import get_agent_control, set_agent_control
 from app.services.crm import (
     CRM_STAGE_CONTACTED,
     CRM_STAGE_QUALIFIED,
@@ -118,6 +119,13 @@ class HandoffActionRequest(BaseModel):
 
 class ManualMessageRequest(BaseModel):
     body: str
+    pause_agent: bool = False
+
+
+class AgentControlRequest(BaseModel):
+    paused: bool
+    reason: str | None = None
+    note: str | None = None
 
 
 class SandboxFormAnswer(BaseModel):
@@ -971,6 +979,7 @@ def _build_conversation_items(
                 "client_name": lead.client.business_name if lead.client else "",
                 "state": lead.conversation_state.value,
                 "crm_stage": normalize_crm_stage(lead.crm_stage),
+                "agent_control": get_agent_control(lead),
                 "opted_out": lead.opted_out,
                 "tags": tags,
                 "notes_count": notes_count,

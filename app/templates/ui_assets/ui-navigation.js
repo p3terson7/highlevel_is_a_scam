@@ -381,6 +381,35 @@
         renderSettings();
       }
 
+      async function loadAutomationHealth(clientKey = state.selectedClientKey) {
+        const effectiveClientKey = state.session?.role === "client"
+          ? (state.session?.client_key || clientKey)
+          : clientKey;
+        if (!effectiveClientKey) {
+          state.automationHealth = null;
+          renderDashboard();
+          return;
+        }
+        try {
+          state.automationHealth = await apiJson(`/ui/api/clients/${encodeURIComponent(effectiveClientKey)}/automation-health`);
+        } catch (error) {
+          state.automationHealth = {
+            status: "needs_attention",
+            needs_attention: 1,
+            automations: [
+              {
+                key: "automation_health",
+                label: "Automation health",
+                status: "needs_attention",
+                detail: error.message,
+                runs_7d: 0,
+              },
+            ],
+          };
+        }
+        renderDashboard();
+      }
+
       function applyConversationFilterInputs() {
         state.conversationFilters.clientKey = document.getElementById("conversationClientFilter").value;
         state.conversationFilters.state = document.getElementById("conversationStateFilter").value;

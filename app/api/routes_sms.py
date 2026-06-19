@@ -372,15 +372,18 @@ async def inbound_sms(
         return _empty_twiml_response()
 
     if media_attachments and not body:
-        db.add(
-            AuditLog(
-                client_id=client.id,
-                lead_id=lead.id,
-                event_type="inbound_media_received",
-                decision={"attachments": media_attachments, "auto_reply": "skipped_media_only"},
-            )
+        process_inbound_turn(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text="",
+            now=now,
+            sms_service=sms_service,
+            booking_service=booking_service,
+            llm_agent=llm_agent,
+            inbound_message_id=inbound_message.id,
+            media_attachments=media_attachments,
         )
-        db.commit()
         return _empty_twiml_response()
 
     if decision.is_help:
@@ -439,6 +442,7 @@ async def inbound_sms(
             booking_service=booking_service,
             llm_agent=llm_agent,
             inbound_message_id=inbound_message.id,
+            media_attachments=media_attachments,
         )
     else:
         db.commit()

@@ -16,10 +16,16 @@ from app.services.agent_v3_helpers import *
 from app.services.agent_v3_types import *
 from app.services.booking import BookingProviderError, BookingService, automated_booking_enabled, booking_mode_label
 from app.services.i18n import client_language, language_instruction
-from app.services.knowledge import build_knowledge_context
+from app.services.knowledge import build_business_profile_context, build_knowledge_context
 from app.services.lead_summary import normalize_form_answers
 
 logger = get_logger(__name__)
+
+_SLOT_RESOLUTION_JSON_SCHEMA = (
+    '{"decision":"select_slot|ask_clarification|new_times|not_booking",'
+    '"selected_slot_index":1,"selected_slot_start_time":"string|null",'
+    '"reply_text":"string","reasoning_summary":"string"}'
+)
 
 
 class OpenAIProvider:
@@ -105,6 +111,27 @@ class UnavailableLLMProvider:
         raise RuntimeError("LLM provider unavailable")
 
 
+def _offer_has_slots(offer: Any) -> bool:
+    return isinstance(offer, dict) and isinstance(offer.get("slots"), list) and bool(offer.get("slots"))
+
+
+def _active_offer_from_payload(raw_payload: dict[str, Any]) -> dict[str, Any] | None:
+    active = raw_payload.get("active_booking_offer")
+    if _offer_has_slots(active):
+        return active
+    legacy = raw_payload.get("booking_offer")
+    if _offer_has_slots(legacy):
+        return legacy
+    return None
+
+
+def _latest_outbound_body(history: Sequence[Message]) -> str:
+    for message in reversed(history):
+        if message.direction == MessageDirection.OUTBOUND:
+            return str(message.body or "")
+    return ""
+
+
 class LLMAgentV3:
     def __init__(self, provider: LLMProvider) -> None:
         self._provider = provider
@@ -118,6 +145,76 @@ class LLMAgentV3:
     ) -> AgentResponse:
         return self.run_turn(client=client, lead=lead, inbound_text=inbound_text, history=history, booking_service=None, db=None)
 
+    def resolve_booking_selection(
+        self,
+        *,
+        client: Client,
+        lead: Lead,
+        inbound_text: str,
+        history: Sequence[Message],
+        active_offer: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        slots = active_offer.get("slots") if isinstance(active_offer, dict) else []
+        if not isinstance(slots, list) or not slots:
+            return None
+        slot_payload = [
+            {
+                "index": slot.get("index"),
+                "display_time": slot.get("display_time"),
+                "display_hint": slot.get("display_hint"),
+                "start_time": slot.get("start_time"),
+                "end_time": slot.get("end_time"),
+            }
+            for slot in slots
+            if isinstance(slot, dict)
+        ]
+        if not slot_payload:
+            return None
+        system_prompt = (
+            "You resolve a lead's reply to the currently active booking offer.\n"
+            "Use the visible last outbound message and the active structured slots together.\n"
+            "If the last outbound message clearly singled out one slot and the lead affirms it, select that slot even if the active offer contains older alternatives.\n"
+            "If the lead asks for different availability, return new_times.\n"
+            "If the lead is asking a non-booking question, return not_booking.\n"
+            "If the lead wants to book but the slot is genuinely ambiguous, return ask_clarification with a concise natural reply.\n"
+            "Never invent slots. Return strict JSON only with this schema:\n"
+            f"{_SLOT_RESOLUTION_JSON_SCHEMA}"
+        )
+        user_prompt = json.dumps(
+            {
+                "business_name": client.business_name,
+                "response_language": client_language(client, lead=lead, inbound_text=inbound_text),
+                "latest_inbound_message": inbound_text,
+                "last_outbound_message": _latest_outbound_body(history),
+                "active_slots": slot_payload,
+            },
+            ensure_ascii=False,
+        )
+        try:
+            raw = self._provider.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
+        except Exception as exc:
+            logger.warning("booking_slot_resolution_failed", extra={"error": str(exc)})
+            return None
+        decision = str(raw.get("decision") or "").strip().lower()
+        if decision not in {"select_slot", "ask_clarification", "new_times", "not_booking"}:
+            decision = "not_booking"
+        selected_index = _to_int(raw.get("selected_slot_index"), default=0) or None
+        selected_start = str(raw.get("selected_slot_start_time") or "").strip() or None
+        valid_indexes = {int(slot.get("index")) for slot in slot_payload if str(slot.get("index") or "").isdigit()}
+        valid_starts = {str(slot.get("start_time") or "").strip() for slot in slot_payload if str(slot.get("start_time") or "").strip()}
+        if decision == "select_slot" and selected_index not in valid_indexes and selected_start not in valid_starts:
+            decision = "ask_clarification"
+            selected_index = None
+            selected_start = None
+        return {
+            "decision": decision,
+            "selected_slot_index": selected_index,
+            "selected_slot_start_time": selected_start,
+            "reply_text": _trim_sms_text(str(raw.get("reply_text") or "")),
+            "reasoning_summary": str(raw.get("reasoning_summary") or "").strip(),
+            "provider": getattr(self._provider, "name", "unknown"),
+        }
+
     def run_turn(
         self,
         *,
@@ -128,12 +225,19 @@ class LLMAgentV3:
         booking_service: BookingService | None,
         db: Session | None,
     ) -> AgentResponse:
+        provider_config = client.provider_config if isinstance(client.provider_config, dict) else {}
+        business_profile_context = build_business_profile_context(
+            db,
+            client_id=client.id,
+            fallback=str(provider_config.get("business_profile_context") or ""),
+        )
         knowledge_context = build_knowledge_context(db, client_id=client.id, query=inbound_text)
         context = self._build_context(
             client=client,
             lead=lead,
             inbound_text=inbound_text,
             history=history,
+            business_profile_context=business_profile_context,
             knowledge_context=knowledge_context,
         )
         if context.get("identity_question"):
@@ -211,11 +315,12 @@ class LLMAgentV3:
             "Identity policy:\n"
             f"- Your name is {_ASSISTANT_NAME}. You are an assistant, not the business owner, founder, employee, or human salesperson.\n"
             "- If asked who you are, say you are the assistant for the business and can help answer questions or book a meeting.\n"
-            "- If asked who owns, founded, runs, or is behind the business, answer only from faq_context or knowledge_context; if it is not present, say you do not have confirmed founder/owner details in context.\n"
-            "Use faq_context as the source of truth for services, offerings, and process rules.\n"
-            "Use knowledge_context as source-backed website content for specific service, policy, and process facts.\n"
+            "- If asked who owns, founded, runs, or is behind the business, answer only from faq_context, business_profile_context, or knowledge_context; if it is not present, say you do not have confirmed founder/owner details in context.\n"
+            "Use business_profile_context as always-on website-derived business memory for normal conversation. Consider it before saying you do not know a general business fact.\n"
+            "Use faq_context as the source of truth for manually configured services, offerings, and process rules.\n"
+            "Use knowledge_context as source-backed website content for specific service, policy, and process facts. If knowledge_context is empty, still use business_profile_context.\n"
             "Use ai_context for business-provided positioning, tone, do/don't-say guidance, and pricing only when pricing_context_available is true.\n"
-            "If neither faq_context nor knowledge_context answers a factual question, say what you can confirm and avoid inventing details.\n"
+            "If neither faq_context, business_profile_context, nor knowledge_context answers a factual question, say what you can confirm and avoid inventing details.\n"
             "Lead context policy:\n"
             "- lead_form_answers, known_form_facts, and qualification_memory are already-known information from the form or prior conversation.\n"
             "- Never ask the lead to repeat a known fact such as scope, service, size, timeline, role, contact preference, or location unless they contradicted it.\n"
@@ -235,7 +340,10 @@ class LLMAgentV3:
             "- LOW_INTENT: nurture and educate. Do not push a call; ask what they are trying to understand.\n"
             "Conversation rules:\n"
             "- Be concise, clear, natural, and helpful. Usually 1-2 short SMS-sized sentences.\n"
+            "- First choose conversation_act based on the lead's actual intent, then write the reply and tool_call to match that act.\n"
             "- If the lead asks a question, answer it first. Only after answering should you guide to a next step, and only if useful.\n"
+            "- Do not append a generic call/meeting CTA to factual answers, identity answers, or the first outreach message.\n"
+            "- A soft call CTA is appropriate only when the lead asks about pricing/quote details that cannot be confirmed here, or when the lead explicitly asks for next steps or scheduling.\n"
             "- Ask at most one follow-up question. Never dump multiple intake questions.\n"
             "- Do not repeat a question in asked_question_keys.\n"
             "- Avoid repeating meeting CTAs. Respect cta_state.meeting_rejected and cta_state.suppress_meeting_cta.\n"
@@ -247,7 +355,13 @@ class LLMAgentV3:
             "- Do not invent guarantees, deadlines, availability, or service details.\n"
             "- Do not impersonate a human, founder, owner, or employee. If the lead asks for a person, use handoff_to_human.\n"
             "- A booked lead can still ask questions. Keep helping without rebooking.\n"
+            "Handoff boundaries:\n"
+            "- Use handoff_to_human when the lead explicitly asks for a person, is frustrated, asks for a firm/custom quote, raises a complaint/refund/account issue, asks for legal/contract/warranty/guarantee commitments, or needs media/image analysis.\n"
+            "- If you are unsure after one attempt, do not keep guessing. Say you do not want to guess and hand off with a concise summary.\n"
+            "- Never make binding commitments, guarantee outcomes, promise deadlines, or provide exact pricing unless those facts are explicitly present in context.\n"
             "Booking tool rules:\n"
+            "- If the lead says they are interested in a call, wants to book, wants to talk, asks for availability, or asks to set something up, conversation_act must be offer_slots and tool_call must be find_slots.\n"
+            "- Never answer a call/scheduling request with only 'yes I can help'; request find_slots so the backend sends real times.\n"
             "- Only call find_slots when the lead explicitly asks for times, shares availability, chooses to schedule, or clearly says they want to book now.\n"
             "- If the lead asks about another day or another time, use the booking tools rather than repeating the same slots.\n"
             "- If the lead already has a booked meeting and asks to reschedule, use booking tools to find or confirm a replacement time.\n"
@@ -256,6 +370,9 @@ class LLMAgentV3:
             "- If the lead already booked, use tool_call mark_booked.\n"
             "- If the lead asks for a human, use tool_call handoff_to_human.\n"
             "Tool rules:\n"
+            "- conversation_act offer_slots requires tool_call find_slots.\n"
+            "- conversation_act book_selected_slot requires tool_call book_slot when the lead chose a presented slot.\n"
+            "- conversation_act handoff requires tool_call handoff_to_human.\n"
             "- tool_call none: no backend action needed, just send a normal reply.\n"
             "- tool_call find_slots: use when the lead wants availability, asks about a specific day/time, or you are ready to present live times. Args can include preferred_day, preferred_period, exact_time, range_start, range_end, and limit.\n"
             "- tool_call book_slot: use when the lead has clearly chosen one of the offered slots. Args can include slot_index or slot_start_time.\n"
@@ -278,6 +395,7 @@ class LLMAgentV3:
             f"- You are {_ASSISTANT_NAME}, the assistant for the business. Never write as the founder, owner, or a human employee.\n"
             f"- Use conversation_context.response_language for the reply language. {language_instruction(workspace_language)}\n"
             "- Use the tool_result as the source of truth.\n"
+            "- Use conversation_context.business_profile_context as always-on website-derived business memory when wording the final answer.\n"
             "- Never invent availability or claim a slot is unavailable unless tool_result.match_mode says the request could not be matched exactly.\n"
             "- Mention only times that exist in tool_result.slots.\n"
             "- Keep the tone human and concise.\n"
@@ -302,6 +420,7 @@ class LLMAgentV3:
         lead: Lead,
         inbound_text: str,
         history: Sequence[Message],
+        business_profile_context: str = "",
         knowledge_context: str = "",
     ) -> dict[str, Any]:
         normalized_answers = normalize_form_answers(lead.form_answers or {})
@@ -316,14 +435,23 @@ class LLMAgentV3:
         memory = _merge_memory(prior_memory, answer_memory, history_memory, inbound_memory)
         recent_messages = [_serialize_message(message) for message in history[-20:]]
         asked_question_keys = _extract_asked_question_keys(history)
-        latest_offer = _latest_booking_offer(history)
+        active_offer = _active_offer_from_payload(raw_payload)
+        latest_offer = active_offer or _latest_booking_offer(history)
         answered_missing_field_keys = _extract_answered_missing_field_keys(history)
-        explicit_booking_intent = _has_booking_intent(inbound_text)
+        allow_generic_booking_confirmation = bool(
+            latest_offer
+            or _message_suggests_meeting(_latest_outbound_text(recent_messages) or "")
+        )
+        explicit_booking_intent = _has_booking_intent(
+            inbound_text,
+            allow_generic_confirmation=allow_generic_booking_confirmation,
+        )
         if explicit_booking_intent:
             memory.booking_intent_locked = True
         booking_ready, booking_gap_fields = _booking_threshold(memory=memory)
         flow_state = str(raw_payload.get("flow_state") or "NEW").strip().upper()
         inbound_preferences = _extract_booking_preferences(inbound_text)
+        scheduling_intent_detected = _has_scheduling_intent(inbound_text)
         known_form_facts = _build_known_form_facts(normalized_answers, lead=lead)
         acknowledged_form_fact_keys = _extract_acknowledged_form_fact_keys(known_form_facts=known_form_facts, history=history)
         important_missing_fields = _important_missing_fields(
@@ -365,6 +493,7 @@ class LLMAgentV3:
             "faq_context": client.faq_context or "",
             "ai_context": ai_context,
             "pricing_context_available": pricing_context_available,
+            "business_profile_context": business_profile_context,
             "knowledge_context": knowledge_context,
             "agent_identity": _agent_identity_context(client),
             "identity_question": _is_identity_question(inbound_text),
@@ -399,9 +528,11 @@ class LLMAgentV3:
             "automated_booking_enabled": automated_booking_enabled(client),
             "booking_url": client.booking_url or "",
             "latest_booking_offer": latest_offer,
+            "active_booking_offer": active_offer,
             "latest_inbound_booking_preferences": inbound_preferences,
             "available_tools": ["find_slots", "book_slot", "mark_booked", "handoff_to_human"],
             "explicit_booking_intent": explicit_booking_intent,
+            "scheduling_intent_detected": scheduling_intent_detected,
             "booked_confirmation_intent": bool(_BOOKED_CONFIRM_PATTERN.search(inbound_text or "")),
             "handoff_intent": bool(_HANDOFF_PATTERN.search(inbound_text or "")),
             "closing_only": bool(_CLOSING_PATTERN.match((inbound_text or "").strip())),
@@ -453,6 +584,7 @@ class LLMAgentV3:
             dict(inbound_preferences or {}),
             latest_offer=context.get("latest_booking_offer"),
         )
+        scheduling_intent_detected = bool(context.get("scheduling_intent_detected"))
         reschedule_requested = bool(
             current_state == ConversationStateEnum.BOOKED.value
             and (
@@ -532,7 +664,79 @@ class LLMAgentV3:
                 if not decision.reply_text or "booked" in decision.reply_text.lower():
                     decision.reply_text = "I can lock that in once you pick one of the offered times."
 
-        should_offer_slots_now = bool(context.get("explicit_booking_intent")) or bool(inbound_preferences)
+        cta_state = context.get("cta_state") if isinstance(context.get("cta_state"), dict) else {}
+        planned_act = str(decision.conversation_act or "answer_question")
+        normalized_planner_intent = _normalize_text(decision.lead_intent)
+        planner_intent_wants_slots = bool(
+            "wants call" in normalized_planner_intent
+            or "wants meeting" in normalized_planner_intent
+            or "wants appointment" in normalized_planner_intent
+            or "wants schedule" in normalized_planner_intent
+            or "wants booking" in normalized_planner_intent
+            or "book now" in normalized_planner_intent
+            or "schedule now" in normalized_planner_intent
+            or "ready to book" in normalized_planner_intent
+            or "ready to schedule" in normalized_planner_intent
+        )
+        if planned_act == "handoff" and decision.tool_call.name == "none":
+            decision.tool_call = ToolCall(name="handoff_to_human", args={})
+            decision.action = "handoff_to_human"
+            decision.next_state = ConversationStateEnum.HANDOFF
+            decision.next_question_key = None
+            return _finalize_response_with_context(decision, context)
+
+        if planned_act == "book_selected_slot" and decision.tool_call.name == "none":
+            if slot_choice:
+                args: dict[str, Any] = {}
+                if slot_choice.get("slot_index"):
+                    args["slot_index"] = slot_choice["slot_index"]
+                if slot_choice.get("slot_start_time"):
+                    args["slot_start_time"] = slot_choice["slot_start_time"]
+                decision.tool_call = ToolCall(name="book_slot", args=args)
+                decision.action = "none"
+                decision.next_state = ConversationStateEnum.BOOKING_SENT
+                decision.next_question_key = None
+            elif current_state == ConversationStateEnum.BOOKING_SENT.value:
+                decision.conversation_act = "offer_slots"
+
+        planner_wants_slots = bool(
+            decision.tool_call.name == "none"
+            and current_state != ConversationStateEnum.BOOKED.value
+            and not context.get("call_refusal")
+            and not cta_state.get("meeting_rejected")
+            and (
+                planned_act == "offer_slots"
+                or (planned_act == "reschedule" and current_state != ConversationStateEnum.BOOKED.value)
+                or planner_intent_wants_slots
+                or (scheduling_intent_detected and _message_suggests_meeting(decision.reply_text))
+            )
+        )
+        if planner_wants_slots:
+            decision.tool_call = ToolCall(name="find_slots", args=refreshed_time_preferences)
+            decision.action = "none"
+            decision.next_state = ConversationStateEnum.BOOKING_SENT
+            decision.next_question_key = None
+            decision.runtime_payload["planner_validation"] = "forced_find_slots"
+
+        answer_first_blocks_booking = bool(
+            not reschedule_requested
+            and not slot_choice
+            and not context.get("booked_confirmation_intent")
+            and not context.get("handoff_intent")
+            and (
+                (bool(context.get("pricing_question")) and not bool(context.get("explicit_booking_intent")))
+                or (bool(context.get("lead_question_detected")) and not scheduling_intent_detected)
+            )
+        )
+
+        should_offer_slots_now = bool(
+            context.get("explicit_booking_intent")
+            or (inbound_preferences and scheduling_intent_detected)
+            or decision.tool_call.name in {"find_slots", "book_slot"}
+            or planned_act in {"offer_slots", "book_selected_slot", "reschedule"}
+        )
+        if answer_first_blocks_booking:
+            should_offer_slots_now = False
         if reschedule_requested:
             should_offer_slots_now = True
         if current_state == ConversationStateEnum.BOOKING_SENT.value and not should_offer_slots_now:
@@ -553,7 +757,6 @@ class LLMAgentV3:
                 "schedule",
             }
 
-        cta_state = context.get("cta_state") if isinstance(context.get("cta_state"), dict) else {}
         suppress_meeting_cta = bool(
             cta_state.get("meeting_rejected")
             or cta_state.get("suppress_meeting_cta")
@@ -570,16 +773,60 @@ class LLMAgentV3:
                 if decision.next_state == ConversationStateEnum.BOOKING_SENT:
                     decision.next_state = ConversationStateEnum.QUALIFYING
             if _message_suggests_meeting(decision.reply_text):
+                original_reply_text = decision.reply_text
                 decision.reply_text = _strip_meeting_cta(
                     decision.reply_text,
                     fallback=_non_booking_bridge_reply(context),
                 )
+                if decision.reply_text != original_reply_text:
+                    decision.runtime_payload["meeting_cta_stripped"] = True
+
+        if answer_first_blocks_booking:
+            if decision.tool_call.name in {"find_slots", "book_slot"}:
+                decision.tool_call = ToolCall()
+            if decision.action == "offer_booking":
+                decision.action = "none"
+            if decision.next_state == ConversationStateEnum.BOOKING_SENT:
+                if current_state == ConversationStateEnum.BOOKED.value:
+                    decision.next_state = ConversationStateEnum.BOOKED
+                elif current_state == ConversationStateEnum.BOOKING_SENT.value:
+                    decision.next_state = ConversationStateEnum.BOOKING_SENT
+                else:
+                    decision.next_state = ConversationStateEnum.QUALIFYING
+            decision.next_question_key = None
+            decision.runtime_payload["booking_blocked_reason"] = "answer_first_question"
+            if bool(context.get("pricing_question")) and not bool(context.get("pricing_context_available")):
+                decision.reply_text = _non_booking_bridge_reply(context)
+                if _message_suggests_meeting(decision.reply_text):
+                    decision.runtime_payload["soft_cta_type"] = "consultation_call"
+            elif not decision.reply_text or _message_suggests_meeting(decision.reply_text):
+                original_reply_text = decision.reply_text
+                original_had_meeting_cta = _message_suggests_meeting(original_reply_text)
+                decision.reply_text = _strip_meeting_cta(
+                    decision.reply_text,
+                    fallback=_non_booking_bridge_reply(context),
+                )
+                if original_had_meeting_cta and decision.reply_text != original_reply_text:
+                    decision.runtime_payload["meeting_cta_stripped"] = True
+
+        meeting_cta_allowed = _meeting_cta_allowed_for_turn(context)
+        if decision.tool_call.name == "none" and not meeting_cta_allowed and _message_suggests_meeting(decision.reply_text):
+            decision.reply_text = _strip_meeting_cta(
+                decision.reply_text,
+                fallback=_non_booking_bridge_reply(context),
+            )
+            if decision.action == "offer_booking":
+                decision.action = "none"
+            if decision.next_state == ConversationStateEnum.BOOKING_SENT:
+                decision.next_state = ConversationStateEnum.QUALIFYING
+            decision.runtime_payload["meeting_cta_stripped"] = True
 
         if (
             current_state == ConversationStateEnum.BOOKING_SENT.value
             and refreshed_time_preferences
             and not slot_choice
             and decision.tool_call.name == "none"
+            and not answer_first_blocks_booking
         ):
             decision.tool_call = ToolCall(name="find_slots", args=refreshed_time_preferences)
             decision.action = "none"
@@ -767,10 +1014,14 @@ class LLMAgentV3:
         if not final.reply_text:
             final.reply_text = str(tool_result.get("fallback_reply") or decision.reply_text or "Understood.")
         if tool_result.get("kind") == "slots":
+            # The structured offer must exactly match the times the lead sees.
+            final.reply_text = str(tool_result.get("fallback_reply") or final.reply_text)
             final.reply_text = _ensure_slot_fallback_line(
                 final.reply_text,
                 language=str(context.get("response_language") or "en"),
             )
+        elif tool_result.get("kind") == "no_slots":
+            final.reply_text = str(tool_result.get("fallback_reply") or final.reply_text)
         return _finalize_response_with_context(final, context)
 
     def _execute_tool(
@@ -785,7 +1036,7 @@ class LLMAgentV3:
         db: Session | None,
     ) -> dict[str, Any]:
         args = tool_call.args or {}
-        latest_offer = _latest_booking_offer(history)
+        latest_offer = context.get("latest_booking_offer") if _offer_has_slots(context.get("latest_booking_offer")) else _latest_booking_offer(history)
         inferred_preferences = _booking_preferences_with_offer_context(
             _extract_booking_preferences(str(context.get("latest_inbound_message") or "")),
             latest_offer=latest_offer,

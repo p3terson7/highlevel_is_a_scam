@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from app.core.deps import get_booking_service, get_llm_agent
-from app.db.models import CalendarBooking, Client, ConversationStateEnum, Lead, LeadSource, Message, MessageAttachment, MessageDirection
+from app.db.models import AuditLog, CalendarBooking, Client, ConversationStateEnum, Lead, LeadSource, Message, MessageAttachment, MessageDirection
 from app.db.session import get_session_factory
 from app.services.booking import BookingService
 from app.services.llm_agent import AgentResponse, LLMAgent
@@ -125,7 +125,88 @@ def test_sms_inbound_duplicate_messagesid_is_idempotent(test_context):
         assert len(inbound_messages) == 1
 
 
-def test_sms_inbound_media_only_is_stored_without_auto_reply(test_context, monkeypatch):
+def test_sms_inbound_paused_agent_logs_message_without_reply(test_context):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = Lead(
+            client_id=1,
+            external_lead_id="meta-lead-paused-001",
+            source=LeadSource.META,
+            full_name="Paused Lead",
+            phone="+15550007777",
+            email="paused@example.com",
+            city="Denver",
+            form_answers={"interest": "roof replacement"},
+            raw_payload={
+                "source": "seed",
+                "agent_control": {
+                    "paused": True,
+                    "mode": "paused",
+                    "reason": "operator_testing",
+                },
+            },
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.commit()
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 000-7777",
+            "Body": "Are you still there?",
+            "MessageSid": "SM-IN-PAUSED-001",
+        },
+    )
+
+    assert response.status_code == 200
+    assert test_context.fake_llm.calls == 0
+    assert test_context.fake_sms.sent == []
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15550007777"))
+        assert lead is not None
+        inbound = db.scalar(
+            select(Message).where(
+                Message.lead_id == lead.id,
+                Message.direction == MessageDirection.INBOUND,
+                Message.provider_message_sid == "SM-IN-PAUSED-001",
+            )
+        )
+        assert inbound is not None
+        audit = db.scalar(select(AuditLog).where(AuditLog.lead_id == lead.id, AuditLog.event_type == "agent_reply_suppressed"))
+        assert audit is not None
+        assert audit.decision["reason"] == "operator_testing"
+
+
+def test_sms_inbound_explicit_human_request_handoffs_without_llm(test_context):
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 000-4411",
+            "Body": "Can someone from your team call me?",
+            "MessageSid": "SM-IN-HANDOFF-001",
+        },
+    )
+
+    assert response.status_code == 200
+    assert test_context.fake_llm.calls == 0
+    assert len(test_context.fake_sms.sent) == 1
+    assert "someone" in test_context.fake_sms.sent[-1]["body"].lower() or "team" in test_context.fake_sms.sent[-1]["body"].lower()
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15550004411"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.HANDOFF
+        assert lead.raw_payload["handoff"]["reason"] == "explicit_human_request"
+        audit = db.scalar(select(AuditLog).where(AuditLog.lead_id == lead.id, AuditLog.event_type == "agent_handoff_triggered"))
+        assert audit is not None
+        assert audit.decision["reason"] == "explicit_human_request"
+
+
+def test_sms_inbound_media_only_is_stored_and_handed_off(test_context, monkeypatch):
     async def fake_download_twilio_media(**kwargs):
         assert kwargs["media_url"] == "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME"
         assert kwargs["content_type"] == "image/jpeg"
@@ -147,13 +228,16 @@ def test_sms_inbound_media_only_is_stored_without_auto_reply(test_context, monke
 
     assert response.status_code == 200
     assert test_context.fake_llm.calls == 0
-    assert test_context.fake_sms.sent == []
+    assert len(test_context.fake_sms.sent) == 1
+    assert "attachment" in test_context.fake_sms.sent[-1]["body"].lower()
 
     SessionLocal = get_session_factory()
     with SessionLocal() as db:
         lead = db.scalar(select(Lead).where(Lead.phone == "+15550004455"))
         assert lead is not None
         lead_id = lead.id
+        assert lead.conversation_state == ConversationStateEnum.HANDOFF
+        assert lead.raw_payload["handoff"]["reason"] == "unsupported_media"
         message = db.scalar(select(Message).where(Message.lead_id == lead.id, Message.direction == MessageDirection.INBOUND))
         assert message is not None
         assert message.raw_payload["attachments"][0]["media_kind"] == "image"
@@ -699,6 +783,115 @@ def test_sms_inbound_natural_slot_confirmation_still_books(test_context):
     app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
 
 
+def test_sms_inbound_llm_resolves_lock_it_in_against_visible_single_slot(test_context):
+    from app.main import app
+
+    class SlotResolutionLLM:
+        def __init__(self) -> None:
+            self.resolve_calls = 0
+            self.run_calls = 0
+
+        def resolve_booking_selection(self, *, client: Client, lead, inbound_text: str, history, active_offer):
+            _ = client
+            _ = lead
+            self.resolve_calls += 1
+            assert inbound_text == "Yes lock it in"
+            assert any("Friday works" in str(message.body or "") for message in history)
+            assert len(active_offer["slots"]) == 5
+            return {
+                "decision": "select_slot",
+                "selected_slot_index": 2,
+                "selected_slot_start_time": None,
+                "reply_text": "",
+                "reasoning_summary": "The visible outbound singled out the Friday slot and the lead affirmed it.",
+            }
+
+        def run_turn(self, *, client: Client, lead, inbound_text: str, history, booking_service=None, db=None):
+            _ = client
+            _ = lead
+            _ = inbound_text
+            _ = history
+            _ = booking_service
+            _ = db
+            self.run_calls += 1
+            raise AssertionError("Main LLM turn should not run after slot resolution selects a slot.")
+
+        def next_reply(self, client: Client, lead, inbound_text: str, history):
+            return self.run_turn(client=client, lead=lead, inbound_text=inbound_text, history=history)
+
+    slot_resolution_llm = SlotResolutionLLM()
+    app.dependency_overrides[get_llm_agent] = lambda: slot_resolution_llm
+
+    slots = [
+        {"index": 1, "start_time": "2026-06-18T15:00:00Z", "display_time": "Thu Jun 18 at 11:00 AM"},
+        {"index": 2, "start_time": "2026-06-19T13:30:00Z", "display_time": "Fri Jun 19 at 9:30 AM"},
+        {"index": 3, "start_time": "2026-06-22T13:30:00Z", "display_time": "Mon Jun 22 at 9:30 AM"},
+        {"index": 4, "start_time": "2026-06-23T13:30:00Z", "display_time": "Tue Jun 23 at 9:30 AM"},
+        {"index": 5, "start_time": "2026-06-24T13:30:00Z", "display_time": "Wed Jun 24 at 9:30 AM"},
+    ]
+    active_offer = {"provider": "calendly", "slots": slots}
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="meta-lead-021",
+            source=LeadSource.META,
+            full_name="Friday Lock Lead",
+            phone="+15551231234",
+            email="friday-lock@example.com",
+            city="Denver",
+            form_answers={"interest": "consultation"},
+            raw_payload={
+                "source": "seed",
+                "pending_step": "slot_selection_pending",
+                "booking_offer": active_offer,
+                "active_booking_offer": active_offer,
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.flush()
+        db.add(
+            Message(
+                client_id=client.id,
+                lead_id=lead.id,
+                direction=MessageDirection.OUTBOUND,
+                body="Friday works — I have Fri Jun 19 at 9:30 AM EDT. If you want, I can lock that in now.",
+                provider_message_sid="SM-OFFER-FRIDAY-SINGLE",
+                raw_payload={"booking_offer": active_offer},
+            )
+        )
+        db.commit()
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 123-1234",
+            "Body": "Yes lock it in",
+            "MessageSid": "SM-IN-021",
+        },
+    )
+
+    assert response.status_code == 200
+    assert slot_resolution_llm.resolve_calls == 1
+    assert slot_resolution_llm.run_calls == 0
+    assert "fri jun 19 at 9:30 am" in test_context.fake_sms.sent[-1]["body"].lower()
+    assert "did not catch" not in test_context.fake_sms.sent[-1]["body"].lower()
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15551231234"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.BOOKED
+        assert "active_booking_offer" not in (lead.raw_payload or {})
+
+    app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+
+
 def test_sms_inbound_premature_mark_booked_without_booking_does_not_set_booked(test_context):
     from app.main import app
 
@@ -860,5 +1053,55 @@ def test_sms_inbound_booked_lead_can_still_get_answers(test_context):
         lead = db.scalar(select(Lead).where(Lead.phone == "+15558880000"))
         assert lead is not None
         assert lead.conversation_state.value == "BOOKED"
+
+    app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+
+
+def test_sms_inbound_post_llm_unsupported_commitment_is_handed_off(test_context):
+    from app.main import app
+
+    class RiskyCommitmentLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run_turn(self, *, client: Client, lead, inbound_text: str, history, booking_service=None, db=None):
+            _ = client
+            _ = lead
+            _ = inbound_text
+            _ = history
+            _ = booking_service
+            _ = db
+            self.calls += 1
+            return AgentResponse(
+                reply_text="We guarantee we will meet that deadline.",
+                next_state=ConversationStateEnum.QUALIFYING,
+                action="none",
+            )
+
+        def next_reply(self, client: Client, lead, inbound_text: str, history):
+            return self.run_turn(client=client, lead=lead, inbound_text=inbound_text, history=history)
+
+    risky_llm = RiskyCommitmentLLM()
+    app.dependency_overrides[get_llm_agent] = lambda: risky_llm
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 000-4422",
+            "Body": "Can you finish this by Friday?",
+            "MessageSid": "SM-IN-HANDOFF-002",
+        },
+    )
+
+    assert response.status_code == 200
+    assert risky_llm.calls == 1
+    assert "guarantee" not in test_context.fake_sms.sent[-1]["body"].lower()
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15550004422"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.HANDOFF
+        assert lead.raw_payload["handoff"]["reason"] == "unsupported_commitment"
 
     app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm

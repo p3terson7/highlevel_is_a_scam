@@ -467,6 +467,47 @@ def test_conversation_thread_notes_and_actions(test_context):
     assert any(item["event_type"] == "admin_marked_handoff" for item in handoff_thread["audit_events"])
 
 
+def test_conversation_agent_control_pause_resume_and_manual_takeover(test_context):
+    test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).join(Client).where(Client.client_key == "demo-roofing"))
+        assert lead is not None
+        lead_id = lead.id
+
+    pause = test_context.client.patch(
+        f"/ui/api/conversations/{lead_id}/agent-control",
+        headers=_admin_headers(),
+        json={"paused": True, "reason": "operator_testing", "note": "Owner is taking over."},
+    )
+    assert pause.status_code == 200
+    assert pause.json()["agent_control"]["paused"] is True
+    assert pause.json()["agent_control"]["reason"] == "operator_testing"
+
+    thread = test_context.client.get(f"/ui/api/conversations/{lead_id}/thread", headers=_admin_headers()).json()
+    assert thread["lead"]["agent_control"]["paused"] is True
+    assert any(item["event_type"] == "agent_paused" for item in thread["audit_events"])
+
+    resume = test_context.client.patch(
+        f"/ui/api/conversations/{lead_id}/agent-control",
+        headers=_admin_headers(),
+        json={"paused": False, "reason": "operator_done"},
+    )
+    assert resume.status_code == 200
+    assert resume.json()["agent_control"]["paused"] is False
+
+    manual = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/messages/manual",
+        headers=_admin_headers(),
+        json={"body": "I can take this one from here.", "pause_agent": True},
+    )
+    assert manual.status_code == 200
+    assert manual.json()["agent_control"]["paused"] is True
+    assert manual.json()["agent_control"]["reason"] == "manual_reply_takeover"
+    assert test_context.fake_sms.sent[-1]["body"] == "I can take this one from here."
+
+
 def test_zapier_results_console_endpoint_returns_recent_events(test_context):
     zapier_payload = {
         "id": "zap-ui-001",

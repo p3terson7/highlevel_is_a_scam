@@ -478,6 +478,53 @@
         return `${meetingRows}${taskRows}`;
       }
 
+      function automationTone(status) {
+        const key = String(status || "").toLowerCase();
+        if (key === "healthy") return "ok";
+        if (key === "needs_setup" || key === "needs_attention") return "warn";
+        return "";
+      }
+
+      function renderDashboardAutomationHealth() {
+        const target = document.getElementById("dashboardAutomationHealth");
+        if (!target) return;
+        const health = state.automationHealth;
+        const rows = Array.isArray(health?.automations) ? health.automations : [];
+        if (!health || !rows.length) {
+          target.innerHTML = renderDashboardEmptyState(
+            "Automation status is loading.",
+            "This panel will show which background flows are healthy, missing setup, or need attention.",
+            [{ label: "Refresh", primary: true, attrs: { "data-action": "refresh-automation-health" } }]
+          );
+          return;
+        }
+        const summaryBadge = renderBadge(
+          health.status === "healthy" ? "healthy" : `${health.needs_attention || 0} needs attention`,
+          health.status === "healthy" ? "ok" : "warn"
+        );
+        target.innerHTML = `
+          <div class="automation-health-summary">
+            <div>
+              <div class="title">System visibility</div>
+              <div class="meta-text">Last refreshed ${escapeHtml(formatDateTime(health.generated_at))}</div>
+            </div>
+            ${summaryBadge}
+          </div>
+          <div class="automation-health-rows">
+            ${rows.map((item) => `
+              <div class="automation-health-row">
+                <div>
+                  <div class="item-title">${escapeHtml(item.label || item.key || "Automation")}</div>
+                  <div class="item-snippet">${escapeHtml(item.detail || "No detail available.")}</div>
+                  <div class="meta-text">${escapeHtml(item.last_run_at ? `Last run ${formatDateTime(item.last_run_at)}` : "No recent run")} · ${escapeHtml(String(item.runs_7d || 0))} runs / 7d</div>
+                </div>
+                ${renderBadge(String(item.status || "unknown").replaceAll("_", " "), automationTone(item.status))}
+              </div>
+            `).join("")}
+          </div>
+        `;
+      }
+
       function renderDashboard() {
         if (!state.dashboard) return;
         const stats = state.dashboard.stats;
@@ -534,5 +581,6 @@
         document.getElementById("dashboardCampaignPerformance").innerHTML = renderDashboardCampaignPerformance(state.dashboard.campaign_performance || {});
         document.getElementById("dashboardStageBreakdown").innerHTML = renderDashboardStageChart(state.dashboard.stage_breakdown || []);
         document.getElementById("dashboardUpcoming").innerHTML = renderDashboardUpcoming(state.dashboard.upcoming || {});
+        renderDashboardAutomationHealth();
         renderDashboardLatestLeads(state.dashboard.recent_leads || [], stats);
       }

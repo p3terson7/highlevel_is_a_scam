@@ -14,7 +14,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.db.models import KnowledgeChunk, KnowledgeSource
+from app.db.models import Client, KnowledgeChunk, KnowledgeSource
 
 _DEFAULT_TIMEOUT_SECONDS = 15
 _MAX_HTML_BYTES = 1_500_000
@@ -169,10 +169,12 @@ class KnowledgeIngestionService:
                 pages.append(_source_extraction_payload(source=source, chunks=[]))
 
         db.flush()
+        business_profile_context = refresh_business_profile_context(db, client_id=client_id)
         return {
             "pages": pages,
             "total_pages": len(pages),
             "total_chunks": sum(len(page.get("chunks", [])) for page in pages),
+            "business_profile_context": business_profile_context,
         }
 
     def _fetch_url(self, url: str) -> FetchResult:
@@ -241,6 +243,7 @@ def knowledge_payload(db: Session, *, client_id: int) -> dict[str, Any]:
             "error": "Knowledge tables are not migrated yet. Run alembic upgrade head.",
         }
 
+    business_profile_context = build_business_profile_context(db, client_id=client_id)
     return {
         "sources": [
             _source_payload(source=source, chunks=chunks_by_source.get(source.id, []))
@@ -248,6 +251,7 @@ def knowledge_payload(db: Session, *, client_id: int) -> dict[str, Any]:
         ],
         "total_sources": len(sources),
         "total_chunks": sum(len(items) for items in chunks_by_source.values()),
+        "business_profile_context": business_profile_context,
     }
 
 
@@ -314,6 +318,78 @@ def build_knowledge_context(db: Session | None, *, client_id: int, query: str, l
         lines.append(block)
         total_chars += len(block)
     return "\n\n".join(lines)
+
+
+def build_business_profile_context(db: Session | None, *, client_id: int, fallback: str = "") -> str:
+    if db is None:
+        return fallback.strip()
+    try:
+        client = db.get(Client, client_id)
+        if client is not None:
+            stored = _stored_business_profile(client)
+            if stored:
+                return stored
+        return _compose_business_profile_from_sources(db, client_id=client_id)
+    except SQLAlchemyError:
+        db.rollback()
+        return fallback.strip()
+
+
+def refresh_business_profile_context(db: Session, *, client_id: int) -> str:
+    profile = _compose_business_profile_from_sources(db, client_id=client_id)
+    client = db.get(Client, client_id)
+    if client is not None:
+        provider_config = dict(client.provider_config or {})
+        if profile:
+            provider_config["business_profile_context"] = profile
+        else:
+            provider_config.pop("business_profile_context", None)
+        client.provider_config = provider_config
+        db.add(client)
+    return profile
+
+
+def _stored_business_profile(client: Client) -> str:
+    provider_config = client.provider_config if isinstance(client.provider_config, dict) else {}
+    return " ".join(str(provider_config.get("business_profile_context") or "").split()).strip()
+
+
+def _compose_business_profile_from_sources(db: Session, *, client_id: int, limit: int = 1800) -> str:
+    sources = db.scalars(
+        select(KnowledgeSource)
+        .where(KnowledgeSource.client_id == client_id, KnowledgeSource.status == "ok")
+        .order_by(KnowledgeSource.updated_at.desc(), KnowledgeSource.id.desc())
+    ).all()
+    if not sources:
+        return ""
+    source_ids = [source.id for source in sources]
+    chunks_by_source: dict[int, list[KnowledgeChunk]] = {source.id: [] for source in sources}
+    if source_ids:
+        chunks = db.scalars(
+            select(KnowledgeChunk)
+            .where(KnowledgeChunk.source_id.in_(source_ids))
+            .order_by(KnowledgeChunk.source_id.asc(), KnowledgeChunk.chunk_index.asc())
+        ).all()
+        for chunk in chunks:
+            chunks_by_source.setdefault(chunk.source_id, []).append(chunk)
+
+    lines = ["Website-derived business profile. Use this as always-on business memory:"]
+    total_chars = len(lines[0])
+    for source in sources[:8]:
+        title = _clean_inline_text(source.title or "Website page")[:140]
+        excerpt = _clean_inline_text(source.text_excerpt or "")
+        if not excerpt:
+            first_chunk = next(iter(chunks_by_source.get(source.id, [])), None)
+            excerpt = _clean_inline_text(first_chunk.content if first_chunk else "")
+        if not excerpt:
+            continue
+        excerpt = summarize_excerpt(excerpt, limit=420)
+        bullet = f"- {title}: {excerpt}"
+        if total_chars + len(bullet) + 1 > limit:
+            break
+        lines.append(bullet)
+        total_chars += len(bullet) + 1
+    return "\n".join(lines).strip() if len(lines) > 1 else ""
 
 
 def normalize_source_url(raw_url: str) -> str:

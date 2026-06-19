@@ -60,6 +60,7 @@
                     <div class="item-title-row">
                       <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Contact ${item.lead_id}`)}</div>
                       <div class="actions">
+                        <button class="small ghost" type="button" data-action="open-contact-drawer" data-lead-id="${item.lead_id}" data-source="pipeline">Message</button>
                         ${maybeRenderConversationState(item.crm_stage, item.conversation_state)}
                       </div>
                     </div>
@@ -179,6 +180,7 @@
                   <div class="item-title-row">
                     <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Contact ${item.lead_id}`)}</div>
                     <div class="actions">
+                      <button class="small ghost" type="button" data-action="open-contact-drawer" data-lead-id="${item.lead_id}" data-source="records-list">Message</button>
                       ${renderBadge(item.crm_stage || "New Lead", crmStageTone(item.crm_stage))}
                     </div>
                   </div>
@@ -206,6 +208,11 @@
           setText("crmLeadHeaderLineSecondary", "");
           document.getElementById("crmLeadArchiveButton").textContent = "Archive";
           document.getElementById("crmLeadArchiveButton").disabled = true;
+          const emptyCrmLeadMessageButton = document.getElementById("crmLeadMessageButton");
+          if (emptyCrmLeadMessageButton) {
+            emptyCrmLeadMessageButton.disabled = true;
+            delete emptyCrmLeadMessageButton.dataset.leadId;
+          }
           document.getElementById("crmLeadEmpty").classList.remove("hidden");
           document.getElementById("crmLeadDetail").classList.add("hidden");
           return;
@@ -241,6 +248,12 @@
         setText("crmLeadHeaderLineSecondary", headerSecondary || "");
         document.getElementById("crmLeadArchiveButton").textContent = archived ? "Restore to inbox" : "Archive";
         document.getElementById("crmLeadArchiveButton").disabled = false;
+        const crmLeadMessageButton = document.getElementById("crmLeadMessageButton");
+        if (crmLeadMessageButton) {
+          crmLeadMessageButton.disabled = false;
+          crmLeadMessageButton.dataset.leadId = String(payload.lead.id);
+          crmLeadMessageButton.dataset.source = "record";
+        }
         document.getElementById("crmLeadEmpty").classList.add("hidden");
         document.getElementById("crmLeadDetail").classList.remove("hidden");
         document.getElementById("crmLeadStageSelect").value = stage;
@@ -400,6 +413,7 @@
                   <td data-label="Actions">
                     <div class="actions">
                       <button class="small ghost" data-action="crm-task-toggle" data-task-id="${task.id}" data-next-status="${task.status === "done" ? "open" : "done"}">${task.status === "done" ? "Reopen" : "Done"}</button>
+                      <button class="small ghost" data-action="open-contact-drawer" data-lead-id="${task.lead_id}" data-source="task">Message</button>
                       <button class="small ghost" data-action="open-crm-lead" data-lead-id="${task.lead_id}">Open</button>
                     </div>
                   </td>
@@ -487,6 +501,7 @@
             <div class="item-meta-row">
               <div class="meta-text">${escapeHtml([item.phone || "", item.email || ""].filter(Boolean).join(" · ") || "No contact details")}</div>
               <div class="actions calendar-item-actions">
+                ${item.lead_id ? `<button class="small ghost" data-action="open-contact-drawer" data-lead-id="${item.lead_id}" data-source="calendar">Message</button>` : ""}
                 ${item.lead_id ? `<button class="small ghost" data-action="open-crm-lead" data-lead-id="${item.lead_id}">Open</button>` : ""}
                 <details class="action-menu">
                   <summary class="small ghost">Actions</summary>
@@ -518,6 +533,7 @@
               <div class="meta-text">${escapeHtml(`${task.lead_name || "Contact"} · ${dueText}`)}</div>
               <div class="actions">
                 <button class="small ghost" data-action="crm-task-toggle" data-task-id="${task.id}" data-next-status="${task.status === "done" ? "open" : "done"}">${task.status === "done" ? "Reopen" : "Done"}</button>
+                <button class="small ghost" data-action="open-contact-drawer" data-lead-id="${task.lead_id}" data-source="task">Message</button>
                 <button class="small ghost" data-action="open-crm-lead" data-lead-id="${task.lead_id}">Open</button>
               </div>
             </div>
@@ -1149,8 +1165,14 @@
           document.getElementById("threadArchiveButton").textContent = "Archive";
           document.getElementById("threadArchiveButton").disabled = true;
           document.getElementById("threadHandoffButton").disabled = true;
+          const emptyThreadActionsButton = document.getElementById("threadContactActionsButton");
+          if (emptyThreadActionsButton) {
+            emptyThreadActionsButton.disabled = true;
+            delete emptyThreadActionsButton.dataset.leadId;
+          }
           document.getElementById("threadHeaderPills").classList.add("hidden");
           document.getElementById("threadHeaderPills").innerHTML = "";
+          document.getElementById("threadPauseAfterSendWrap")?.classList.add("hidden");
           document.getElementById("threadTimeline").innerHTML = '<div class="empty-state">Open a conversation from the left pane.</div>';
           document.getElementById("threadCrmStageSelect").value = "New Lead";
           document.getElementById("threadNoteInput").placeholder = isClientRole() ? "Add a private note for your team." : "Add an internal note.";
@@ -1197,6 +1219,12 @@
         document.getElementById("threadArchiveButton").textContent = archived ? "Restore" : "Archive";
         document.getElementById("threadArchiveButton").disabled = false;
         document.getElementById("threadHandoffButton").disabled = false;
+        const threadActionsButton = document.getElementById("threadContactActionsButton");
+        if (threadActionsButton) {
+          threadActionsButton.disabled = false;
+          threadActionsButton.dataset.leadId = String(payload.lead.id);
+          threadActionsButton.dataset.source = "thread";
+        }
         const threadHeaderPills = document.getElementById("threadHeaderPills");
         threadHeaderPills.classList.add("hidden");
         threadHeaderPills.innerHTML = "";
@@ -1262,6 +1290,21 @@
         const threadLeadName = payload.lead.display_name || payload.lead.phone || "Contact";
         const threadLeadStage = payload.lead.crm_stage || "New Lead";
         const threadState = payload.lead.current_state || "";
+        const threadAgentControl = payload.lead.agent_control || {};
+        const threadAgentPaused = Boolean(threadAgentControl.paused);
+        const threadAgentLabel = threadAgentControl.mode === "handoff"
+          ? "Human handoff"
+          : (threadAgentPaused ? "AI paused" : "AI active");
+        threadHeaderPills.classList.remove("hidden");
+        threadHeaderPills.innerHTML = [
+          renderBadge(threadAgentLabel, threadAgentPaused ? "warn" : "ok"),
+          sandboxThread ? renderBadge("sandbox", "info") : "",
+        ].filter(Boolean).join("");
+        const pauseAfterSend = document.getElementById("threadPauseAfterSend");
+        if (pauseAfterSend && !document.getElementById("threadManualMessage")?.value.trim()) {
+          pauseAfterSend.checked = threadAgentPaused;
+        }
+        document.getElementById("threadPauseAfterSendWrap")?.classList.toggle("hidden", sandboxThread);
         setText("threadLeadOverviewName", threadLeadName);
         const threadPhoneDisplay = formatPhoneNumber(payload.lead.phone);
         const threadEmailDisplay = String(payload.lead.email || "").trim();
@@ -1708,6 +1751,11 @@
         }).join("");
 
         const lines = [];
+        if (state.knowledge?.business_profile_context) {
+          lines.push("Business profile context used on every AI turn:");
+          lines.push(state.knowledge.business_profile_context);
+          lines.push("");
+        }
         sources.forEach((source, sourceIndex) => {
           lines.push(`[${sourceIndex + 1}] ${source.title || source.url}`);
           lines.push(`URL: ${source.url}`);

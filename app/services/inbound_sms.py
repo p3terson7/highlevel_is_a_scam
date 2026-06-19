@@ -17,6 +17,7 @@ from app.db.models import (
     MessageDirection,
 )
 from app.services.booking import (
+    BookingSelectionResult,
     BookingService,
     calendar_booking_confirmed,
     extract_email,
@@ -24,17 +25,25 @@ from app.services.booking import (
     looks_like_booking_commitment,
     looks_like_slot_selection_message,
 )
+from app.services.agent_control import should_suppress_ai_reply
 from app.services.crm import (
     CRM_STAGE_CONTACTED,
     CRM_STAGE_MEETING_BOOKED,
     progress_crm_stage,
 )
+from app.services.handoff_policy import (
+    HandoffDecision,
+    build_handoff_state,
+    evaluate_post_llm_handoff,
+    evaluate_pre_llm_handoff,
+)
 from app.services.llm_agent import LLMAgent
-from app.services.i18n import remember_lead_language
+from app.services.i18n import client_language, remember_lead_language
 from app.services.sms_service import SMSService
 from app.services.zapier_booking import notify_zapier_booking_webhook
 
 _PENDING_STEP_KEY = "pending_step"
+_ACTIVE_BOOKING_OFFER_KEY = "active_booking_offer"
 _PENDING_RESCHEDULE_KEY = "pending_reschedule_confirmation"
 _RESCHEDULE_PENDING_STEP = "reschedule_confirmation_pending"
 _DEFAULT_HISTORY_LIMIT = 40
@@ -104,6 +113,26 @@ def _current_pending_step(lead: Lead) -> str:
     return str(raw_payload.get(_PENDING_STEP_KEY) or "").strip()
 
 
+def _offer_has_slots(offer: Any) -> bool:
+    return isinstance(offer, dict) and isinstance(offer.get("slots"), list) and bool(offer.get("slots"))
+
+
+def _active_booking_offer(lead: Lead, history: list[Message] | None = None) -> dict[str, Any] | None:
+    raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    active = raw_payload.get(_ACTIVE_BOOKING_OFFER_KEY)
+    if _offer_has_slots(active):
+        return active
+    legacy = raw_payload.get("booking_offer")
+    if _offer_has_slots(legacy):
+        return legacy
+    for message in reversed(history or []):
+        raw = message.raw_payload if isinstance(message.raw_payload, dict) else {}
+        offer = raw.get("booking_offer")
+        if _offer_has_slots(offer):
+            return offer
+    return None
+
+
 def _store_agent_memory(
     *,
     lead: Lead,
@@ -121,6 +150,12 @@ def _store_agent_memory(
         payload[_PENDING_STEP_KEY] = pending_step
     else:
         payload.pop(_PENDING_STEP_KEY, None)
+    if runtime_payload.get("booking_offer"):
+        payload["booking_offer"] = runtime_payload["booking_offer"]
+        payload[_ACTIVE_BOOKING_OFFER_KEY] = runtime_payload["booking_offer"]
+    if runtime_payload.get("calendar_booking") or agent_response.next_state == ConversationStateEnum.BOOKED:
+        payload.pop("booking_offer", None)
+        payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
     for key in (
         "cta_state",
         "intent_level",
@@ -159,15 +194,25 @@ def _should_try_deterministic_slot_selection(*, lead: Lead, inbound_text: str) -
     pending_step = _current_pending_step(lead)
     if pending_step != "slot_selection_pending":
         return False
-    return looks_like_slot_selection_message(inbound_text) or looks_like_booking_commitment(inbound_text)
+    return looks_like_slot_selection_message(inbound_text)
+
+
+def _should_try_deterministic_commitment(*, lead: Lead, inbound_text: str) -> bool:
+    pending_step = _current_pending_step(lead)
+    if pending_step != "slot_selection_pending":
+        return False
+    return looks_like_booking_commitment(inbound_text)
 
 
 def _merge_booking_flow_memory(*, lead: Lead, runtime_payload: dict[str, Any], next_state: ConversationStateEnum) -> None:
     payload = dict(lead.raw_payload or {})
     if "booking_offer" in runtime_payload and runtime_payload["booking_offer"]:
         payload["booking_offer"] = runtime_payload["booking_offer"]
+        payload[_ACTIVE_BOOKING_OFFER_KEY] = runtime_payload["booking_offer"]
     if "calendar_booking" in runtime_payload and runtime_payload["calendar_booking"]:
         payload["calendar_booking"] = runtime_payload["calendar_booking"]
+        payload.pop("booking_offer", None)
+        payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
     if _PENDING_RESCHEDULE_KEY in runtime_payload:
         pending = runtime_payload.get(_PENDING_RESCHEDULE_KEY)
         if isinstance(pending, dict) and pending:
@@ -178,6 +223,9 @@ def _merge_booking_flow_memory(*, lead: Lead, runtime_payload: dict[str, Any], n
         payload[_PENDING_STEP_KEY] = str(runtime_payload["pending_step"])
     elif "pending_step" in runtime_payload or next_state == ConversationStateEnum.BOOKED:
         payload.pop(_PENDING_STEP_KEY, None)
+        if next_state == ConversationStateEnum.BOOKED:
+            payload.pop("booking_offer", None)
+            payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
     lead.raw_payload = payload
 
 
@@ -292,6 +340,239 @@ def _apply_booking_selection_result(
         )
 
 
+def _booking_clarification_result(
+    *,
+    client: Client,
+    lead: Lead,
+    inbound_text: str,
+    active_offer: dict[str, Any],
+    resolution: dict[str, Any],
+) -> BookingSelectionResult:
+    language = client_language(client, lead=lead, inbound_text=inbound_text)
+    reply_text = str(resolution.get("reply_text") or "").strip()
+    if not reply_text:
+        slots = active_offer.get("slots") if isinstance(active_offer.get("slots"), list) else []
+        labels = []
+        for slot in slots[:5]:
+            if not isinstance(slot, dict):
+                continue
+            index = slot.get("index")
+            display = str(slot.get("display_time") or "").strip()
+            if index and display:
+                labels.append(f"{index}) {display}")
+        if language == "fr":
+            reply_text = "Quel créneau voulez-vous réserver?" + (f"\n" + "\n".join(labels) if labels else "")
+        else:
+            reply_text = "Which call time should I lock in?" + (f"\n" + "\n".join(labels) if labels else "")
+    return BookingSelectionResult(
+        handled=True,
+        reply_text=reply_text,
+        next_state=ConversationStateEnum.BOOKING_SENT,
+        raw_payload={
+            "booking_offer": active_offer,
+            _ACTIVE_BOOKING_OFFER_KEY: active_offer,
+            "pending_step": "slot_selection_pending",
+            "booking_resolution": resolution,
+        },
+        audit_event_type="calendar_booking_clarification_requested",
+        audit_decision={"inbound": inbound_text, "booking_resolution": resolution},
+        transition_reason="calendar_booking_clarification_requested",
+    )
+
+
+def _resolve_booking_selection_with_llm(
+    *,
+    client: Client,
+    lead: Lead,
+    inbound_text: str,
+    history: list[Message],
+    llm_agent: LLMAgent,
+    booking_service: BookingService,
+    active_offer: dict[str, Any] | None,
+    db: Session,
+) -> BookingSelectionResult | None:
+    if not _offer_has_slots(active_offer):
+        return None
+    resolver = getattr(llm_agent, "resolve_booking_selection", None)
+    if not callable(resolver):
+        return None
+    resolution = resolver(
+        client=client,
+        lead=lead,
+        inbound_text=inbound_text,
+        history=history,
+        active_offer=active_offer,
+    )
+    if not isinstance(resolution, dict):
+        return None
+    decision = str(resolution.get("decision") or "").strip().lower()
+    if decision == "select_slot":
+        handle_slot_selection = getattr(booking_service, "handle_slot_selection", None)
+        if not callable(handle_slot_selection):
+            return None
+        return handle_slot_selection(
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            history=history,
+            active_offer=active_offer,
+            resolved_slot_index=resolution.get("selected_slot_index"),
+            resolved_slot_start_time=resolution.get("selected_slot_start_time"),
+            db=db,
+        )
+    if decision == "ask_clarification":
+        return _booking_clarification_result(
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            active_offer=active_offer,
+            resolution=resolution,
+        )
+    return None
+
+
+def _inbound_media_from_message(db: Session, inbound_message_id: int | None) -> list[dict[str, Any]]:
+    if inbound_message_id is None:
+        return []
+    message = db.get(Message, inbound_message_id)
+    if message is None:
+        return []
+    raw_payload = message.raw_payload if isinstance(message.raw_payload, dict) else {}
+    attachments = raw_payload.get("attachments") if isinstance(raw_payload.get("attachments"), list) else []
+    return [item for item in attachments if isinstance(item, dict)]
+
+
+def _merge_policy_state_updates(*, lead: Lead, decision: HandoffDecision) -> None:
+    if not decision.state_updates:
+        return
+    payload = dict(lead.raw_payload or {})
+    for key, value in decision.state_updates.items():
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+    lead.raw_payload = payload
+
+
+def _apply_handoff_decision(
+    *,
+    db: Session,
+    client: Client,
+    lead: Lead,
+    inbound_text: str,
+    turn_time: datetime,
+    sms_service: SMSService,
+    decision: HandoffDecision,
+    inbound_message_id: int | None,
+    source: str,
+    provider: str = "handoff_policy",
+    provider_error: str | None = None,
+) -> None:
+    _merge_policy_state_updates(lead=lead, decision=decision)
+    pending_step_before = _current_pending_step(lead) or None
+    created_at = turn_time.isoformat()
+    handoff_state = build_handoff_state(decision, created_at=created_at)
+    payload = dict(lead.raw_payload or {})
+    if handoff_state:
+        payload["handoff"] = handoff_state
+    payload.pop(_PENDING_STEP_KEY, None)
+    lead.raw_payload = payload
+
+    reply_text = f"{decision.reply_text}{handoff_suffix(client)}".strip()
+    outbound_raw_payload: dict[str, Any] = {
+        "agent": {
+            "action": "handoff_to_human",
+            "handoff_level": decision.level,
+            "handoff_reason": decision.reason,
+            "handoff_summary": decision.summary,
+            "provider": provider,
+            "provider_error": provider_error,
+        },
+        "actions": [{"type": "handoff_to_human", "payload": {"level": decision.level, "reason": decision.reason}}],
+        "handoff": handoff_state,
+        "pending_step_before": pending_step_before,
+        "pending_step_after": None,
+    }
+    if inbound_message_id is not None:
+        outbound_raw_payload["inbound_message_id"] = int(inbound_message_id)
+
+    sid = sms_service.send_message(to_number=lead.phone, body=reply_text)
+    _store_outbound_message(
+        db=db,
+        lead=lead,
+        body=reply_text,
+        provider_sid=sid,
+        raw_payload=outbound_raw_payload,
+        created_at=turn_time,
+    )
+
+    previous_state = lead.conversation_state
+    lead.conversation_state = ConversationStateEnum.HANDOFF
+    lead.last_outbound_at = turn_time
+    _auto_update_crm_stage(
+        db=db,
+        lead=lead,
+        client_id=client.id,
+        target_stage=CRM_STAGE_CONTACTED,
+        reason="agent_handoff_triggered",
+        inbound_text=inbound_text,
+    )
+
+    if previous_state != lead.conversation_state:
+        db.add(
+            ConversationState(
+                lead_id=lead.id,
+                previous_state=previous_state,
+                new_state=lead.conversation_state,
+                reason="agent_handoff_triggered",
+                metadata_json={
+                    **outbound_raw_payload,
+                    "source": source,
+                    "provider": provider,
+                },
+                created_at=turn_time,
+            )
+        )
+
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type="agent_handoff_triggered",
+            decision={
+                "source": source,
+                "reason": decision.reason,
+                "level": decision.level,
+                "inbound": inbound_text,
+                "outbound": reply_text,
+                "provider": provider,
+                "provider_error": provider_error,
+                "summary": decision.summary,
+                "actions": outbound_raw_payload["actions"],
+            },
+            created_at=turn_time,
+        )
+    )
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type="agent_decision",
+            decision={
+                "inbound": inbound_text,
+                "outbound": reply_text,
+                "next_state": lead.conversation_state.value,
+                "provider": provider,
+                "provider_error": provider_error,
+                **outbound_raw_payload,
+            },
+            created_at=turn_time,
+        )
+    )
+    db.commit()
+    incr("sms_outbound_total")
+
+
 def process_inbound_turn(
     *,
     db: Session,
@@ -304,6 +585,7 @@ def process_inbound_turn(
     llm_agent: LLMAgent,
     inbound_message_id: int | None = None,
     history_limit: int = _DEFAULT_HISTORY_LIMIT,
+    media_attachments: list[dict[str, Any]] | None = None,
 ) -> None:
     turn_time = now or datetime.now(timezone.utc)
 
@@ -314,13 +596,33 @@ def process_inbound_turn(
         .limit(max(10, int(history_limit)))
     ).all()
     history = list(reversed(recent_desc))
+    inbound_media_attachments = media_attachments if media_attachments is not None else _inbound_media_from_message(db, inbound_message_id)
 
     detected_email = extract_email(inbound_text)
     if detected_email and not lead.email:
         lead.email = detected_email
 
     remember_lead_language(client, lead, inbound_text=inbound_text)
+    should_suppress, suppress_reason = should_suppress_ai_reply(lead)
+    if should_suppress:
+        db.add(
+            AuditLog(
+                client_id=client.id,
+                lead_id=lead.id,
+                event_type="agent_reply_suppressed",
+                decision={
+                    "inbound": inbound_text,
+                    "reason": suppress_reason,
+                    "inbound_message_id": inbound_message_id,
+                },
+                created_at=turn_time,
+            )
+        )
+        db.commit()
+        return
+
     pending_step_before = _current_pending_step(lead)
+    active_offer_before = _active_booking_offer(lead, history)
 
     deterministic_result = None
     if _has_pending_reschedule(lead):
@@ -341,6 +643,77 @@ def process_inbound_turn(
                 lead=lead,
                 inbound_text=inbound_text,
                 history=history,
+                active_offer=active_offer_before,
+                db=db,
+            )
+    if deterministic_result is not None and deterministic_result.handled:
+        _apply_booking_selection_result(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            turn_time=turn_time,
+            sms_service=sms_service,
+            result=deterministic_result,
+            inbound_message_id=inbound_message_id,
+            pending_step_before=pending_step_before,
+        )
+        return
+
+    pre_handoff = evaluate_pre_llm_handoff(
+        client=client,
+        lead=lead,
+        inbound_text=inbound_text,
+        history=history,
+        media_attachments=inbound_media_attachments,
+    )
+    if pre_handoff.should_handoff:
+        _apply_handoff_decision(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            turn_time=turn_time,
+            sms_service=sms_service,
+            decision=pre_handoff,
+            inbound_message_id=inbound_message_id,
+            source="pre_llm",
+        )
+        return
+
+    deterministic_result = _resolve_booking_selection_with_llm(
+        client=client,
+        lead=lead,
+        inbound_text=inbound_text,
+        history=history,
+        llm_agent=llm_agent,
+        booking_service=booking_service,
+        active_offer=active_offer_before,
+        db=db,
+    )
+    if deterministic_result is not None and deterministic_result.handled:
+        _apply_booking_selection_result(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            turn_time=turn_time,
+            sms_service=sms_service,
+            result=deterministic_result,
+            inbound_message_id=inbound_message_id,
+            pending_step_before=pending_step_before,
+        )
+        return
+
+    if deterministic_result is None and _should_try_deterministic_commitment(lead=lead, inbound_text=inbound_text):
+        handle_slot_selection = getattr(booking_service, "handle_slot_selection", None)
+        if callable(handle_slot_selection):
+            deterministic_result = handle_slot_selection(
+                client=client,
+                lead=lead,
+                inbound_text=inbound_text,
+                history=history,
+                active_offer=active_offer_before,
                 db=db,
             )
     if deterministic_result is not None and deterministic_result.handled:
@@ -405,6 +778,31 @@ def process_inbound_turn(
                 decision={"inbound": inbound_text, "provider": agent_response.provider, "provider_error": agent_response.provider_error},
             )
         )
+
+    post_handoff = evaluate_post_llm_handoff(
+        client=client,
+        lead=lead,
+        inbound_text=inbound_text,
+        reply_text=reply_text,
+        history=history,
+        runtime_payload=runtime_payload,
+    )
+    if post_handoff.should_handoff:
+        _apply_handoff_decision(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            turn_time=turn_time,
+            sms_service=sms_service,
+            decision=post_handoff,
+            inbound_message_id=inbound_message_id,
+            source="post_llm",
+            provider=agent_response.provider,
+            provider_error=agent_response.provider_error,
+        )
+        return
+    _merge_policy_state_updates(lead=lead, decision=post_handoff)
 
     if effective_action == "handoff_to_human":
         reply_text = f"{reply_text}{handoff_suffix(client)}".strip()

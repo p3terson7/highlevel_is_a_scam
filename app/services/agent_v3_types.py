@@ -12,6 +12,16 @@ QuestionKey = Literal[
     "urgency_driver",
 ]
 IntentLevel = Literal["HIGH_INTENT", "MEDIUM_INTENT", "LOW_INTENT"]
+ConversationAct = Literal[
+    "answer_question",
+    "answer_then_soft_cta",
+    "ask_clarifying_question",
+    "offer_slots",
+    "book_selected_slot",
+    "reschedule",
+    "handoff",
+    "nurture",
+]
 ActionType = Literal["none", "ask_next_question", "offer_booking", "mark_booked", "handoff_to_human"]
 ToolName = Literal["none", "find_slots", "book_slot", "mark_booked", "handoff_to_human"]
 
@@ -21,6 +31,16 @@ _ALLOWED_STATES = {
     ConversationStateEnum.BOOKING_SENT,
     ConversationStateEnum.BOOKED,
     ConversationStateEnum.HANDOFF,
+}
+_ALLOWED_CONVERSATION_ACTS = {
+    "answer_question",
+    "answer_then_soft_cta",
+    "ask_clarifying_question",
+    "offer_slots",
+    "book_selected_slot",
+    "reschedule",
+    "handoff",
+    "nurture",
 }
 _BOOKED_CONFIRM_PATTERN = re.compile(
     r"\b(i booked|we booked|booked already|already booked|appointment booked|scheduled it|i scheduled|i'm booked|im booked|"
@@ -88,9 +108,9 @@ _CALL_REFUSAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _MEETING_CTA_PATTERN = re.compile(
-    r"\b(scoping call|quick call|short call|short meeting|meeting|appointment|book(?:ing)?|schedule|calendar|"
+    r"\b(scoping call|consultation call|strategy call|quick call|short call|short meeting|meeting|appointment|book(?:ing)?|schedule|calendar|"
     r"availability|available times|send (?:over )?times|share (?:live )?times|find (?:a )?time|"
-    r"connect with (?:the )?team|coordinate (?:the )?next step|talk (?:with|to) (?:someone|the team))\b",
+    r"line up (?:a )?(?:call|meeting|appointment|strategy call)|connect with (?:the )?team|coordinate (?:the )?next step|talk (?:with|to) (?:someone|the team))\b",
     re.IGNORECASE,
 )
 _BUYING_SIGNAL_PATTERN = re.compile(
@@ -105,6 +125,8 @@ _SCOPE_QUANTITY_PATTERN = re.compile(
 _DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
 _TOOL_JSON_SCHEMA = (
     '{"reply_text":"string","next_state":"QUALIFYING|BOOKING_SENT|BOOKED|HANDOFF",'
+    '"conversation_act":"answer_question|answer_then_soft_cta|ask_clarifying_question|offer_slots|book_selected_slot|reschedule|handoff|nurture",'
+    '"lead_intent":"string","confidence":0.0,"reasoning_summary":"string","uses_knowledge_context":"boolean",'
     '"collected_fields":{"service_needed":"string|null","timeline":"string|null","locations":"string|null",'
     '"decision_makers":"string|null","urgency_driver":"string|null","booking_intent_locked":"boolean"},'
     '"next_question_key":"decision_makers|urgency_driver|null",'
@@ -214,6 +236,11 @@ class AgentResponse(BaseModel):
 
     reply_text: str = ""
     next_state: ConversationStateEnum = ConversationStateEnum.QUALIFYING
+    conversation_act: ConversationAct = "answer_question"
+    lead_intent: str = ""
+    confidence: float = 0.0
+    reasoning_summary: str = ""
+    uses_knowledge_context: bool = False
     collected_fields: QualificationMemory = Field(default_factory=QualificationMemory)
     next_question_key: QuestionKey | None = None
     action: ActionType = "none"
@@ -230,6 +257,10 @@ class AgentResponse(BaseModel):
         raw = dict(data)
         raw.setdefault("collected_fields", {})
         raw.setdefault("tool_call", {"name": "none", "args": {}})
+        raw.setdefault("lead_intent", "")
+        raw.setdefault("reasoning_summary", "")
+        raw.setdefault("confidence", 0.0)
+        raw.setdefault("uses_knowledge_context", False)
         tool = raw.get("tool_call")
         if isinstance(tool, dict):
             name = str(tool.get("name", "")).strip().lower()
@@ -238,6 +269,23 @@ class AgentResponse(BaseModel):
         action = str(raw.get("action", "")).strip().lower()
         if action == "send_booking_link":
             raw["action"] = "offer_booking"
+        conversation_act = str(raw.get("conversation_act") or "").strip().lower()
+        if conversation_act not in _ALLOWED_CONVERSATION_ACTS:
+            tool_name = str((raw.get("tool_call") or {}).get("name") if isinstance(raw.get("tool_call"), dict) else "").strip().lower()
+            action_name = str(raw.get("action") or "").strip().lower()
+            if tool_name == "find_slots":
+                conversation_act = "offer_slots"
+            elif tool_name == "book_slot":
+                conversation_act = "book_selected_slot"
+            elif tool_name == "handoff_to_human" or action_name == "handoff_to_human":
+                conversation_act = "handoff"
+            elif action_name == "ask_next_question":
+                conversation_act = "ask_clarifying_question"
+            elif action_name == "offer_booking":
+                conversation_act = "answer_then_soft_cta"
+            else:
+                conversation_act = "answer_question"
+        raw["conversation_act"] = conversation_act
         return raw
 
     @property

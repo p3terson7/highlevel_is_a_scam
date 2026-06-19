@@ -49,15 +49,19 @@ def test_knowledge_ingestion_endpoint_returns_extraction_result(test_context, mo
     assert payload["total_chunks"] >= 1
     assert payload["extraction"]["pages"][0]["status"] == "ok"
     assert "battery storage" in payload["extraction"]["pages"][0]["text_excerpt"].lower()
+    assert "battery storage" in payload["extraction"]["business_profile_context"].lower()
+    assert "battery storage" in payload["business_profile_context"].lower()
 
     refreshed = test_context.client.get(
         f"/ui/api/owner/{test_context.client_key}/knowledge",
         headers=_admin_headers(),
     )
     assert refreshed.status_code == 200
-    source = refreshed.json()["sources"][0]
+    refreshed_payload = refreshed.json()
+    source = refreshed_payload["sources"][0]
     assert source["title"] == "Acme Solar Services"
     assert source["chunks"]
+    assert "battery storage" in refreshed_payload["business_profile_context"].lower()
 
 
 def test_agent_receives_retrieved_website_knowledge_context(test_context, monkeypatch):
@@ -86,6 +90,7 @@ def test_agent_receives_retrieved_website_knowledge_context(test_context, monkey
             assert "knowledge_context" in system_prompt
             payload = json.loads(user_prompt)
             assert "commercial bim" in payload["knowledge_context"].lower()
+            assert "commercial bim" in payload["business_profile_context"].lower()
             return {
                 "reply_text": "Yes, we handle commercial BIM and Revit models for retail spaces.",
                 "next_state": "QUALIFYING",
@@ -133,6 +138,83 @@ def test_agent_receives_retrieved_website_knowledge_context(test_context, monkey
         )
 
     assert "commercial bim" in response.reply_text.lower()
+
+
+def test_agent_receives_business_profile_context_when_retrieval_has_no_exact_match(test_context, monkeypatch):
+    def fake_fetch(self, url: str) -> FetchResult:
+        _ = self
+        return FetchResult(
+            url=url,
+            status_code=200,
+            html="""
+            <html>
+              <head><title>Acme Energy Services</title></head>
+              <body>
+                <main>
+                  <h1>Solar installation and battery storage</h1>
+                  <p>We install residential solar systems, battery storage, and EV charger-ready electrical upgrades.</p>
+                  <p>Service areas include Austin, Round Rock, and nearby suburbs.</p>
+                </main>
+              </body>
+            </html>
+            """,
+        )
+
+    class BusinessProfileAwareProvider:
+        name = "business-profile-aware"
+
+        def generate_json(self, system_prompt: str, user_prompt: str):
+            assert "business_profile_context" in system_prompt
+            payload = json.loads(user_prompt)
+            assert not payload["knowledge_context"].strip()
+            assert "battery storage" in payload["business_profile_context"].lower()
+            return {
+                "reply_text": "We can help with solar installation and battery storage questions.",
+                "next_state": "QUALIFYING",
+                "collected_fields": payload["qualification_memory"],
+                "next_question_key": None,
+                "action": "none",
+                "tool_call": {"name": "none", "args": {}},
+            }
+
+    monkeypatch.setattr(KnowledgeIngestionService, "_fetch_url", fake_fetch)
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        KnowledgeIngestionService().ingest_urls(
+            db=db,
+            client_id=client.id,
+            urls=["https://acme.example/services"],
+            replace=True,
+        )
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.MANUAL,
+            full_name="Business Memory Lead",
+            phone="+15550003333",
+            email="business-memory@example.com",
+            city="Austin",
+            form_answers={},
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.QUALIFYING,
+        )
+        db.add(lead)
+        db.flush()
+
+        response = LLMAgent(provider=BusinessProfileAwareProvider()).run_turn(
+            client=client,
+            lead=lead,
+            inbound_text="Can you help me understand the basics?",
+            history=[],
+            booking_service=None,
+            db=db,
+        )
+
+    assert "battery storage" in response.reply_text.lower()
 
 
 def test_extraction_filters_navigation_footer_and_chunks_without_mid_word_overlap():

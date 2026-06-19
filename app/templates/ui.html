@@ -212,6 +212,18 @@
                       </div>
                       <div id="dashboardUpcoming" class="dashboard-agenda-list"></div>
                     </div>
+                    <div class="surface dashboard-panel dashboard-panel-medium automation-health-panel">
+                      <div class="surface-title">
+                        <div>
+                          <h3>Automation health</h3>
+                          <div class="surface-subtitle">A simple status check for the flows running behind the scenes.</div>
+                        </div>
+                        <div class="actions">
+                          <button class="small ghost" data-action="open-automation-details">View details</button>
+                        </div>
+                      </div>
+                      <div id="dashboardAutomationHealth" class="automation-health-list"></div>
+                    </div>
                   </div>
 
                   <div class="surface dashboard-panel dashboard-panel-light dashboard-latest-panel">
@@ -614,6 +626,7 @@
                       <h3 id="threadTitle">Thread</h3>
                     </div>
                     <div id="threadHeaderPills" class="chip-row"></div>
+                    <button id="threadContactActionsButton" class="small ghost" type="button" data-action="open-contact-drawer">Actions</button>
                   </div>
                   <div id="threadTimeline" class="timeline"></div>
                   <div class="composer">
@@ -653,6 +666,10 @@
                       </div>
                       <div id="threadMediaPreview" class="composer-media-preview hidden"></div>
                       <div class="composer-foot">
+                        <label id="threadPauseAfterSendWrap" class="checkbox-inline composer-pause-control">
+                          <input id="threadPauseAfterSend" type="checkbox" />
+                          <span>Pause AI after this manual reply</span>
+                        </label>
                         <div id="threadComposerHint" class="meta-text"></div>
                         <div id="threadManualStatus" class="meta-text"></div>
                       </div>
@@ -859,6 +876,7 @@
                         <div id="crmLeadHeaderLineSecondary" class="lead-detail-meta"></div>
                     </div>
                     <div class="actions">
+                      <button id="crmLeadMessageButton" class="small" type="button" data-action="open-contact-drawer">Message</button>
                       <button id="crmLeadBackButton" class="small ghost hidden">Back to pipeline</button>
                       <button id="crmLeadArchiveButton" class="small ghost hidden">Archive</button>
                     </div>
@@ -1630,6 +1648,20 @@
           </div>
         </main>
       </div>
+      <div id="contactActionDrawerBackdrop" class="drawer-backdrop hidden" data-action="close-contact-drawer"></div>
+      <aside id="contactActionDrawer" class="contact-action-drawer hidden" aria-hidden="true">
+        <div class="drawer-header">
+          <div>
+            <div class="drawer-kicker">Contact control</div>
+            <h3 id="contactDrawerTitle">Contact</h3>
+            <div id="contactDrawerSubtitle" class="surface-subtitle"></div>
+          </div>
+          <button class="icon-btn ghost" type="button" data-action="close-contact-drawer" aria-label="Close contact actions">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+          </button>
+        </div>
+        <div id="contactDrawerBody" class="drawer-body stack"></div>
+      </aside>
       <nav id="mobileTabbar" class="mobile-tabbar" aria-label="Mobile navigation">
         <div class="mobile-tabbar-inner">
           <button id="mobileNavDashboard" class="mobile-tab-item nav-item" data-action="set-view" data-view="dashboard">

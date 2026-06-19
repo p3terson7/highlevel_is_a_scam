@@ -370,6 +370,123 @@ def ui_client_zapier_results(
     }
 
 
+@router.get("/ui/api/clients/{client_key}/automation-health")
+def ui_client_automation_health(
+    client_key: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    if actor.role == "client":
+        client = actor.client
+        if client is None or client.client_key != client_key:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+    else:
+        client = _load_client_by_key(db, client_key)
+
+    runtime = _runtime_summary(settings, db, client=client)
+    provider_config = client.provider_config if isinstance(client.provider_config, dict) else {}
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=7)
+
+    def latest_event(event_types: set[str]) -> AuditLog | None:
+        return db.scalar(
+            select(AuditLog)
+            .where(AuditLog.client_id == client.id, AuditLog.event_type.in_(event_types))
+            .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
+            .limit(1)
+        )
+
+    def event_count(event_types: set[str]) -> int:
+        return int(
+            db.scalar(
+                select(func.count(AuditLog.id)).where(
+                    AuditLog.client_id == client.id,
+                    AuditLog.event_type.in_(event_types),
+                    AuditLog.created_at >= since,
+                )
+            )
+            or 0
+        )
+
+    def row(
+        key: str,
+        label: str,
+        event_types: set[str],
+        *,
+        configured: bool = True,
+        detail: str = "",
+        status_override: str | None = None,
+    ) -> dict[str, Any]:
+        latest = latest_event(event_types)
+        status_value = status_override or ("healthy" if configured else "needs_setup")
+        if latest and str(latest.event_type).endswith("_failed"):
+            status_value = "needs_attention"
+        return {
+            "key": key,
+            "label": label,
+            "status": status_value,
+            "configured": configured,
+            "detail": detail,
+            "last_event_type": latest.event_type if latest else "",
+            "last_run_at": latest.created_at.isoformat() if latest else None,
+            "runs_7d": event_count(event_types),
+        }
+
+    automations = [
+        row(
+            "lead_intake",
+            "Lead intake",
+            {"meta_webhook_received", "linkedin_webhook_received", "zapier_webhook_received", "lead_normalized"},
+            detail="Receives ad forms and normalizes them into CRM contacts.",
+        ),
+        row(
+            "initial_sms",
+            "Initial AI SMS",
+            {"initial_ai_sms_sent", "initial_sms_sent", "after_hours_initial_sms_sent", "initial_sms_skipped"},
+            configured=runtime["twilio_configured"] or runtime["ai_configured"],
+            detail="Starts conversations from new lead forms.",
+        ),
+        row(
+            "ai_replies",
+            "AI replies",
+            {"agent_decision", "agent_provider_fallback", "agent_empty_reply_fallback", "agent_reply_suppressed"},
+            configured=runtime["ai_configured"],
+            detail="Handles inbound lead replies when AI is active.",
+        ),
+        row(
+            "booking",
+            "Booking scheduler",
+            {"calendar_booking_offer_sent", "calendar_booking_created", "booking_confirmed"},
+            configured=automated_booking_enabled(client),
+            detail=_booking_ready_detail(client),
+        ),
+        row(
+            "zapier_booking",
+            "Booking Zapier webhook",
+            {"zapier_booking_webhook_sent", "zapier_booking_webhook_failed"},
+            configured=bool(provider_config.get("zapier_booking_webhook_url")),
+            detail="Notifies Zapier after meetings are booked.",
+        ),
+        row(
+            "handoff",
+            "Human handoff",
+            {"agent_handoff_triggered", "admin_marked_handoff", "portal_marked_handoff", "agent_paused", "agent_resumed"},
+            detail="Pauses automation when the owner takes over or a human review is needed.",
+        ),
+    ]
+    needs_attention = sum(1 for item in automations if item["status"] in {"needs_attention", "needs_setup"})
+    return {
+        "client_key": client.client_key,
+        "generated_at": now.isoformat(),
+        "status": "needs_attention" if needs_attention else "healthy",
+        "needs_attention": needs_attention,
+        "automations": automations,
+    }
+
+
 @router.get("/ui/api/owner/{client_key}")
 def ui_owner_workspace(
     client_key: str,
