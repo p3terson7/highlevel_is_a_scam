@@ -122,6 +122,7 @@ def ui_conversation_thread(
                 "body": message.body,
                 "provider_message_sid": message.provider_message_sid,
                 "attachments": attachments_by_message.get(message.id, []),
+                "delivery": delivery_status_for_message(message),
             }
         )
     for state_row in state_history:
@@ -201,6 +202,9 @@ def ui_conversation_thread(
         "crm_task_updated",
         "manual_outbound_sent",
         "portal_manual_outbound_sent",
+        "agent_paused",
+        "agent_resumed",
+        "agent_reply_suppressed",
         "ui_sandbox_started",
         "ui_sandbox_initial_ai_sms",
         "ui_sandbox_lead_message",
@@ -233,6 +237,7 @@ def ui_conversation_thread(
             "summary": _lead_summary(lead),
             "summary_lines": _lead_summary_lines(lead),
             "agent_insights": _lead_agent_insights(lead),
+            "agent_control": get_agent_control(lead),
             "current_state": lead.conversation_state.value,
             "crm_stage": normalize_crm_stage(lead.crm_stage),
             "opted_out": lead.opted_out,
@@ -257,6 +262,7 @@ def ui_conversation_thread(
                 "body": message.body,
                 "provider_message_sid": message.provider_message_sid,
                 "attachments": attachments_by_message.get(message.id, []),
+                "delivery": delivery_status_for_message(message),
                 "created_at": message.created_at.isoformat(),
             }
             for message in messages
@@ -351,7 +357,10 @@ def ui_send_booking_link(
             direction=MessageDirection.OUTBOUND,
             body=body,
             provider_message_sid=provider_sid,
-            raw_payload={"source": "ui_admin_action", "action": "send_booking_link"},
+            raw_payload=resolved_sms_service.with_delivery_status(
+                {"source": "ui_admin_action", "action": "send_booking_link"},
+                provider_sid,
+            ),
             created_at=now,
         )
     )
@@ -425,6 +434,24 @@ def ui_send_manual_message(
         audit_decision={"source": "owner_workspace", "actor_role": actor.role},
         advance_new_to_greeted=True,
     )
+    if payload.pause_agent:
+        set_agent_control(
+            lead,
+            paused=True,
+            actor_role=actor.role,
+            now=now,
+            reason="manual_reply_takeover",
+            note="Paused automatically after a manual outbound message.",
+        )
+        db.add(
+            AuditLog(
+                client_id=lead.client_id,
+                lead_id=lead.id,
+                event_type="agent_paused",
+                decision={"actor_role": actor.role, "reason": "manual_reply_takeover"},
+                created_at=now,
+            )
+        )
     db.commit()
     return {
         "status": "ok",
@@ -432,6 +459,7 @@ def ui_send_manual_message(
         "provider_sid": provider_sid,
         "state": state_value.value,
         "delivery_mode": _manual_delivery_mode(settings, db, client=lead.client),
+        "agent_control": get_agent_control(lead),
     }
 
 
@@ -508,7 +536,7 @@ async def ui_send_manual_media_message(
     message.provider_message_sid = provider_sid
     serialized_attachment = _serialize_attachment(attachment)
     message.raw_payload = {
-        **(message.raw_payload or {}),
+        **resolved_sms_service.with_delivery_status(message.raw_payload or {}, provider_sid),
         "provider_media_urls": media_urls,
         "attachments": [serialized_attachment],
     }
@@ -577,6 +605,14 @@ def ui_mark_handoff(
     previous_state = lead.conversation_state
     now = datetime.now(timezone.utc)
     lead.conversation_state = ConversationStateEnum.HANDOFF
+    set_agent_control(
+        lead,
+        paused=True,
+        actor_role=actor.role,
+        now=now,
+        reason="human_handoff",
+        note=(payload.note or "").strip(),
+    )
     lead.updated_at = now
     if previous_state != lead.conversation_state:
         db.add(
@@ -600,6 +636,54 @@ def ui_mark_handoff(
     )
     db.commit()
     return {"status": "ok", "state": lead.conversation_state.value}
+
+
+@router.patch("/ui/api/conversations/{lead_id}/agent-control")
+def ui_update_agent_control(
+    lead_id: int,
+    payload: AgentControlRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    lead = _load_lead_for_actor(db, actor, lead_id)
+    now = datetime.now(timezone.utc)
+    reason = (payload.reason or "").strip() or ("operator_paused" if payload.paused else "operator_resumed")
+    previous_state = lead.conversation_state
+    if not payload.paused and lead.opted_out:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot resume AI for an opted-out contact")
+    if not payload.paused and lead.conversation_state == ConversationStateEnum.HANDOFF and not lead.opted_out:
+        _create_state_transition(
+            db,
+            lead=lead,
+            new_state=ConversationStateEnum.QUALIFYING,
+            reason="agent_resumed",
+            created_at=now,
+            metadata_json={"source": "ui", "actor_role": actor.role},
+        )
+    control = set_agent_control(
+        lead,
+        paused=payload.paused,
+        actor_role=actor.role,
+        now=now,
+        reason=reason,
+        note=(payload.note or "").strip(),
+    )
+    db.add(
+        AuditLog(
+            client_id=lead.client_id,
+            lead_id=lead.id,
+            event_type="agent_paused" if payload.paused else "agent_resumed",
+            decision={"actor_role": actor.role, "reason": reason, "note": (payload.note or "").strip()},
+            created_at=now,
+        )
+    )
+    db.commit()
+    if previous_state != lead.conversation_state and not payload.paused:
+        control = get_agent_control(lead)
+    return {"status": "ok", "lead_id": lead.id, "state": lead.conversation_state.value, "agent_control": control}
 
 
 @router.patch("/ui/api/conversations/{lead_id}/archive")

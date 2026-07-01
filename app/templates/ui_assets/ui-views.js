@@ -48,6 +48,7 @@
                 const signalBadges = [
                   scoreLabel ? renderBadge(`Score ${scoreLabel}`, Number(item.lead_score) >= 80 ? "ok" : Number(item.lead_score) >= 55 ? "info" : "warn") : "",
                   valueLabel ? renderBadge(valueLabel, "info") : "",
+                  renderMessageDeliveryStatus(item.last_message_delivery, { compact: true, onlyWarnings: true }),
                 ].filter(Boolean).join("");
                 const nextTask = item.next_task_title
                   ? `<div class="crm-card-next"><span>${escapeHtml(t("Next task"))}</span>${escapeHtml(item.next_task_title)}${item.next_task_due_date ? ` · ${escapeHtml(item.next_task_due_date)}` : ""}</div>`
@@ -60,6 +61,7 @@
                     <div class="item-title-row">
                       <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Contact ${item.lead_id}`)}</div>
                       <div class="actions">
+                        <button class="small ghost" type="button" data-action="open-contact-drawer" data-lead-id="${item.lead_id}" data-source="pipeline">Message</button>
                         ${maybeRenderConversationState(item.crm_stage, item.conversation_state)}
                       </div>
                     </div>
@@ -88,7 +90,6 @@
             </div>
           `;
         }).join("");
-        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function manualLeadOptions() {
@@ -180,6 +181,7 @@
                   <div class="item-title-row">
                     <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Contact ${item.lead_id}`)}</div>
                     <div class="actions">
+                      <button class="small ghost" type="button" data-action="open-contact-drawer" data-lead-id="${item.lead_id}" data-source="records-list">Message</button>
                       ${renderBadge(item.crm_stage || "New Lead", crmStageTone(item.crm_stage))}
                     </div>
                   </div>
@@ -207,6 +209,11 @@
           setText("crmLeadHeaderLineSecondary", "");
           document.getElementById("crmLeadArchiveButton").textContent = "Archive";
           document.getElementById("crmLeadArchiveButton").disabled = true;
+          const emptyCrmLeadMessageButton = document.getElementById("crmLeadMessageButton");
+          if (emptyCrmLeadMessageButton) {
+            emptyCrmLeadMessageButton.disabled = true;
+            delete emptyCrmLeadMessageButton.dataset.leadId;
+          }
           document.getElementById("crmLeadEmpty").classList.remove("hidden");
           document.getElementById("crmLeadDetail").classList.add("hidden");
           return;
@@ -242,6 +249,12 @@
         setText("crmLeadHeaderLineSecondary", headerSecondary || "");
         document.getElementById("crmLeadArchiveButton").textContent = archived ? "Restore to inbox" : "Archive";
         document.getElementById("crmLeadArchiveButton").disabled = false;
+        const crmLeadMessageButton = document.getElementById("crmLeadMessageButton");
+        if (crmLeadMessageButton) {
+          crmLeadMessageButton.disabled = false;
+          crmLeadMessageButton.dataset.leadId = String(payload.lead.id);
+          crmLeadMessageButton.dataset.source = "record";
+        }
         document.getElementById("crmLeadEmpty").classList.add("hidden");
         document.getElementById("crmLeadDetail").classList.remove("hidden");
         document.getElementById("crmLeadStageSelect").value = stage;
@@ -321,6 +334,7 @@
                     </div>
                     ${msg.body ? `<div class="crm-message-body">${escapeHtml(msg.body || "")}</div>` : ""}
                     ${renderMessageAttachments(msg.attachments || [])}
+                    ${outbound ? renderMessageDeliveryStatus(msg.delivery) : ""}
                   </div>
                 </div>
               `;
@@ -401,6 +415,7 @@
                   <td data-label="Actions">
                     <div class="actions">
                       <button class="small ghost" data-action="crm-task-toggle" data-task-id="${task.id}" data-next-status="${task.status === "done" ? "open" : "done"}">${task.status === "done" ? "Reopen" : "Done"}</button>
+                      <button class="small ghost" data-action="open-contact-drawer" data-lead-id="${task.lead_id}" data-source="task">Message</button>
                       <button class="small ghost" data-action="open-crm-lead" data-lead-id="${task.lead_id}">Open</button>
                     </div>
                   </td>
@@ -408,7 +423,6 @@
               `;
             }).join("")
           : `<tr><td colspan="7">${renderEmptyState("No tasks match the current filters.", [], { compact: true })}</td></tr>`;
-        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function ensureCalendarFocus(timeZone) {
@@ -489,6 +503,7 @@
             <div class="item-meta-row">
               <div class="meta-text">${escapeHtml([item.phone || "", item.email || ""].filter(Boolean).join(" · ") || "No contact details")}</div>
               <div class="actions calendar-item-actions">
+                ${item.lead_id ? `<button class="small ghost" data-action="open-contact-drawer" data-lead-id="${item.lead_id}" data-source="calendar">Message</button>` : ""}
                 ${item.lead_id ? `<button class="small ghost" data-action="open-crm-lead" data-lead-id="${item.lead_id}">Open</button>` : ""}
                 <details class="action-menu">
                   <summary class="small ghost">Actions</summary>
@@ -520,6 +535,7 @@
               <div class="meta-text">${escapeHtml(`${task.lead_name || "Contact"} · ${dueText}`)}</div>
               <div class="actions">
                 <button class="small ghost" data-action="crm-task-toggle" data-task-id="${task.id}" data-next-status="${task.status === "done" ? "open" : "done"}">${task.status === "done" ? "Reopen" : "Done"}</button>
+                <button class="small ghost" data-action="open-contact-drawer" data-lead-id="${task.lead_id}" data-source="task">Message</button>
                 <button class="small ghost" data-action="open-crm-lead" data-lead-id="${task.lead_id}">Open</button>
               </div>
             </div>
@@ -644,7 +660,6 @@
               return agendaTaskItem(task, timeZone, tone);
             }).join("")
           : renderEmptyState("No open tasks right now.", [], { compact: true });
-        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function readCalendarConfigFromForm(prefix) {
@@ -713,6 +728,7 @@
           meta_graph_api_version: document.getElementById("clientProviderMetaVersion").value.trim(),
           linkedin_verify_token: document.getElementById("clientProviderLinkedinVerify").value.trim(),
           zapier_webhook_secret: document.getElementById("clientProviderZapierSecret").value.trim(),
+          zapier_booking_webhook_url: document.getElementById("clientProviderZapierBookingWebhookUrl").value.trim(),
           public_base_url: document.getElementById("clientProviderPublicBaseUrl").value.trim(),
         };
         const providerConfig = {};
@@ -771,6 +787,7 @@
         document.getElementById("clientProviderMetaVersion").value = "v22.0";
         document.getElementById("clientProviderLinkedinVerify").value = "";
         document.getElementById("clientProviderZapierSecret").value = "";
+        document.getElementById("clientProviderZapierBookingWebhookUrl").value = "";
         document.getElementById("clientProviderPublicBaseUrl").value = "";
         document.getElementById("clientLanguage").value = "en";
       }
@@ -856,6 +873,7 @@
         document.getElementById("clientProviderMetaVersion").value = provider.meta_graph_api_version || "v22.0";
         document.getElementById("clientProviderLinkedinVerify").value = provider.linkedin_verify_token || "";
         document.getElementById("clientProviderZapierSecret").value = provider.zapier_webhook_secret || "";
+        document.getElementById("clientProviderZapierBookingWebhookUrl").value = provider.zapier_booking_webhook_url || "";
         document.getElementById("clientProviderPublicBaseUrl").value = provider.public_base_url || "";
         document.getElementById("clientHandoffNumber").value = data.client.fallback_handoff_number || "";
         document.getElementById("clientConsentText").value = data.client.consent_text || "";
@@ -951,6 +969,7 @@
               ["Meta", clientWizardStatusLabel(clientWizardFieldValue("clientProviderMetaAccess", ""))],
               ["LinkedIn", clientWizardStatusLabel(clientWizardFieldValue("clientProviderLinkedinVerify", ""))],
               ["Zapier", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierSecret", ""))],
+              ["Zapier booking", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierBookingWebhookUrl", ""))],
               ["Handoff", clientWizardStatusLabel(clientWizardFieldValue("clientHandoffNumber", ""))],
             ],
           },
@@ -1116,6 +1135,7 @@
                     <div class="actions">
                       ${isUnreadConversation(item) ? renderBadge("new", "info") : ""}
                       ${item.crm_stage ? renderBadge(item.crm_stage, "info") : ""}
+                      ${renderMessageDeliveryStatus(item.last_message_delivery, { compact: true, onlyWarnings: true })}
                       ${maybeRenderConversationState(item.crm_stage, item.state)}
                     </div>
                   </div>
@@ -1133,7 +1153,6 @@
             }).join("")
           : `<div class="empty-state"><div>${isClientRole() && archivedHiddenCount ? "Your active inbox is clear. Archived contacts stay in Pipeline until you restore them." : "No conversations match the current filters."}</div><div class="actions" style="margin-top: 8px;"><button class="small ghost" data-action="clear-conversation-filters">Clear filters</button></div></div>`;
         updateConversationMobileLayout();
-        if (typeof renderTodayView === "function") renderTodayView();
       }
 
       function renderThread() {
@@ -1149,8 +1168,14 @@
           document.getElementById("threadArchiveButton").textContent = "Archive";
           document.getElementById("threadArchiveButton").disabled = true;
           document.getElementById("threadHandoffButton").disabled = true;
+          const emptyThreadActionsButton = document.getElementById("threadContactActionsButton");
+          if (emptyThreadActionsButton) {
+            emptyThreadActionsButton.disabled = true;
+            delete emptyThreadActionsButton.dataset.leadId;
+          }
           document.getElementById("threadHeaderPills").classList.add("hidden");
           document.getElementById("threadHeaderPills").innerHTML = "";
+          document.getElementById("threadPauseAfterSendWrap")?.classList.add("hidden");
           document.getElementById("threadTimeline").innerHTML = '<div class="empty-state">Open a conversation from the left pane.</div>';
           document.getElementById("threadCrmStageSelect").value = "New Lead";
           document.getElementById("threadNoteInput").placeholder = isClientRole() ? "Add a private note for your team." : "Add an internal note.";
@@ -1197,6 +1222,12 @@
         document.getElementById("threadArchiveButton").textContent = archived ? "Restore" : "Archive";
         document.getElementById("threadArchiveButton").disabled = false;
         document.getElementById("threadHandoffButton").disabled = false;
+        const threadActionsButton = document.getElementById("threadContactActionsButton");
+        if (threadActionsButton) {
+          threadActionsButton.disabled = false;
+          threadActionsButton.dataset.leadId = String(payload.lead.id);
+          threadActionsButton.dataset.source = "thread";
+        }
         const threadHeaderPills = document.getElementById("threadHeaderPills");
         threadHeaderPills.classList.add("hidden");
         threadHeaderPills.innerHTML = "";
@@ -1224,6 +1255,7 @@
                       <div class="bubble ${outbound ? "outbound" : ""}">
                         ${item.body ? `<div>${escapeHtml(item.body)}</div>` : ""}
                         ${renderMessageAttachments(item.attachments || [])}
+                        ${outbound ? renderMessageDeliveryStatus(item.delivery) : ""}
                         <div class="bubble-meta">
                           ${meta.map((entry) => `<span>${escapeHtml(entry)}</span>`).join("")}
                         </div>
@@ -1262,6 +1294,21 @@
         const threadLeadName = payload.lead.display_name || payload.lead.phone || "Contact";
         const threadLeadStage = payload.lead.crm_stage || "New Lead";
         const threadState = payload.lead.current_state || "";
+        const threadAgentControl = payload.lead.agent_control || {};
+        const threadAgentPaused = Boolean(threadAgentControl.paused);
+        const threadAgentLabel = threadAgentControl.mode === "handoff"
+          ? "Human handoff"
+          : (threadAgentPaused ? "AI paused" : "AI active");
+        threadHeaderPills.classList.remove("hidden");
+        threadHeaderPills.innerHTML = [
+          renderBadge(threadAgentLabel, threadAgentPaused ? "warn" : "ok"),
+          sandboxThread ? renderBadge("sandbox", "info") : "",
+        ].filter(Boolean).join("");
+        const pauseAfterSend = document.getElementById("threadPauseAfterSend");
+        if (pauseAfterSend && !document.getElementById("threadManualMessage")?.value.trim()) {
+          pauseAfterSend.checked = threadAgentPaused;
+        }
+        document.getElementById("threadPauseAfterSendWrap")?.classList.toggle("hidden", sandboxThread);
         setText("threadLeadOverviewName", threadLeadName);
         const threadPhoneDisplay = formatPhoneNumber(payload.lead.phone);
         const threadEmailDisplay = String(payload.lead.email || "").trim();
@@ -1335,7 +1382,7 @@
           ["last inbound", state.logEvents.last_sms_inbound_at],
           ["last outbound", state.logEvents.last_sms_outbound_at],
           ["last AI", state.logEvents.last_ai_decision_at],
-        ].map(([label, value]) => `<div class="surface stat-card"><div class="label">${escapeHtml(label)}</div><div class="value" style="font-size: 14px;">${escapeHtml(formatLongDateTime(value))}</div></div>`).join("");
+        ].map(([label, value]) => `<div class="surface stat-card compact-stat"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(formatLongDateTime(value))}</div></div>`).join("");
 
         const q = state.globalSearch.trim().toLowerCase();
         const logs = state.logs.filter((log) => !q || JSON.stringify(log).toLowerCase().includes(q));
@@ -1497,7 +1544,7 @@
                 ["Timezone", clientConfig.timezone || "-"],
                 ["Messages", formatDeliveryModeLabel(state.ownerWorkspace?.delivery_mode || "mock")],
                 ["Booking", formatBookingModeLabel(clientConfig.booking_mode || "link")],
-              ].map(([label, value]) => `<div class="detail-card"><div class="label">${escapeHtml(label)}</div><div class="value" style="margin-top: 6px; font-size: 18px; font-weight: 600;">${escapeHtml(value)}</div></div>`).join("")
+              ].map(([label, value]) => `<div class="detail-card settings-overview-card"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`).join("")
             : '<div class="empty-state">Workspace details are loading.</div>';
           setText(
             "settingsClientOverviewNote",
@@ -1575,8 +1622,8 @@
       }
 
       function setTestLabMode(mode) {
-        if (mode !== "gpt_only") {
-          showNotice("That path is planned, but only GPT only is wired for tomorrow's demo.", "info");
+        if (!["gpt_only", "gpt_zapier"].includes(mode)) {
+          showNotice("That path is planned, but not wired yet.", "info");
           return;
         }
         state.testLabMode = mode;
@@ -1584,6 +1631,16 @@
         document.querySelectorAll(".test-lab-mode-card").forEach((node) => {
           node.classList.toggle("active", node.dataset.mode === mode);
         });
+        const startButton = document.getElementById("labStartButton");
+        if (startButton) {
+          startButton.textContent = mode === "gpt_zapier" ? "Start GPT + Zapier sandbox" : "Start GPT sandbox";
+        }
+        const output = document.getElementById("testLabOutput");
+        if (output && !output.textContent.trim()) {
+          output.textContent = mode === "gpt_zapier"
+            ? "Book a meeting in the sandbox thread to see booking planner debug and the Zapier payload here."
+            : "Ask for availability in the sandbox thread to see booking planner debug here. GPT-only mode will not call Zapier.";
+        }
       }
 
       function renderTestLab() {
@@ -1611,9 +1668,11 @@
           return;
         }
         const runtime = state.ownerWorkspace.runtime || {};
+        const providerConfig = state.ownerWorkspace.client.provider_config || {};
         summary.innerHTML = [
           ["Client", state.ownerWorkspace.client.business_name || state.ownerWorkspace.client.client_key],
           ["AI", runtime.ai_configured ? "Configured" : "Mock/offline"],
+          ["Zapier booking", providerConfig.zapier_booking_webhook_url ? "Configured" : "Missing"],
           ["Training", state.ownerWorkspace.client.ai_context ? "Custom context" : "Default guidance"],
         ].map(([label, value]) => `
           <div class="test-lab-summary-card">
@@ -1696,6 +1755,11 @@
         }).join("");
 
         const lines = [];
+        if (state.knowledge?.business_profile_context) {
+          lines.push("Business profile context used on every AI turn:");
+          lines.push(state.knowledge.business_profile_context);
+          lines.push("");
+        }
         sources.forEach((source, sourceIndex) => {
           lines.push(`[${sourceIndex + 1}] ${source.title || source.url}`);
           lines.push(`URL: ${source.url}`);

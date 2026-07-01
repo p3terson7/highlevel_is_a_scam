@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from sqlalchemy import select
 
-from app.db.models import CalendarBooking, Client, Lead, LeadSource, MessageAttachment
+from app.api.ui import sandbox_routes
+from app.db.models import AuditLog, CalendarBooking, Client, Lead, LeadSource, MessageAttachment
 from app.db.session import get_session_factory
+from app.services import zapier_booking
 
 def _admin_headers() -> dict[str, str]:
     return {"X-Admin-Token": "test-admin-token"}
@@ -195,7 +198,143 @@ def test_test_lab_future_modes_are_explicitly_disabled(test_context):
     )
 
     assert response.status_code == 400
-    assert "Only GPT only" in response.json()["detail"]
+    assert "GPT + Zapier" in response.json()["detail"]
+
+
+def test_ai_sandbox_gpt_zapier_mode_posts_booking_payload(test_context, monkeypatch):
+    webhook_url = "https://hooks.zapier.com/hooks/catch/test/sandbox-booking/"
+    captured: dict = {}
+    session_factory = get_session_factory()
+    with session_factory() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.provider_config = {"zapier_booking_webhook_url": webhook_url}
+        db.commit()
+
+    def fake_post_json(*, url: str, payload: dict, timeout_seconds: int) -> httpx.Response:
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["timeout_seconds"] = timeout_seconds
+        return httpx.Response(200, json={"ok": True}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(zapier_booking, "_post_json", fake_post_json)
+    monkeypatch.setattr(sandbox_routes, "build_llm_agent", lambda *args, **kwargs: test_context.fake_llm)
+
+    start = test_context.client.post(
+        f"/ui/api/owner/{test_context.client_key}/sandbox/start",
+        headers=_admin_headers(),
+        json={
+            "mode": "gpt_zapier",
+            "full_name": "Zapier Sandbox Lead",
+            "email": "zapier-sandbox@example.com",
+            "form_answers": [{"question": "Monthly lead volume", "answer": "80-100"}],
+        },
+    )
+    assert start.status_code == 200
+    start_payload = start.json()
+    assert start_payload["mode"] == "gpt_zapier"
+    assert start_payload["zapier_booking_webhook"]["status"] == "waiting_for_booking"
+
+    offer = test_context.client.post(
+        f"/ui/api/conversations/{start_payload['lead_id']}/sandbox/messages",
+        headers=_admin_headers(),
+        json={"body": "Can I book this week?"},
+    )
+    assert offer.status_code == 200
+    offer_payload = offer.json()
+    assert offer_payload["zapier_booking_webhook"]["status"] == "waiting_for_booking"
+    assert offer_payload["booking_debug"]["selected_slots"]
+    assert "request" in offer_payload["booking_debug"]
+    assert "planner" in offer_payload["booking_debug"]
+
+    booked = test_context.client.post(
+        f"/ui/api/conversations/{start_payload['lead_id']}/sandbox/messages",
+        headers=_admin_headers(),
+        json={"body": "1"},
+    )
+    assert booked.status_code == 200
+    booked_payload = booked.json()
+    assert booked_payload["state"] == "BOOKED"
+    assert captured["url"] == webhook_url
+    payload = captured["payload"]
+    assert payload["event_type"] == "calendar_booking.created"
+    assert payload["trigger"] == "sms_ai_calendar_booking_created"
+    assert payload["lead"]["email"] == "zapier-sandbox@example.com"
+    assert payload["form_answers"]["monthly_lead_volume"] == "80-100"
+    assert payload["form"]["answers"][0] == {
+        "question": "Monthly lead volume",
+        "key": "monthly_lead_volume",
+        "answer": "80-100",
+        "value": "80-100",
+    }
+    assert payload["meeting"]["start_at"] == "2026-03-09T15:00:00+00:00"
+    assert payload["meeting"]["title"] == "Acme Solar meeting - Zapier Sandbox Lead"
+    assert payload["calendar_event"]["summary"] == "Acme Solar meeting - Zapier Sandbox Lead"
+    assert payload["calendar_event"]["start_datetime"] == "2026-03-09T15:00:00+00:00"
+    assert payload["calendar_event"]["end_datetime"] == "2026-03-09T15:30:00+00:00"
+    assert payload["email_confirmation"]["to"] == "zapier-sandbox@example.com"
+    assert booked_payload["zapier_booking_webhook"]["status"] == "sent"
+    assert booked_payload["zapier_booking_webhook"]["payload"]["lead"]["email"] == "zapier-sandbox@example.com"
+
+    with session_factory() as db:
+        sent = db.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.lead_id == start_payload["lead_id"],
+                AuditLog.event_type == "zapier_booking_webhook_sent",
+            )
+            .limit(1)
+        )
+        assert sent is not None
+
+
+def test_ai_sandbox_gpt_only_mode_does_not_post_zapier_booking(test_context, monkeypatch):
+    calls = 0
+    session_factory = get_session_factory()
+    with session_factory() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.provider_config = {"zapier_booking_webhook_url": "https://hooks.zapier.com/hooks/catch/test/disabled/"}
+        db.commit()
+
+    def fake_post_json(*, url: str, payload: dict, timeout_seconds: int) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(zapier_booking, "_post_json", fake_post_json)
+    monkeypatch.setattr(sandbox_routes, "build_llm_agent", lambda *args, **kwargs: test_context.fake_llm)
+
+    start = test_context.client.post(
+        f"/ui/api/owner/{test_context.client_key}/sandbox/start",
+        headers=_admin_headers(),
+        json={
+            "mode": "gpt_only",
+            "full_name": "GPT Only Lead",
+            "email": "gpt-only@example.com",
+            "form_answers": [{"question": "Timeline", "answer": "This week"}],
+        },
+    )
+    assert start.status_code == 200
+    lead_id = start.json()["lead_id"]
+
+    offer = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/sandbox/messages",
+        headers=_admin_headers(),
+        json={"body": "Can I book this week?"},
+    )
+    assert offer.status_code == 200
+    assert offer.json()["booking_debug"]["selected_slots"]
+    booked = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/sandbox/messages",
+        headers=_admin_headers(),
+        json={"body": "1"},
+    )
+
+    assert booked.status_code == 200
+    assert booked.json()["state"] == "BOOKED"
+    assert booked.json()["zapier_booking_webhook"]["status"] == "disabled"
+    assert calls == 0
 
 
 def test_ai_sandbox_runs_agent_thread_without_sms_provider(test_context):
@@ -326,6 +465,47 @@ def test_conversation_thread_notes_and_actions(test_context):
     ).json()
     assert handoff_thread["lead"]["current_state"] == "HANDOFF"
     assert any(item["event_type"] == "admin_marked_handoff" for item in handoff_thread["audit_events"])
+
+
+def test_conversation_agent_control_pause_resume_and_manual_takeover(test_context):
+    test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).join(Client).where(Client.client_key == "demo-roofing"))
+        assert lead is not None
+        lead_id = lead.id
+
+    pause = test_context.client.patch(
+        f"/ui/api/conversations/{lead_id}/agent-control",
+        headers=_admin_headers(),
+        json={"paused": True, "reason": "operator_testing", "note": "Owner is taking over."},
+    )
+    assert pause.status_code == 200
+    assert pause.json()["agent_control"]["paused"] is True
+    assert pause.json()["agent_control"]["reason"] == "operator_testing"
+
+    thread = test_context.client.get(f"/ui/api/conversations/{lead_id}/thread", headers=_admin_headers()).json()
+    assert thread["lead"]["agent_control"]["paused"] is True
+    assert any(item["event_type"] == "agent_paused" for item in thread["audit_events"])
+
+    resume = test_context.client.patch(
+        f"/ui/api/conversations/{lead_id}/agent-control",
+        headers=_admin_headers(),
+        json={"paused": False, "reason": "operator_done"},
+    )
+    assert resume.status_code == 200
+    assert resume.json()["agent_control"]["paused"] is False
+
+    manual = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/messages/manual",
+        headers=_admin_headers(),
+        json={"body": "I can take this one from here.", "pause_agent": True},
+    )
+    assert manual.status_code == 200
+    assert manual.json()["agent_control"]["paused"] is True
+    assert manual.json()["agent_control"]["reason"] == "manual_reply_takeover"
+    assert test_context.fake_sms.sent[-1]["body"] == "I can take this one from here."
 
 
 def test_zapier_results_console_endpoint_returns_recent_events(test_context):
@@ -467,10 +647,6 @@ def test_manual_calendar_meeting_lifecycle(test_context):
             "timezone": "America/Toronto",
             "title": "Manual discovery call",
             "notes": "Bring pricing context.",
-            "create_conference_link": True,
-            "send_email_invite": True,
-            "include_meeting_link": True,
-            "send_sms_reminders": True,
         },
     )
     assert meeting_create.status_code == 200
@@ -479,6 +655,26 @@ def test_manual_calendar_meeting_lifecycle(test_context):
     assert meeting["status"] == "scheduled"
     assert meeting["source"] == "manual"
     assert meeting["title"] == "Manual discovery call"
+    assert meeting_create.json()["zapier_booking_webhook"]["status"] == "skipped"
+    assert meeting_create.json()["zapier_booking_webhook"]["reason"] == "not_configured"
+    session_factory = get_session_factory()
+    with session_factory() as db:
+        audit = db.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.lead_id == lead_id,
+                AuditLog.event_type == "manual_calendar_booking_created",
+            )
+            .limit(1)
+        )
+        assert audit is not None
+        assert audit.decision["options"] == {
+            "create_conference_link": True,
+            "send_email_invite": True,
+            "include_meeting_link": True,
+            "send_sms_reminders": True,
+            "zapier_pending": True,
+        }
 
     completed = test_context.client.patch(
         f"/ui/api/calendar/meetings/{meeting['id']}",

@@ -8,6 +8,7 @@
         logs: [],
         ownerWorkspace: null,
         zapierResults: null,
+        automationHealth: null,
         knowledge: null,
         conversations: { items: [], counts: {}, total: 0 },
         crmLeads: { items: [], counts: {}, total: 0, stages: [] },
@@ -19,6 +20,11 @@
         crmAddLeadOpen: false,
         calendarMeetingPanelOpen: false,
         calendarLeadPanelOpen: false,
+        contactActionDrawer: {
+          open: false,
+          leadId: null,
+          source: "",
+        },
         thread: null,
         selectedClientKey: localStorage.getItem("lead-ui-selected-client") || "",
         activeLeadId: Number(localStorage.getItem("lead-ui-active-lead") || 0) || null,
@@ -609,6 +615,36 @@
         `;
       }
 
+      function messageDeliveryTone(delivery) {
+        const severity = String(delivery?.severity || "").toLowerCase();
+        if (severity === "warning") return "warn";
+        if (severity === "ok") return "ok";
+        return "info";
+      }
+
+      function messageDeliveryNeedsAttention(delivery) {
+        return String(delivery?.severity || "").toLowerCase() === "warning";
+      }
+
+      function renderMessageDeliveryStatus(delivery, options = {}) {
+        if (!delivery || typeof delivery !== "object") return "";
+        if (options.onlyWarnings && !messageDeliveryNeedsAttention(delivery)) return "";
+        const tone = messageDeliveryTone(delivery);
+        const useFrench = typeof getUiLanguage === "function" && getUiLanguage() === "fr";
+        const label = String((useFrench ? delivery.label_fr : "") || delivery.label || "SMS status unknown");
+        const description = String((useFrench ? delivery.description_fr : "") || delivery.description || "");
+        const providerStatus = String(delivery.provider_status || delivery.status || "").replaceAll("_", " ");
+        const providerLabel = useFrench ? "Statut fournisseur" : "Provider status";
+        const title = [label, description, providerStatus ? `${providerLabel}: ${providerStatus}` : ""].filter(Boolean).join(" · ");
+        return `
+          <div class="message-delivery-status ${tone} ${options.compact ? "compact" : ""}" title="${escapeHtml(title)}">
+            <span class="delivery-dot"></span>
+            <span>${escapeHtml(label)}</span>
+            ${options.compact || !description ? "" : `<small>${escapeHtml(description)}</small>`}
+          </div>
+        `;
+      }
+
       function threadTimelineSignature(items = []) {
         const timelineItems = Array.isArray(items) ? items : [];
         return JSON.stringify(timelineItems.map((item) => {
@@ -618,6 +654,8 @@
               direction: item.direction,
               body: item.body || "",
               provider_message_sid: item.provider_message_sid || "",
+              delivery_status: item.delivery?.status || "",
+              delivery_severity: item.delivery?.severity || "",
               created_at: item.created_at || "",
               attachments: (item.attachments || []).map((attachment) => ({
                 id: attachment.id,
@@ -822,7 +860,6 @@
       function activeViewLabel() {
         const labels = {
           dashboard: "Dashboard",
-          today: "Today",
           clients: "Clients",
           conversations: "Inbox",
           crm: "Pipeline",

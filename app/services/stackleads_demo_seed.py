@@ -39,6 +39,7 @@ DEMO_PREFIX = "stackleads-demo"
 PORTAL_EMAIL = "demo@stackleads.local"
 PORTAL_PASSWORD = "StackLeadsDemo2026!"
 CLIENT_TIMEZONE = "America/Toronto"
+ZAPIER_BOOKING_WEBHOOK_URL = "https://hooks.zapier.com/hooks/catch/26691185/u7rdjui/"
 
 
 @dataclass(frozen=True)
@@ -1073,6 +1074,7 @@ def _upsert_client(db: Session, *, reset_portal: bool = False) -> tuple[Client, 
     client.booking_config = _internal_booking_config()
     client.provider_config = {
         "website_url": "https://stackleads.example",
+        "zapier_booking_webhook_url": ZAPIER_BOOKING_WEBHOOK_URL,
         "demo_ad_campaign_reports": _demo_ad_campaign_reports(),
     }
     client.fallback_handoff_number = "+14165550100"

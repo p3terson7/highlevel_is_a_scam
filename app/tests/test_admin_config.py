@@ -58,6 +58,7 @@ def test_client_provider_config_merges_and_ui_runtime_uses_client_scope(test_con
                 "meta_access_token": "meta-client-token",
                 "linkedin_verify_token": "linkedin-client-token",
                 "zapier_webhook_secret": "zapier-client-secret",
+                "zapier_booking_webhook_url": "https://hooks.zapier.com/hooks/catch/test/booking/",
             }
         },
     )
@@ -67,6 +68,7 @@ def test_client_provider_config_merges_and_ui_runtime_uses_client_scope(test_con
     assert "openai_model" not in first_payload["provider_config"]
     assert first_payload["provider_config"]["twilio_from_number"] == "+15554443333"
     assert first_payload["provider_config"]["zapier_webhook_secret"] == "zapier-client-secret"
+    assert first_payload["provider_config"]["zapier_booking_webhook_url"] == "https://hooks.zapier.com/hooks/catch/test/booking/"
 
     second_patch = test_context.client.patch(
         f"/admin/clients/{test_context.client_key}",
@@ -79,6 +81,7 @@ def test_client_provider_config_merges_and_ui_runtime_uses_client_scope(test_con
     assert "openai_model" not in second_payload["provider_config"]
     assert second_payload["provider_config"]["twilio_from_number"] == "+15554443333"
     assert second_payload["provider_config"]["public_base_url"] == "https://client.example"
+    assert second_payload["provider_config"]["zapier_booking_webhook_url"] == "https://hooks.zapier.com/hooks/catch/test/booking/"
 
     ui_client = test_context.client.get(
         f"/ui/api/clients/{test_context.client_key}",

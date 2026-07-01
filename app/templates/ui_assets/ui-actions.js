@@ -60,7 +60,7 @@
         state.selectedClientKey = clientKey;
         updateClientSelectors();
         updateWindowIndicators();
-        await Promise.all([loadClientDetail(clientKey), loadLogs(clientKey), loadOwnerWorkspace(clientKey), loadCalendar()]);
+        await Promise.all([loadClientDetail(clientKey), loadLogs(clientKey), loadOwnerWorkspace(clientKey), loadAutomationHealth(clientKey), loadCalendar()]);
         renderClients();
         renderSettings();
         renderTestLab();
@@ -280,10 +280,10 @@
           timezone: document.getElementById("manualMeetingTimezone").value.trim(),
           title: document.getElementById("manualMeetingTitle").value.trim(),
           notes: document.getElementById("manualMeetingNotes").value.trim(),
-          create_conference_link: document.getElementById("manualMeetingCreateConference").checked,
-          send_email_invite: document.getElementById("manualMeetingSendInvite").checked,
-          include_meeting_link: document.getElementById("manualMeetingIncludeLink").checked,
-          send_sms_reminders: document.getElementById("manualMeetingSmsReminders").checked,
+          create_conference_link: true,
+          send_email_invite: true,
+          include_meeting_link: true,
+          send_sms_reminders: true,
         };
         if (mode === "new") {
           payload.new_lead = {
@@ -305,9 +305,6 @@
         document.getElementById("manualMeetingNotes").value = "";
         document.getElementById("manualMeetingStart").value = "";
         document.getElementById("manualMeetingTimezone").value = state.calendar?.timezone || "America/Toronto";
-        ["manualMeetingCreateConference", "manualMeetingSendInvite", "manualMeetingIncludeLink", "manualMeetingSmsReminders"].forEach((id) => {
-          document.getElementById(id).checked = false;
-        });
         ["manualMeetingNewLeadName", "manualMeetingNewLeadPhone", "manualMeetingNewLeadEmail", "manualMeetingNewLeadCity"].forEach((id) => {
           document.getElementById(id).value = "";
         });
@@ -335,19 +332,59 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
           });
-          setText("manualMeetingStatus", "Meeting added.");
+          const zapierMessage = manualMeetingZapierMessage(result.zapier_booking_webhook);
+          setText("manualMeetingStatus", zapierMessage ? `Meeting added. ${zapierMessage}` : "Meeting added.");
           resetManualMeetingForm();
           state.calendarMeetingPanelOpen = false;
           await Promise.all([loadCalendar(), loadCrmLeads(), loadCrmTasks(), loadConversations(), loadDashboard()]);
+          if (state.selectedClientKey) {
+            try {
+              await loadOwnerWorkspace(state.selectedClientKey);
+            } catch (_error) {
+              // The meeting was created; failing to refresh Zapier diagnostics should not mask that.
+            }
+          }
           if (result.meeting?.lead_id) {
             state.activeCrmLeadId = result.meeting.lead_id;
             saveLocalState();
           }
-          showNotice("Meeting added.", "ok");
+          showNotice(zapierMessage ? `Meeting added. ${zapierMessage}` : "Meeting added.", "ok");
         } catch (error) {
           setText("manualMeetingStatus", `Meeting failed: ${error.message}`);
           showNotice(`Meeting failed: ${error.message}`, "err");
         }
+      }
+
+      function manualMeetingZapierMessage(result) {
+        if (!result || !result.status) return "";
+        if (result.status === "sent") return "Zapier booking webhook sent.";
+        if (result.status === "skipped") {
+          if (result.reason === "not_configured") return "Zapier booking webhook is not configured for this client.";
+          if (result.reason === "already_sent") return "Zapier booking webhook was already sent for this meeting.";
+          return `Zapier booking webhook skipped${result.reason ? `: ${result.reason}` : ""}.`;
+        }
+        if (result.status === "failed") {
+          return `Zapier booking webhook failed${result.reason ? `: ${result.reason}` : ""}.`;
+        }
+        return `Zapier booking webhook status: ${result.status}.`;
+      }
+
+      function sandboxDebugOutput(result) {
+        if (!result || typeof result !== "object") return result;
+        return {
+          status: result.status,
+          lead_id: result.lead_id,
+          state: result.state,
+          crm_stage: result.crm_stage,
+          reply: result.reply || null,
+          booking_debug: result.booking_debug || null,
+          zapier_booking_webhook: result.zapier_booking_webhook || null,
+        };
+      }
+
+      function writeTestLabOutput(result) {
+        const output = document.getElementById("testLabOutput");
+        if (output) output.textContent = JSON.stringify(sandboxDebugOutput(result), null, 2);
       }
 
       async function updateManualMeetingStatus(meetingId, nextStatus) {
@@ -634,6 +671,7 @@
         const body = document.getElementById("threadManualMessage").value.trim();
         const mediaInput = document.getElementById("threadMediaInput");
         const mediaFile = mediaInput?.files?.[0] || null;
+        const pauseAgent = Boolean(document.getElementById("threadPauseAfterSend")?.checked);
         if (!body && !mediaFile) {
           setText("threadManualStatus", "Message body or media is required.");
           return;
@@ -653,6 +691,17 @@
               method: "POST",
               body: formData,
             });
+            if (pauseAgent) {
+              await apiJson(`/ui/api/conversations/${state.activeLeadId}/agent-control`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  paused: true,
+                  reason: "manual_media_reply_takeover",
+                  note: "Paused automatically after a manual media message.",
+                }),
+              });
+            }
           } else {
             const endpoint = sandboxThread
               ? `/ui/api/conversations/${state.activeLeadId}/sandbox/messages`
@@ -660,10 +709,13 @@
             result = await apiJson(endpoint, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ body }),
+              body: JSON.stringify({ body, pause_agent: pauseAgent }),
             });
           }
           document.getElementById("threadManualMessage").value = "";
+          if (document.getElementById("threadPauseAfterSend")) {
+            document.getElementById("threadPauseAfterSend").checked = false;
+          }
           clearThreadMediaSelection();
           if (sandboxThread) {
             state.sandboxLeadId = state.activeLeadId;
@@ -678,13 +730,232 @@
             await Promise.all([loadConversations(), openThread(state.activeLeadId), loadCrmLeads(), loadLogs(state.selectedClientKey), loadDashboard()]);
           }
           if (sandboxThread) {
-            const output = document.getElementById("testLabOutput");
-            if (output) output.textContent = JSON.stringify(result, null, 2);
+            writeTestLabOutput(result);
           }
           showNotice(sandboxThread ? "Sandbox turn completed." : "Manual message sent.", "ok");
         } catch (error) {
           setText("threadManualStatus", `Send failed: ${error.message}`);
           showNotice(`${sandboxThread ? "Sandbox turn" : "Manual message"} failed: ${error.message}`, "err");
+        }
+      }
+
+      function findLeadForActions(leadId) {
+        const numericLeadId = Number(leadId) || 0;
+        if (!numericLeadId) return null;
+        if (state.thread?.lead?.id === numericLeadId) {
+          return {
+            ...state.thread.lead,
+            lead_id: numericLeadId,
+            lead_name: state.thread.lead.display_name,
+            client_name: state.thread.client?.business_name || "",
+            client_key: state.thread.client?.client_key || "",
+            conversation_state: state.thread.lead.current_state,
+          };
+        }
+        if (state.crmLeadDetail?.lead?.id === numericLeadId) {
+          return {
+            ...state.crmLeadDetail.lead,
+            lead_id: numericLeadId,
+            lead_name: state.crmLeadDetail.lead.display_name,
+            client_name: state.crmLeadDetail.client?.business_name || "",
+            client_key: state.crmLeadDetail.client?.client_key || "",
+          };
+        }
+        const found = [
+          ...(state.crmLeads?.items || []),
+          ...(state.conversations?.items || []),
+          ...(state.calendar?.items || []).filter((item) => item.lead_id),
+          ...(state.crmTasks?.items || []).filter((item) => item.lead_id),
+        ].find((item) => Number(item.lead_id) === numericLeadId) || null;
+        if (!found) return null;
+        return {
+          ...found,
+          phone: found.phone || found.lead_phone || "",
+          email: found.email || found.lead_email || "",
+          lead_name: found.lead_name || found.display_name || "",
+          conversation_state: found.conversation_state || found.state || "",
+        };
+      }
+
+      function contactActionLeadName(lead) {
+        return lead?.display_name || lead?.lead_name || lead?.full_name || lead?.phone || `Contact ${lead?.lead_id || lead?.id || ""}`.trim();
+      }
+
+      function openContactActionDrawer(leadId, source = "") {
+        const numericLeadId = Number(leadId) || 0;
+        if (!numericLeadId) return;
+        state.contactActionDrawer = { open: true, leadId: numericLeadId, source };
+        renderContactActionDrawer();
+      }
+
+      function closeContactActionDrawer() {
+        state.contactActionDrawer = { open: false, leadId: null, source: "" };
+        renderContactActionDrawer();
+      }
+
+      function renderContactActionDrawer() {
+        const drawer = document.getElementById("contactActionDrawer");
+        const backdrop = document.getElementById("contactActionDrawerBackdrop");
+        if (!drawer || !backdrop) return;
+        const isOpen = Boolean(state.contactActionDrawer?.open && state.contactActionDrawer?.leadId);
+        drawer.classList.toggle("hidden", !isOpen);
+        backdrop.classList.toggle("hidden", !isOpen);
+        drawer.setAttribute("aria-hidden", isOpen ? "false" : "true");
+        if (!isOpen) return;
+
+        const lead = findLeadForActions(state.contactActionDrawer.leadId) || { lead_id: state.contactActionDrawer.leadId };
+        const control = lead.agent_control || {};
+        const paused = Boolean(control.paused);
+        const mode = String(control.mode || (paused ? "paused" : "active")).toLowerCase();
+        const isHandoff = mode === "handoff" || String(lead.conversation_state || lead.current_state || "").toUpperCase() === "HANDOFF";
+        const canSend = Boolean(lead.phone) && !lead.opted_out;
+        const title = contactActionLeadName(lead);
+        const stateLabel = isHandoff ? "Human handoff" : paused ? "AI paused" : "AI active";
+        const stateToneValue = isHandoff || paused ? "warn" : "ok";
+        setText("contactDrawerTitle", title);
+        setText(
+          "contactDrawerSubtitle",
+          [lead.phone || "", lead.email || "", lead.client_name || ""].filter(Boolean).join(" · ") || "No contact details captured yet."
+        );
+        document.getElementById("contactDrawerBody").innerHTML = `
+          <div class="drawer-section contact-control-summary">
+            <div class="item-title-row">
+              <div>
+                <div class="title">${escapeHtml(title)}</div>
+                <div class="meta-text">${escapeHtml([formatLeadSourceLabel(lead.source || ""), lead.crm_stage || ""].filter(Boolean).join(" · "))}</div>
+              </div>
+              ${renderBadge(stateLabel, stateToneValue)}
+            </div>
+            ${control.note ? `<div class="meta-text">${escapeHtml(control.note)}</div>` : ""}
+          </div>
+          <div class="drawer-section">
+            <div class="title">Manual message</div>
+            <textarea id="contactDrawerMessage" placeholder="${escapeHtml(canSend ? "Write a direct SMS to this contact." : "This contact needs a phone number before SMS can be sent.")}" ${canSend ? "" : "disabled"}></textarea>
+            <label class="checkbox-inline">
+              <input id="contactDrawerPauseAfterSend" type="checkbox" ${paused || isHandoff ? "checked" : ""} />
+              <span>Pause AI after sending</span>
+            </label>
+            <div class="actions">
+              <button class="primary small" data-action="contact-drawer-send" ${canSend ? "" : "disabled"}>Send message</button>
+              <button class="small ghost" data-action="contact-drawer-open-thread">Open thread</button>
+            </div>
+            <div id="contactDrawerStatus" class="meta-text">${canSend ? "" : escapeHtml(lead.opted_out ? "This contact opted out." : "No phone number available.")}</div>
+          </div>
+          <div class="drawer-section">
+            <div class="title">AI control</div>
+            <div class="drawer-action-grid">
+              <button class="small ${paused || isHandoff ? "ghost" : ""}" data-action="contact-drawer-agent-control" data-paused="true">Pause AI</button>
+              <button class="small ${paused || isHandoff ? "" : "ghost"}" data-action="contact-drawer-agent-control" data-paused="false">Resume AI</button>
+            </div>
+            <div class="meta-text">Use pause when a human is taking over. Resume lets the assistant answer future inbound messages again.</div>
+          </div>
+          <div class="drawer-section">
+            <div class="title">Next actions</div>
+            <div class="drawer-action-grid">
+              <button class="small ghost" data-action="contact-drawer-create-meeting">Create meeting</button>
+              <button class="small ghost" data-action="contact-drawer-booking-link">Send booking link</button>
+              <button class="small ghost" data-action="open-crm-lead" data-lead-id="${escapeHtml(String(lead.lead_id || lead.id || ""))}">Open record</button>
+            </div>
+          </div>
+        `;
+      }
+
+      async function sendContactDrawerMessage() {
+        const leadId = Number(state.contactActionDrawer?.leadId || 0) || 0;
+        const body = document.getElementById("contactDrawerMessage")?.value.trim() || "";
+        const pauseAgent = Boolean(document.getElementById("contactDrawerPauseAfterSend")?.checked);
+        if (!leadId || !body) {
+          setText("contactDrawerStatus", "Message body is required.");
+          return;
+        }
+        try {
+          await apiJson(`/ui/api/conversations/${leadId}/messages/manual`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ body, pause_agent: pauseAgent }),
+          });
+          setText("contactDrawerStatus", pauseAgent ? "Message sent. AI paused for this contact." : "Message sent.");
+          await refreshAfterContactAction(leadId);
+          renderContactActionDrawer();
+          showNotice("Manual message sent.", "ok");
+        } catch (error) {
+          setText("contactDrawerStatus", `Send failed: ${error.message}`);
+          showNotice(`Manual message failed: ${error.message}`, "err");
+        }
+      }
+
+      async function setContactDrawerAgentControl(paused) {
+        const leadId = Number(state.contactActionDrawer?.leadId || 0) || 0;
+        if (!leadId) return;
+        try {
+          await apiJson(`/ui/api/conversations/${leadId}/agent-control`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              paused: Boolean(paused),
+              reason: paused ? "operator_paused" : "operator_resumed",
+              note: paused ? "Paused from contact actions." : "Resumed from contact actions.",
+            }),
+          });
+          await refreshAfterContactAction(leadId);
+          renderContactActionDrawer();
+          showNotice(paused ? "AI paused for this contact." : "AI resumed for this contact.", "ok");
+        } catch (error) {
+          showNotice(`AI control failed: ${error.message}`, "err");
+        }
+      }
+
+      async function refreshAfterContactAction(leadId) {
+        const numericLeadId = Number(leadId) || 0;
+        await Promise.all([
+          loadConversations(),
+          loadCrmLeads(),
+          state.activeCrmLeadId === numericLeadId ? loadCrmLeadDetail(numericLeadId) : Promise.resolve(),
+          state.activeLeadId === numericLeadId ? openThread(numericLeadId) : Promise.resolve(),
+          loadDashboard(),
+          loadAutomationHealth(),
+        ]);
+      }
+
+      async function openThreadFromContactDrawer() {
+        const leadId = Number(state.contactActionDrawer?.leadId || 0) || 0;
+        if (!leadId) return;
+        closeContactActionDrawer();
+        setActiveView("conversations");
+        await openThread(leadId);
+      }
+
+      function createMeetingFromContactDrawer() {
+        const leadId = Number(state.contactActionDrawer?.leadId || 0) || 0;
+        if (!leadId) return;
+        closeContactActionDrawer();
+        setActiveView("calendar");
+        state.calendarMeetingPanelOpen = true;
+        state.calendarLeadPanelOpen = false;
+        window.requestAnimationFrame(() => {
+          renderCalendarView();
+          const mode = document.getElementById("manualMeetingLeadMode");
+          const select = document.getElementById("manualMeetingLeadSelect");
+          if (mode) mode.value = "existing";
+          updateManualMeetingLeadMode();
+          if (select) select.value = String(leadId);
+        });
+      }
+
+      async function sendBookingLinkFromContactDrawer() {
+        const leadId = Number(state.contactActionDrawer?.leadId || 0) || 0;
+        if (!leadId) return;
+        try {
+          await apiJson(`/ui/api/conversations/${leadId}/actions/booking-link`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: "Here is the booking link whenever you are ready." }),
+          });
+          await refreshAfterContactAction(leadId);
+          renderContactActionDrawer();
+          showNotice("Booking link sent.", "ok");
+        } catch (error) {
+          showNotice(`Booking link failed: ${error.message}`, "err");
         }
       }
 
@@ -870,9 +1141,9 @@
           setText("labStartStatus", "Select a client first.");
           return;
         }
-        if (state.testLabMode !== "gpt_only") {
-          setText("labStartStatus", "Only GPT only is currently implemented.");
-          showNotice("Only GPT only is wired for tomorrow's sandbox.", "info");
+        if (!["gpt_only", "gpt_zapier"].includes(state.testLabMode)) {
+          setText("labStartStatus", "Only GPT only and GPT + Zapier are currently implemented.");
+          showNotice("That test path is still on the roadmap.", "info");
           return;
         }
 
@@ -908,6 +1179,7 @@
           state.sandboxLeadId = result.lead_id;
           saveLocalState();
           setText("labStartStatus", `Sandbox started. Contact ${result.lead_id} is open in Conversations.`);
+          writeTestLabOutput(result);
           if (state.session?.role === "client") {
             await Promise.all([loadOwnerWorkspace(clientKey), loadConversations(), loadCrmLeads(), loadCalendar(), loadCrmTasks()]);
           } else {
@@ -994,7 +1266,7 @@
       async function refreshCurrentView() {
         try {
           if (state.session?.role === "client") {
-            await Promise.all([loadConversations(), loadCrmLeads(), loadCalendar(), loadCrmTasks(), loadOwnerWorkspace(state.selectedClientKey)]);
+            await Promise.all([loadConversations(), loadCrmLeads(), loadCalendar(), loadCrmTasks(), loadOwnerWorkspace(state.selectedClientKey), loadAutomationHealth(state.selectedClientKey)]);
             if (state.activeCrmLeadId) {
               await loadCrmLeadDetail(state.activeCrmLeadId);
             }
@@ -1004,7 +1276,7 @@
             return;
           }
           if (state.activeView === "dashboard") {
-            await Promise.all([loadRuntime(), loadDashboard()]);
+            await Promise.all([loadRuntime(), loadDashboard(), loadAutomationHealth(state.selectedClientKey)]);
           } else if (state.activeView === "clients") {
             await Promise.all([loadClients(), loadClientDetail(state.selectedClientKey)]);
           } else if (state.activeView === "conversations") {
@@ -1023,9 +1295,9 @@
           } else if (state.activeView === "logs") {
             await loadLogs(state.selectedClientKey);
           } else if (state.activeView === "settings") {
-            await Promise.all([loadRuntime(), loadClientDetail(state.selectedClientKey), loadOwnerWorkspace(state.selectedClientKey)]);
+            await Promise.all([loadRuntime(), loadClientDetail(state.selectedClientKey), loadOwnerWorkspace(state.selectedClientKey), loadAutomationHealth(state.selectedClientKey)]);
           } else if (state.activeView === "test-lab") {
-            await loadOwnerWorkspace(state.selectedClientKey);
+            await Promise.all([loadOwnerWorkspace(state.selectedClientKey), loadAutomationHealth(state.selectedClientKey)]);
           }
           updateWindowIndicators();
           if (typeof translatePage === "function") translatePage();

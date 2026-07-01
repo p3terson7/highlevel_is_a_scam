@@ -110,8 +110,10 @@ def ui_crm_leads(
                 "client_name": lead.client.business_name if lead.client else "",
                 "crm_stage": crm_stage,
                 "conversation_state": lead.conversation_state.value,
+                "agent_control": get_agent_control(lead),
                 "last_message_snippet": _snippet(_message_preview_text(latest_message)),
                 "last_message_direction": latest_message.direction.value if latest_message else "",
+                "last_message_delivery": delivery_status_for_message(latest_message) if latest_message else None,
                 "lead_summary": summary,
                 "last_activity_at": last_activity_at.isoformat(),
                 "created_at": lead.created_at.isoformat(),
@@ -196,6 +198,7 @@ def ui_crm_create_lead(
             "client_key": client.client_key,
             "crm_stage": normalize_crm_stage(lead.crm_stage),
             "conversation_state": lead.conversation_state.value,
+            "agent_control": get_agent_control(lead),
         },
     }
 
@@ -332,6 +335,7 @@ def ui_crm_lead_detail(
             "owner": lead.owner_name or None,
             "crm_stage": normalize_crm_stage(lead.crm_stage),
             "conversation_state": lead.conversation_state.value,
+            "agent_control": get_agent_control(lead),
             "summary": _lead_summary(lead),
             "summary_lines": _lead_summary_lines(lead),
             "form_answers": normalized_answers,
@@ -356,6 +360,7 @@ def ui_crm_lead_detail(
                 "body": msg.body,
                 "provider_message_sid": msg.provider_message_sid,
                 "attachments": attachments_by_message.get(msg.id, []),
+                "delivery": delivery_status_for_message(msg),
                 "created_at": msg.created_at.isoformat(),
             }
             for msg in messages

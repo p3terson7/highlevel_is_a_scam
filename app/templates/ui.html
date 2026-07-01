@@ -9,6 +9,9 @@
     <link rel="stylesheet" href="/ui/assets/ui.css" />
   </head>
   <body data-theme="light">
+    <div class="app-background" aria-hidden="true">
+    </div>
+
     <div id="loginOverlay" class="login-overlay">
       <div class="login-card stack">
         <div class="login-title">
@@ -58,7 +61,6 @@
         </div>
         <nav class="chrome-nav">
           <button id="topNavDashboard" class="top-nav-item nav-item" data-action="set-view" data-view="dashboard"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg><span class="top-nav-label">Dashboard</span></button>
-          <button id="topNavToday" class="top-nav-item nav-item" data-action="set-view" data-view="today"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/><path d="m5.3 10.3 1.4 1.4 3.8-3.7"/></svg><span class="top-nav-label">Today</span></button>
           <button id="topNavClients" class="top-nav-item nav-item" data-action="set-view" data-view="clients" data-admin-nav="true"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg><span class="top-nav-label">Clients</span></button>
           <button id="topNavConversations" class="top-nav-item nav-item" data-action="set-view" data-view="conversations"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11v7h-6l-3 2v-2h-2z"/></svg><span class="top-nav-label">Inbox</span></button>
           <button id="topNavCrm" class="top-nav-item nav-item" data-action="set-view" data-view="crm"><svg class="top-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5" cy="4.5" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="11.5" r="1"/></svg><span class="top-nav-label">Pipeline</span></button>
@@ -104,10 +106,6 @@
             <button id="navDashboard" class="nav-item" data-action="set-view" data-view="dashboard">
               <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg>
               <div class="nav-copy"><div class="nav-label">Dashboard</div><div class="nav-meta">Status and queue</div></div>
-            </button>
-            <button id="navToday" class="nav-item" data-action="set-view" data-view="today">
-              <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/><path d="m5.3 10.3 1.4 1.4 3.8-3.7"/></svg>
-              <div class="nav-copy"><div class="nav-label">Today</div><div class="nav-meta">Daily queue</div></div>
             </button>
             <button id="navClients" class="nav-item" data-action="set-view" data-view="clients">
               <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg>
@@ -159,73 +157,11 @@
           <div class="workspace">
             <div id="globalNotice" class="notice" role="status" aria-live="polite"></div>
 
-            <section id="view-today" class="view">
-              <div class="today-shell">
-                <div class="today-hero">
-                  <div>
-                    <div id="todayKicker" class="dashboard-kicker">Daily command center</div>
-                    <h2 id="todayTitle">Today</h2>
-                    <div id="todaySubtitle" class="surface-subtitle">Meetings, follow-ups, fresh demand, and the opportunities that need attention now.</div>
-                  </div>
-                  <div id="todayHeroPills" class="actions"></div>
-                </div>
-
-                <div id="todayStats" class="today-stat-grid"></div>
-
-                <div class="today-grid">
-                  <div class="surface today-panel">
-                    <div class="surface-title">
-                      <div>
-                        <h3 id="todayTasksTitle">Priority work</h3>
-                        <div id="todayTasksSubtitle" class="surface-subtitle">Overdue and due-today follow-ups.</div>
-                      </div>
-                      <button class="small ghost" data-action="set-view" data-view="tasks">Open tasks</button>
-                    </div>
-                    <div id="todayTaskList" class="today-list"></div>
-                  </div>
-
-                  <div class="surface today-panel">
-                    <div class="surface-title">
-                      <div>
-                        <h3 id="todayMeetingsTitle">Meetings today</h3>
-                        <div id="todayMeetingsSubtitle" class="surface-subtitle">Booked calls and manual meetings for the selected workspace.</div>
-                      </div>
-                      <button class="small ghost" data-action="set-view" data-view="calendar">Open calendar</button>
-                    </div>
-                    <div id="todayMeetingList" class="today-list"></div>
-                  </div>
-
-                  <div class="surface today-panel">
-                    <div class="surface-title">
-                      <div>
-                        <h3 id="todayHotTitle">Hot opportunities</h3>
-                        <div id="todayHotSubtitle" class="surface-subtitle">Highest score and value signals in the active pipeline.</div>
-                      </div>
-                      <button class="small ghost" data-action="set-view" data-view="crm">Open pipeline</button>
-                    </div>
-                    <div id="todayHotList" class="today-list"></div>
-                  </div>
-
-                  <div class="surface today-panel">
-                    <div class="surface-title">
-                      <div>
-                        <h3 id="todayInboxTitle">Recent conversations</h3>
-                        <div id="todayInboxSubtitle" class="surface-subtitle">Fresh messages and recently active contacts.</div>
-                      </div>
-                      <button class="small ghost" data-action="set-view" data-view="conversations">Open inbox</button>
-                    </div>
-                    <div id="todayConversationList" class="today-list"></div>
-                  </div>
-                </div>
-              </div>
-            </section>
-
             <section id="view-dashboard" class="view">
               <div class="dashboard-shell">
                 <div class="dashboard-hero">
                   <div class="dashboard-hero-grid">
                     <div class="dashboard-hero-main">
-                      <div id="dashboardHeroKicker" class="dashboard-kicker">Overview</div>
                       <div class="dashboard-hero-head">
                         <div class="dashboard-hero-copy">
                           <h2 id="dashboardHeroTitle">Dashboard</h2>
@@ -249,7 +185,7 @@
 
                 <div class="dashboard-main-grid">
                   <div class="stack">
-                    <div class="surface dashboard-panel">
+                    <div class="surface dashboard-panel dashboard-panel-soft dashboard-source-panel">
                       <div class="surface-title">
                         <div>
                           <h3>Source mix</h3>
@@ -258,7 +194,7 @@
                       </div>
                       <div id="dashboardSourceBreakdown" class="dashboard-distribution-list"></div>
                     </div>
-                    <div class="surface dashboard-panel">
+                    <div class="surface dashboard-panel dashboard-panel-medium dashboard-campaign-panel">
                       <div class="surface-title">
                         <div>
                           <h3>Ad campaign monitor</h3>
@@ -267,7 +203,7 @@
                       </div>
                       <div id="dashboardCampaignPerformance" class="dashboard-campaign-card"></div>
                     </div>
-                    <div class="surface dashboard-panel">
+                    <div class="surface dashboard-panel dashboard-panel-medium dashboard-upcoming-panel">
                       <div class="surface-title">
                         <div>
                           <h3>Upcoming</h3>
@@ -276,9 +212,21 @@
                       </div>
                       <div id="dashboardUpcoming" class="dashboard-agenda-list"></div>
                     </div>
+                    <div class="surface dashboard-panel dashboard-panel-medium automation-health-panel">
+                      <div class="surface-title">
+                        <div>
+                          <h3>Automation health</h3>
+                          <div class="surface-subtitle">A simple status check for the flows running behind the scenes.</div>
+                        </div>
+                        <div class="actions">
+                          <button class="small ghost" data-action="open-automation-details">View details</button>
+                        </div>
+                      </div>
+                      <div id="dashboardAutomationHealth" class="automation-health-list"></div>
+                    </div>
                   </div>
 
-                  <div class="surface dashboard-panel">
+                  <div class="surface dashboard-panel dashboard-panel-light dashboard-latest-panel">
                     <div class="surface-title">
                       <div>
                         <h3>Latest opportunities</h3>
@@ -294,7 +242,7 @@
                 </div>
 
                 <div class="dashboard-secondary-grid">
-                  <div class="surface dashboard-panel">
+                  <div class="surface dashboard-panel dashboard-panel-soft dashboard-pipeline-panel">
                     <div class="surface-title">
                       <div>
                         <h3>Pipeline snapshot</h3>
@@ -539,6 +487,10 @@
                             <input id="clientProviderZapierSecret" class="mono" type="password" autocomplete="off" placeholder="shared secret" />
                           </div>
                           <div>
+                            <label for="clientProviderZapierBookingWebhookUrl">Zapier booking webhook URL</label>
+                            <input id="clientProviderZapierBookingWebhookUrl" class="mono" type="password" autocomplete="off" placeholder="https://hooks.zapier.com/..." />
+                          </div>
+                          <div>
                             <label for="clientProviderPublicBaseUrl">Public base URL</label>
                             <input id="clientProviderPublicBaseUrl" class="mono" placeholder="https://abc123.ngrok-free.dev" />
                           </div>
@@ -674,6 +626,7 @@
                       <h3 id="threadTitle">Thread</h3>
                     </div>
                     <div id="threadHeaderPills" class="chip-row"></div>
+                    <button id="threadContactActionsButton" class="small ghost" type="button" data-action="open-contact-drawer">Actions</button>
                   </div>
                   <div id="threadTimeline" class="timeline"></div>
                   <div class="composer">
@@ -713,6 +666,10 @@
                       </div>
                       <div id="threadMediaPreview" class="composer-media-preview hidden"></div>
                       <div class="composer-foot">
+                        <label id="threadPauseAfterSendWrap" class="checkbox-inline composer-pause-control">
+                          <input id="threadPauseAfterSend" type="checkbox" />
+                          <span>Pause AI after this manual reply</span>
+                        </label>
                         <div id="threadComposerHint" class="meta-text"></div>
                         <div id="threadManualStatus" class="meta-text"></div>
                       </div>
@@ -919,6 +876,7 @@
                         <div id="crmLeadHeaderLineSecondary" class="lead-detail-meta"></div>
                     </div>
                     <div class="actions">
+                      <button id="crmLeadMessageButton" class="small" type="button" data-action="open-contact-drawer">Message</button>
                       <button id="crmLeadBackButton" class="small ghost hidden">Back to pipeline</button>
                       <button id="crmLeadArchiveButton" class="small ghost hidden">Archive</button>
                     </div>
@@ -1149,11 +1107,8 @@
                         <label for="manualMeetingNotes">Notes</label>
                         <textarea id="manualMeetingNotes" placeholder="Internal meeting notes."></textarea>
                       </div>
-                      <div class="manual-checkbox-list">
-                        <label class="checkbox-inline"><input id="manualMeetingCreateConference" type="checkbox" /> Create Zoom / Google Meet conference link</label>
-                        <label class="checkbox-inline"><input id="manualMeetingSendInvite" type="checkbox" /> Send email invite to both parties</label>
-                        <label class="checkbox-inline"><input id="manualMeetingIncludeLink" type="checkbox" /> Include meeting link in email if created</label>
-                        <label class="checkbox-inline"><input id="manualMeetingSmsReminders" type="checkbox" /> Send SMS reminders to both parties</label>
+                      <div class="helper-card subtle-card">
+                        Conference link creation, calendar invites, meeting-link delivery, and reminders are handled automatically.
                       </div>
                       <div class="actions">
                         <button id="manualMeetingCreateButton" class="primary">Add meeting</button>
@@ -1639,7 +1594,7 @@
                       <span class="test-lab-step">3</span>
                       <div>
                         <h3 class="test-lab-section-title">Test configuration</h3>
-                        <div class="surface-subtitle">Only GPT only is connected for tomorrow. The others are visible as the roadmap.</div>
+                        <div class="surface-subtitle">Run GPT alone, or run GPT with the booking Zapier webhook while keeping Twilio out of the loop.</div>
                       </div>
                     </div>
                     <div class="test-lab-mode-grid">
@@ -1647,6 +1602,11 @@
                         <div class="test-lab-mode-kicker">Ready now</div>
                         <strong>GPT only</strong>
                         <span>Creates the sandbox contact and lets you answer inside the app.</span>
+                      </button>
+                      <button type="button" class="test-lab-mode-card" data-action="set-test-mode" data-mode="gpt_zapier">
+                        <div class="test-lab-mode-kicker">Ready now</div>
+                        <strong>GPT + Zapier only</strong>
+                        <span>Bypasses Twilio, then posts the booking payload to the client's Zapier hook when a meeting is booked.</span>
                       </button>
                       <button type="button" class="test-lab-mode-card disabled" data-action="set-test-mode" data-mode="gpt_twilio" aria-disabled="true">
                         <div class="test-lab-mode-kicker">Coming soon</div>
@@ -1672,21 +1632,41 @@
                     <button id="labStartButton" class="primary">Start GPT sandbox</button>
                     <div id="labStartStatus" class="meta-text"></div>
                   </div>
+                  <div class="surface stack test-lab-start-card">
+                    <div class="test-lab-section-header">
+                      <span class="test-lab-step">5</span>
+                      <div>
+                        <h3 class="test-lab-section-title">Sandbox debug output</h3>
+                        <div class="surface-subtitle">Shows booking planner reasoning after availability replies, plus the webhook result and JSON payload in GPT + Zapier mode.</div>
+                      </div>
+                    </div>
+                    <pre id="testLabOutput" class="code-output">Start GPT-only or GPT + Zapier, ask for availability in the sandbox thread, then booking planner debug will appear here.</pre>
+                  </div>
                 </div>
               </div>
             </section>
           </div>
         </main>
       </div>
+      <div id="contactActionDrawerBackdrop" class="drawer-backdrop hidden" data-action="close-contact-drawer"></div>
+      <aside id="contactActionDrawer" class="contact-action-drawer hidden" aria-hidden="true">
+        <div class="drawer-header">
+          <div>
+            <div class="drawer-kicker">Contact control</div>
+            <h3 id="contactDrawerTitle">Contact</h3>
+            <div id="contactDrawerSubtitle" class="surface-subtitle"></div>
+          </div>
+          <button class="icon-btn ghost" type="button" data-action="close-contact-drawer" aria-label="Close contact actions">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+          </button>
+        </div>
+        <div id="contactDrawerBody" class="drawer-body stack"></div>
+      </aside>
       <nav id="mobileTabbar" class="mobile-tabbar" aria-label="Mobile navigation">
         <div class="mobile-tabbar-inner">
           <button id="mobileNavDashboard" class="mobile-tab-item nav-item" data-action="set-view" data-view="dashboard">
             <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v7H9zM2.5 9h4.5v4.5H2.5zM9 11.5h4.5V13.5H9z"/></svg>
             <span class="mobile-tab-label">Home</span>
-          </button>
-          <button id="mobileNavToday" class="mobile-tab-item nav-item" data-action="set-view" data-view="today">
-            <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10v9H3zM5.5 2.5v3M10.5 2.5v3M3 7h10"/><path d="m5.3 10.3 1.4 1.4 3.8-3.7"/></svg>
-            <span class="mobile-tab-label">Today</span>
           </button>
           <button id="mobileNavClients" class="mobile-tab-item nav-item" data-action="set-view" data-view="clients" data-admin-nav="true">
             <svg class="mobile-tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 7.5h11M2.5 11.5h6"/><circle cx="12.5" cy="11.5" r="1.5"/></svg>

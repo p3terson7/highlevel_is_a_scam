@@ -47,10 +47,6 @@
         document.getElementById("crmLeadArchiveButton").classList.toggle("hidden", isAdmin);
         document.getElementById("settingsClientOverviewCard").classList.toggle("hidden", isAdmin);
         document.querySelector("#navDashboard .nav-meta").textContent = isAdmin ? "Portfolio and queue" : "Overview, calendar, tasks";
-        document.querySelector("#topNavToday .top-nav-label").textContent = t("Today");
-        document.querySelector("#navToday .nav-label").textContent = t("Today");
-        document.querySelector("#navToday .nav-meta").textContent = t("Daily queue");
-        document.querySelector("#mobileNavToday .mobile-tab-label").textContent = t("Today");
         document.querySelector("#topNavCrm .top-nav-label").textContent = t("Pipeline");
         document.querySelector("#navCrm .nav-label").textContent = t("Pipeline");
         document.querySelector("#navCrm .nav-meta").textContent = t(isAdmin ? "Kanban stages" : "Pipeline and restores");
@@ -104,7 +100,7 @@
           threadSendButton.setAttribute("title", sendLabel);
         }
         if (!isAdmin) {
-          const clientAllowedViews = new Set(["dashboard", "today", "conversations", "crm", "leads", "calendar", "tasks", "settings"]);
+          const clientAllowedViews = new Set(["dashboard", "conversations", "crm", "leads", "calendar", "tasks", "settings"]);
           if (!clientAllowedViews.has(state.activeView)) {
             state.activeView = "dashboard";
             window.location.hash = "dashboard";
@@ -189,9 +185,13 @@
       function routeFromHash() {
         const view = (window.location.hash || `#${state.activeView}`).replace(/^#/, "");
         const allowed = state.session?.role === "client"
-          ? ["dashboard", "today", "conversations", "crm", "leads", "calendar", "tasks", "settings"]
-          : ["dashboard", "today", "clients", "conversations", "crm", "leads", "calendar", "tasks", "logs", "settings", "test-lab"];
-        setActiveView(allowed.includes(view) ? view : "dashboard", false);
+          ? ["dashboard", "conversations", "crm", "leads", "calendar", "tasks", "settings"]
+          : ["dashboard", "clients", "conversations", "crm", "leads", "calendar", "tasks", "logs", "settings", "test-lab"];
+        const nextView = allowed.includes(view) ? view : "dashboard";
+        setActiveView(nextView, false);
+        if (view !== nextView) {
+          window.location.hash = nextView;
+        }
       }
 
       function renderPreviewConversation(item, includeClient = true) {
@@ -205,6 +205,7 @@
               <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Contact ${item.lead_id}`)}</div>
               <div class="actions">
                 ${item.crm_stage ? renderBadge(item.crm_stage, "info") : ""}
+                ${renderMessageDeliveryStatus(item.last_message_delivery, { compact: true, onlyWarnings: true })}
                 ${maybeRenderConversationState(item.crm_stage, item.state)}
               </div>
             </div>
@@ -379,6 +380,35 @@
         renderZapierResults();
         renderConversationClientGuide();
         renderSettings();
+      }
+
+      async function loadAutomationHealth(clientKey = state.selectedClientKey) {
+        const effectiveClientKey = state.session?.role === "client"
+          ? (state.session?.client_key || clientKey)
+          : clientKey;
+        if (!effectiveClientKey) {
+          state.automationHealth = null;
+          renderDashboard();
+          return;
+        }
+        try {
+          state.automationHealth = await apiJson(`/ui/api/clients/${encodeURIComponent(effectiveClientKey)}/automation-health`);
+        } catch (error) {
+          state.automationHealth = {
+            status: "needs_attention",
+            needs_attention: 1,
+            automations: [
+              {
+                key: "automation_health",
+                label: "Automation health",
+                status: "needs_attention",
+                detail: error.message,
+                runs_7d: 0,
+              },
+            ],
+          };
+        }
+        renderDashboard();
       }
 
       function applyConversationFilterInputs() {

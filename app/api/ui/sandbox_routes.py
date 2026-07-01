@@ -3,6 +3,78 @@ from .shared import *
 
 router = APIRouter()
 
+_SANDBOX_MODES = {"gpt_only", "gpt_zapier"}
+_ZAPIER_BOOKING_EVENTS = {"zapier_booking_webhook_sent", "zapier_booking_webhook_failed"}
+
+
+def _sandbox_booking_debug(message: Message | None) -> dict[str, Any] | None:
+    if message is None:
+        return None
+    raw_payload = message.raw_payload if isinstance(message.raw_payload, dict) else {}
+    offer = raw_payload.get("booking_offer") if isinstance(raw_payload.get("booking_offer"), dict) else None
+    if not offer:
+        return None
+    slots = offer.get("slots") if isinstance(offer.get("slots"), list) else []
+    return {
+        "request": offer.get("request") if isinstance(offer.get("request"), dict) else {},
+        "planner": offer.get("planner") if isinstance(offer.get("planner"), dict) else {},
+        "match_mode": offer.get("match_mode"),
+        "matched_preference": offer.get("matched_preference"),
+        "selected_slots": [
+            {
+                "index": slot.get("index"),
+                "display_time": slot.get("display_time"),
+                "start_time": slot.get("start_time"),
+                "end_time": slot.get("end_time"),
+            }
+            for slot in slots
+            if isinstance(slot, dict)
+        ],
+    }
+
+
+def _sandbox_zapier_result(db: Session, *, lead_id: int, mode: str, client: Client | None) -> dict[str, Any]:
+    if mode != "gpt_zapier":
+        return {
+            "enabled": False,
+            "status": "disabled",
+            "message": "Zapier is off for this GPT-only sandbox.",
+        }
+    provider_config = client.provider_config if client is not None and isinstance(client.provider_config, dict) else {}
+    if not str(provider_config.get("zapier_booking_webhook_url") or "").strip():
+        return {
+            "enabled": True,
+            "status": "not_configured",
+            "message": "Add a Zapier booking webhook URL for this client before booking in GPT + Zapier mode.",
+        }
+
+    latest = db.scalar(
+        select(AuditLog)
+        .where(AuditLog.lead_id == lead_id, AuditLog.event_type.in_(_ZAPIER_BOOKING_EVENTS))
+        .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
+        .limit(1)
+    )
+    if latest is None:
+        return {
+            "enabled": True,
+            "status": "waiting_for_booking",
+            "message": "Zapier will fire after this sandbox lead books a meeting.",
+        }
+
+    decision = latest.decision if isinstance(latest.decision, dict) else {}
+    return {
+        "enabled": True,
+        "status": "sent" if latest.event_type == "zapier_booking_webhook_sent" else "failed",
+        "event_type": latest.event_type,
+        "created_at": latest.created_at.isoformat(),
+        "status_code": decision.get("status_code"),
+        "endpoint_host": decision.get("endpoint_host"),
+        "dedupe_key": decision.get("dedupe_key"),
+        "error": decision.get("error"),
+        "payload": decision.get("payload"),
+    }
+
+
 @router.post("/ui/api/owner/{client_key}/sandbox/start")
 def ui_owner_start_ai_sandbox(
     client_key: str,
@@ -18,8 +90,8 @@ def ui_owner_start_ai_sandbox(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
 
     mode = (payload.mode or "gpt_only").strip().lower()
-    if mode != "gpt_only":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only GPT only sandbox is currently available")
+    if mode not in _SANDBOX_MODES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only GPT only and GPT + Zapier sandbox modes are currently available")
 
     submitted_answers: dict[str, str] = {}
     original_answers: list[dict[str, str]] = []
@@ -202,6 +274,8 @@ def ui_owner_start_ai_sandbox(
         "delivery_mode": "sandbox",
         "twilio_bypassed": True,
         "phone": lead.phone,
+        "booking_debug": None,
+        "zapier_booking_webhook": _sandbox_zapier_result(db, lead_id=lead.id, mode=mode, client=client),
     }
 
 
@@ -286,6 +360,8 @@ def ui_send_ai_sandbox_message(
         .order_by(desc(Message.created_at), desc(Message.id))
         .limit(1)
     )
+    raw_payload_after = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    mode = str(raw_payload_after.get("test_configuration") or raw_payload.get("test_configuration") or "gpt_only").strip().lower()
     return {
         "status": "ok",
         "lead_id": lead.id,
@@ -299,5 +375,6 @@ def ui_send_ai_sandbox_message(
             "body": latest_outbound.body if latest_outbound else "",
             "provider_message_sid": latest_outbound.provider_message_sid if latest_outbound else "",
         },
+        "booking_debug": _sandbox_booking_debug(latest_outbound),
+        "zapier_booking_webhook": _sandbox_zapier_result(db, lead_id=lead.id, mode=mode, client=lead.client),
     }
-

@@ -39,6 +39,8 @@ from app.services.booking import (
     ensure_booking_link,
     internal_calendar_preview_config,
 )
+from app.services.agent_control import get_agent_control, set_agent_control
+from app.services.sms_delivery import delivery_status_for_message
 from app.services.crm import (
     CRM_STAGE_CONTACTED,
     CRM_STAGE_QUALIFIED,
@@ -83,6 +85,8 @@ _ZAPIER_CONSOLE_EVENTS = {
     "initial_sms_sent",
     "after_hours_initial_sms_sent",
     "initial_sms_skipped",
+    "zapier_booking_webhook_sent",
+    "zapier_booking_webhook_failed",
 }
 _BOOKING_STATES = {ConversationStateEnum.BOOKING_SENT, ConversationStateEnum.BOOKED}
 _CLOSED_STATES = {ConversationStateEnum.BOOKED, ConversationStateEnum.OPTED_OUT}
@@ -116,6 +120,13 @@ class HandoffActionRequest(BaseModel):
 
 class ManualMessageRequest(BaseModel):
     body: str
+    pause_agent: bool = False
+
+
+class AgentControlRequest(BaseModel):
+    paused: bool
+    reason: str | None = None
+    note: str | None = None
 
 
 class SandboxFormAnswer(BaseModel):
@@ -216,10 +227,10 @@ class ManualMeetingCreateRequest(BaseModel):
     timezone: str
     title: str
     notes: str | None = None
-    create_conference_link: bool = False
-    send_email_invite: bool = False
-    include_meeting_link: bool = False
-    send_sms_reminders: bool = False
+    create_conference_link: bool = True
+    send_email_invite: bool = True
+    include_meeting_link: bool = True
+    send_sms_reminders: bool = True
 
 
 class ManualMeetingStatusRequest(BaseModel):
@@ -354,12 +365,12 @@ def _parse_local_datetime(value: str, timezone_name: str) -> datetime:
 
 
 def _manual_meeting_options(payload: ManualMeetingCreateRequest) -> dict[str, bool]:
-    create_link = bool(payload.create_conference_link)
+    _ = payload
     return {
-        "create_conference_link": create_link,
-        "send_email_invite": bool(payload.send_email_invite),
-        "include_meeting_link": bool(payload.include_meeting_link and create_link),
-        "send_sms_reminders": bool(payload.send_sms_reminders),
+        "create_conference_link": True,
+        "send_email_invite": True,
+        "include_meeting_link": True,
+        "send_sms_reminders": True,
         "zapier_pending": True,
     }
 
@@ -869,7 +880,7 @@ def _send_outbound_message(
             direction=MessageDirection.OUTBOUND,
             body=cleaned_body,
             provider_message_sid=provider_sid,
-            raw_payload=raw_payload,
+            raw_payload=sms_service.with_delivery_status(raw_payload, provider_sid),
             created_at=created_at,
         )
     )
@@ -969,11 +980,13 @@ def _build_conversation_items(
                 "client_name": lead.client.business_name if lead.client else "",
                 "state": lead.conversation_state.value,
                 "crm_stage": normalize_crm_stage(lead.crm_stage),
+                "agent_control": get_agent_control(lead),
                 "opted_out": lead.opted_out,
                 "tags": tags,
                 "notes_count": notes_count,
                 "last_message_snippet": _snippet(_message_preview_text(latest_message)),
                 "last_message_direction": latest_message.direction.value if latest_message else None,
+                "last_message_delivery": delivery_status_for_message(latest_message) if latest_message else None,
                 "last_activity_at": last_activity_at.isoformat(),
                 "created_at": lead.created_at.isoformat(),
             }

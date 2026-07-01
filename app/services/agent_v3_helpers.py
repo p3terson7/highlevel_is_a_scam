@@ -7,6 +7,7 @@ from typing import Any
 
 from app.db.models import Client, ConversationStateEnum, Lead, Message, MessageDirection
 from app.services.agent_v3_types import *
+from app.services.i18n import normalize_language
 from app.services.lead_summary import build_lead_summary_text
 
 def _serialize_message(message: Message) -> dict[str, Any]:
@@ -81,24 +82,24 @@ def _identity_reply(context: dict[str, Any]) -> str:
         )
         source_fact = _extract_business_identity_fact(context) if asks_business_identity else ""
         if source_fact:
-            return f"{prefix} Selon les infos de l'entreprise que j'ai: {source_fact} Je peux répondre aux questions ou aider à réserver un moment."
+            return f"{prefix} Selon les infos de l'entreprise que j'ai: {source_fact} Je peux répondre aux questions ici."
         if asks_business_identity:
-            return f"{prefix} Je n'ai pas de détails confirmés sur le fondateur ou propriétaire dans mon contexte, mais je peux répondre aux questions ou aider à réserver un moment."
-        return f"{prefix} Je peux répondre aux questions et aider à réserver un moment pratique quand vous êtes prêt."
+            return f"{prefix} Je n'ai pas de détails confirmés sur le fondateur ou propriétaire dans mon contexte, mais je peux répondre aux questions ici."
+        return f"{prefix} Je peux répondre aux questions ici."
 
     prefix = f"No - I'm {assistant_name}, the assistant for {business_name}." if asks_if_assistant_owns else f"I'm {assistant_name}, the assistant for {business_name}."
     source_fact = _extract_business_identity_fact(context) if asks_business_identity else ""
     if source_fact:
-        return f"{prefix} From the business info I have: {source_fact} I can answer questions or help book a convenient meeting."
+        return f"{prefix} From the business info I have: {source_fact} I can answer questions here."
     if asks_business_identity:
-        return f"{prefix} I do not have confirmed founder or owner details in my context, but I can answer questions or help book a convenient meeting."
-    return f"{prefix} I can answer questions and help book a convenient meeting when you are ready."
+        return f"{prefix} I do not have confirmed founder or owner details in my context, but I can answer questions here."
+    return f"{prefix} I can answer questions here."
 
 
 def _extract_business_identity_fact(context: dict[str, Any]) -> str:
     source_text = "\n".join(
         str(context.get(key) or "")
-        for key in ("knowledge_context", "faq_context", "ai_context")
+        for key in ("knowledge_context", "business_profile_context", "faq_context", "ai_context")
         if str(context.get(key) or "").strip()
     )
     if not source_text:
@@ -207,13 +208,120 @@ def _slot_offer_tool_result(*, offer: Any, availability_query: dict[str, Any]) -
     }
 
 
-def _ensure_slot_fallback_line(text: str) -> str:
+def _ensure_slot_fallback_line(text: str, *, language: str = "en") -> str:
+    language = normalize_language(language)
     clean = " ".join(str(text or "").split()).strip()
+    fallback = (
+        "Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux."
+        if language == "fr"
+        else "If none of those work, just send me a time that's better for you."
+    )
     if not clean:
-        return "If none of those work, just send me a time that's better for you."
-    if "if none of those work" in _normalize_text(clean):
+        return fallback
+    if language == "fr":
+        clean = re.sub(
+            r"\s*If none of those work,[^.?!]*(?:[.?!]|$)",
+            "",
+            clean,
+            flags=re.IGNORECASE,
+        ).strip()
+    normalized = _normalize_text(clean)
+    if "if none of those work" in normalized or "si aucune option ne fonctionne" in normalized:
         return clean
-    return f"{clean} If none of those work, just send me a time that's better for you."
+    return f"{clean} {fallback}"
+
+
+_FR_MONTH_ABBR = {
+    "jan": "janvier",
+    "feb": "février",
+    "mar": "mars",
+    "apr": "avril",
+    "may": "mai",
+    "jun": "juin",
+    "jul": "juillet",
+    "aug": "août",
+    "sep": "septembre",
+    "oct": "octobre",
+    "nov": "novembre",
+    "dec": "décembre",
+}
+_FR_WEEKDAY_ABBR = {
+    "mon": "lundi",
+    "tue": "mardi",
+    "wed": "mercredi",
+    "thu": "jeudi",
+    "fri": "vendredi",
+    "sat": "samedi",
+    "sun": "dimanche",
+}
+_QUESTION_TEXT_FR = {
+    "decision_makers": "Êtes-vous la personne qui prend la décision, et est-ce que quelqu'un d'autre devrait participer à l'appel?",
+    "urgency_driver": "Y a-t-il une échéance ou une date importante derrière cette demande?",
+}
+_GENERIC_MISSING_QUESTION_FR = {
+    "desired_outcome": "À quoi ressemblerait un bon résultat pour vous?",
+    "request_type": "Quel type d'aide recherchez-vous?",
+    "timeline": "Idéalement, quand aimeriez-vous commencer ou régler ça?",
+    "decision_process": "Êtes-vous la bonne personne pour coordonner la suite, ou faut-il inclure quelqu'un d'autre?",
+    "follow_up_contact": "Quel est le meilleur courriel ou moyen de contact si l'équipe doit envoyer des détails?",
+}
+_LOCALIZED_AGENT_REPLIES = {
+    "pick_slot_first": {
+        "en": "I can lock that in once you pick one of the offered times.",
+        "fr": "Je peux le réserver dès que vous choisissez un des créneaux proposés.",
+    },
+    "booked": {
+        "en": "Perfect. You're booked.",
+        "fr": "Parfait. Votre appel est réservé.",
+    },
+    "booked_closing": {
+        "en": "Perfect. See you then.",
+        "fr": "Parfait. À bientôt pour l'appel.",
+    },
+    "booked_followup": {
+        "en": "You're all set. Text me here anytime if something changes before the meeting.",
+        "fr": "C'est tout bon. Répondez ici si quelque chose change avant l'appel.",
+    },
+    "share_times": {
+        "en": "I can share a few times that work.",
+        "fr": "Je peux vous envoyer quelques créneaux disponibles.",
+    },
+    "understood": {
+        "en": "Understood.",
+        "fr": "Compris.",
+    },
+    "handoff": {
+        "en": "Understood. I'll have someone reach out.",
+        "fr": "Compris. Je vais demander à quelqu'un de vous contacter.",
+    },
+}
+
+
+def _question_text_for_language(key: str | None, language: str) -> str:
+    key = str(key or "")
+    language = normalize_language(language)
+    if language == "fr" and key in _QUESTION_TEXT_FR:
+        return _QUESTION_TEXT_FR[key]
+    spec = _QUESTION_SPEC_BY_KEY.get(key)
+    return spec.question if spec else ""
+
+
+def _missing_field_question_for_language(field: dict[str, Any], language: str) -> str:
+    key = str(field.get("key") or "")
+    language = normalize_language(language)
+    if language == "fr" and key in _GENERIC_MISSING_QUESTION_FR:
+        return _GENERIC_MISSING_QUESTION_FR[key]
+    return str(field.get("question") or "")
+
+
+def _localized_agent_reply(key: str, context_or_language: dict[str, Any] | str | None = None) -> str:
+    if isinstance(context_or_language, dict):
+        language = str(context_or_language.get("response_language") or "en")
+    else:
+        language = str(context_or_language or "en")
+    language = normalize_language(language)
+    options = _LOCALIZED_AGENT_REPLIES.get(key, _LOCALIZED_AGENT_REPLIES["understood"])
+    return options.get(language) or options["en"]
 
 
 def _should_check_fresh_slots(preferences: dict[str, str]) -> bool:
@@ -330,6 +438,7 @@ def _classify_lead_intent(
     low_signal = bool(_LOW_INTENT_PATTERN.search(text))
     pricing_question = bool(_PRICING_PATTERN.search(text))
     buying_signal = bool(_BUYING_SIGNAL_PATTERN.search(text))
+    scheduling_intent = _has_scheduling_intent(text)
 
     if memory.service_needed:
         score += 2
@@ -366,7 +475,7 @@ def _classify_lead_intent(
     if pricing_question:
         score += 2
         reasons.append("pricing_question")
-    if explicit_booking_intent or inbound_preferences:
+    if explicit_booking_intent or (inbound_preferences and scheduling_intent):
         score += 3
         reasons.append("scheduling_intent")
     if buying_signal:
@@ -410,7 +519,11 @@ def _build_cta_state(
     meeting_suggested_count = max(previous_count, history_count)
     last_outbound = _latest_outbound_from_history(history)
     recent_meeting_cta = _message_suggests_meeting(last_outbound.get("body", "") if last_outbound else "")
-    accepted = bool(explicit_booking_intent or inbound_preferences or _extract_slot_choice(inbound_text, latest_offer))
+    accepted = bool(
+        explicit_booking_intent
+        or _extract_slot_choice(inbound_text, latest_offer)
+        or (inbound_preferences and _has_scheduling_intent(inbound_text))
+    )
     rejected = bool(previous.get("meeting_rejected")) or bool(_CALL_REFUSAL_PATTERN.search(inbound_text or ""))
     ignored = bool(recent_meeting_cta and not accepted and not rejected and str(inbound_text or "").strip())
     renewed_buying_intent = bool(accepted or _BUYING_SIGNAL_PATTERN.search(inbound_text or ""))
@@ -524,8 +637,8 @@ def _recommended_response_strategy(
         return "Answer helpfully and do not suggest a call unless the lead reverses course."
     if pricing_question:
         if pricing_context_available:
-            return "Answer the pricing question only from ai_context, then guide to fit or booking if useful."
-        return "Do not discuss pricing or budget. Say confirmed package details are not available here, then help with fit, process, or scheduling."
+            return "Answer the pricing question only from ai_context, then guide to fit; do not present live times unless the lead explicitly asks to schedule."
+        return "Do not discuss pricing or budget. Say confirmed package details are not available here, then help with fit or process. Do not present live times unless the lead explicitly asks to schedule."
     if cta_state.get("suppress_meeting_cta"):
         return "Continue helping or ask one useful missing question; do not repeat the meeting CTA this turn."
     if intent_level == "HIGH_INTENT":
@@ -570,6 +683,11 @@ def _attach_behavior_runtime(response: AgentResponse, context: dict[str, Any]) -
     response.runtime_payload["intent_level"] = context.get("intent_level", "LOW_INTENT")
     response.runtime_payload["intent_score"] = context.get("intent_score", 0)
     response.runtime_payload["intent_reasons"] = context.get("intent_reasons", [])
+    response.runtime_payload["conversation_act"] = response.conversation_act
+    response.runtime_payload["lead_intent"] = response.lead_intent
+    response.runtime_payload["planner_confidence"] = response.confidence
+    response.runtime_payload["planner_reasoning_summary"] = response.reasoning_summary
+    response.runtime_payload["uses_knowledge_context"] = response.uses_knowledge_context
     response.runtime_payload["important_missing_fields"] = context.get("important_missing_fields", [])
     lead_summary = dict(context.get("internal_lead_summary") or {})
     if lead_summary:
@@ -734,10 +852,45 @@ def _strip_meeting_cta(text: str, *, fallback: str) -> str:
     clean = " ".join(str(text or "").split()).strip()
     if not clean:
         return fallback
+    clean = re.sub(
+        r",?\s+or\s+would\s+you\s+rather\s+i\s+help\s+(?:line up|set up|schedule|book)[^.?!]*(?:[.?!]|$)",
+        "?",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\s*(?:if you want|if you'd like|if helpful),?\s+i can help\s+(?:line up|set up|schedule|book)[^.?!]*(?:[.?!]|$)",
+        " ",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\s*i can help\s+(?:line up|set up|schedule|book)[^.?!]*(?:[.?!]|$)",
+        " ",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(r"\s+([,.!?])", r"\1", clean)
+    clean = re.sub(r"\s{2,}", " ", clean).strip()
     parts = re.split(r"(?<=[.!?])\s+", clean)
     kept = [part.strip() for part in parts if part.strip() and not _message_suggests_meeting(part)]
     stripped = " ".join(kept).strip()
     return stripped or fallback
+
+
+def _meeting_cta_allowed_for_turn(context: dict[str, Any]) -> bool:
+    cta_state = context.get("cta_state") if isinstance(context.get("cta_state"), dict) else {}
+    if context.get("call_refusal") or cta_state.get("meeting_rejected"):
+        return False
+    if (
+        context.get("explicit_booking_intent")
+        or context.get("scheduling_intent_detected")
+        or context.get("booked_confirmation_intent")
+    ):
+        return True
+    if context.get("pricing_question") and not context.get("pricing_context_available"):
+        return _soft_call_cta_allowed(context)
+    return False
 
 
 def _non_booking_bridge_reply(context: dict[str, Any]) -> str:
@@ -748,24 +901,36 @@ def _non_booking_bridge_reply(context: dict[str, Any]) -> str:
         if context.get("pricing_question"):
             if context.get("pricing_context_available"):
                 return "Je peux répondre à partir des détails fournis par l'entreprise. Quelle partie voulez-vous clarifier?"
-            return "Je n'ai pas de détails de forfait confirmés ici. Je peux aider avec l'adéquation, le processus ou trouver un moment pratique pour un appel."
+            base = (
+                "Je n'ai pas de détails de prix ou de forfait confirmés ici. "
+                "En général, ça dépend de l'étendue, du délai, de la zone desservie, du niveau de service et des besoins particuliers."
+            )
+            if _soft_call_cta_allowed(context):
+                return f"{base} L'équipe peut clarifier ça pendant un appel de consultation; voulez-vous que je vous aide à organiser ça?"
+            return f"{base} Je peux aussi vous aider à clarifier l'adéquation ou le processus ici."
         if str(context.get("intent_level") or "") == "LOW_INTENT":
             return "Pas de problème. Je peux vous aider à vous faire une idée générale d'abord. Cherchez-vous surtout à comprendre le processus, les délais ou l'adéquation?"
         missing = context.get("recommended_missing_field")
         if isinstance(missing, dict) and missing.get("question"):
-            return str(missing["question"])
+            return _missing_field_question_for_language(missing, language)
         return "Ça fait du sens. Qu'est-ce qui serait le plus utile à clarifier en premier?"
     if context.get("call_refusal") or (context.get("cta_state") or {}).get("meeting_rejected"):
         return "No problem. I can keep helping here instead. What would you like to understand next?"
     if context.get("pricing_question"):
         if context.get("pricing_context_available"):
             return "I can answer from the package details the business provided. What part would you like me to clarify?"
-        return "I do not have confirmed package details here. I can help with fit, process, or finding a convenient meeting time."
+        base = (
+            "I do not have confirmed package or pricing details here. "
+            "It usually depends on scope, timeline, service area, package level, and any special requirements."
+        )
+        if _soft_call_cta_allowed(context):
+            return f"{base} The team can review that on a consultation call; would you like me to help set that up?"
+        return f"{base} I can also help clarify fit or process here."
     if str(context.get("intent_level") or "") == "LOW_INTENT":
         return "No problem. I can help you get a general idea first. Are you mostly trying to understand process, timeline, or fit?"
     missing = context.get("recommended_missing_field")
     if isinstance(missing, dict) and missing.get("question"):
-        return str(missing["question"])
+        return _missing_field_question_for_language(missing, language)
     return "That makes sense. What would be most helpful to clarify first?"
 
 
@@ -778,7 +943,103 @@ def _apply_response_guardrails(text: str, context: dict[str, Any]) -> str:
     clean = _remove_redundant_acknowledged_fact_clauses(clean, context)
     clean = _remove_disallowed_pricing_language(clean, context)
     clean = _ensure_initial_intro(clean, context)
+    clean = _enforce_response_language(clean, context)
     return clean
+
+
+def _enforce_response_language(text: str, context: dict[str, Any]) -> str:
+    language = normalize_language(str(context.get("response_language") or "en"))
+    if language != "fr":
+        return text
+    clean = _replace_common_english_booking_copy(text)
+    clean = _localize_english_slot_dates(clean)
+    clean = _localize_english_clock_times(clean)
+    clean = re.sub(r"\bconsultation call\b", "appel de consultation", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bstrategy call\b", "appel de consultation", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bthe team\b", "l'équipe", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+([,.!?])", r"\1", clean)
+    return re.sub(r"\s{2,}", " ", clean).strip()
+
+
+def _replace_common_english_booking_copy(text: str) -> str:
+    clean = str(text or "")
+    clean = re.sub(
+        r"\bIf none of those work, just send me a time that's better for you\.?",
+        "Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux.",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bTimes shown in ([A-Z]{2,5})\.?",
+        r"Heures affichées en \1.",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bReply with ([^.;]+?) to book the call, or send the exact time you want\.?",
+        r"Répondez \1 pour réserver l'appel, ou envoyez l'heure exacte souhaitée.",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bReply with ([^.;]+?) and I(?:'|’)ll lock it in\.?",
+        r"Répondez \1 et je le réserve.",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bI can lock that in once you pick one of the offered times\.?",
+        _LOCALIZED_AGENT_REPLIES["pick_slot_first"]["fr"],
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bPerfect\. You(?:'|’)re booked\.?",
+        _LOCALIZED_AGENT_REPLIES["booked"]["fr"],
+        clean,
+        flags=re.IGNORECASE,
+    )
+    return clean
+
+
+def _localize_english_slot_dates(text: str) -> str:
+    pattern = re.compile(
+        r"\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+"
+        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+        r"(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b",
+        re.IGNORECASE,
+    )
+
+    def repl(match: re.Match[str]) -> str:
+        day = _FR_WEEKDAY_ABBR.get(match.group(1).lower()[:3], match.group(1))
+        month = _FR_MONTH_ABBR.get(match.group(2).lower()[:3], match.group(2))
+        day_number = int(match.group(3))
+        hour = int(match.group(4))
+        minute = int(match.group(5) or "0")
+        meridiem = match.group(6).lower()
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        if meridiem == "am" and hour == 12:
+            hour = 0
+        return f"{day} {day_number} {month} à {hour} h {minute:02d}"
+
+    return pattern.sub(repl, text)
+
+
+def _localize_english_clock_times(text: str) -> str:
+    pattern = re.compile(r"\b(\d{1,2})(?::(\d{2}))\s*(AM|PM)\b", re.IGNORECASE)
+
+    def repl(match: re.Match[str]) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2) or "0")
+        meridiem = match.group(3).lower()
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        if meridiem == "am" and hour == 12:
+            hour = 0
+        return f"{hour} h {minute:02d}"
+
+    return pattern.sub(repl, text)
 
 
 def _remove_disallowed_pricing_language(text: str, context: dict[str, Any]) -> str:
@@ -789,6 +1050,17 @@ def _remove_disallowed_pricing_language(text: str, context: dict[str, Any]) -> s
     if not _reply_has_pricing_language(text):
         return text
     return _non_booking_bridge_reply({**context, "pricing_question": True})
+
+
+def _soft_call_cta_allowed(context: dict[str, Any]) -> bool:
+    cta_state = context.get("cta_state") if isinstance(context.get("cta_state"), dict) else {}
+    if context.get("call_refusal") or cta_state.get("meeting_rejected"):
+        return False
+    if cta_state.get("suppress_meeting_cta") or cta_state.get("meeting_ignored"):
+        return False
+    if str(context.get("intent_level") or "") == "LOW_INTENT":
+        return False
+    return _to_int(cta_state.get("meeting_suggested_count"), default=0) == 0
 
 
 def _reply_has_budget_language(text: str) -> bool:
@@ -1071,11 +1343,26 @@ def _finalize_response(response: AgentResponse) -> AgentResponse:
     return response
 
 
-def _has_booking_intent(text: str) -> bool:
+def _has_booking_intent(text: str, *, allow_generic_confirmation: bool = False) -> bool:
     normalized = _normalize_text(text)
     if not normalized:
         return False
-    if _BOOKING_INTENT_PATTERN.search(normalized):
+    generic_affirmation = bool(
+        re.fullmatch(
+            r"(yes|yeah|yep|sure|ok|okay|sounds good|works|works for me|go ahead|oui|certainement|ca marche|ça marche|d'accord|parfait|super)[.! ]*",
+            normalized,
+        )
+    )
+    strong_booking_signal = bool(
+        re.search(
+            r"\b(book|booking|lock|schedule|scheduled|set it up|set a call|confirm|appointment|meeting|call|calendar|"
+            r"r[ée]serv|bloque|planifier|confirmer|rendez-vous|appel)\b",
+            normalized,
+        )
+    )
+    if generic_affirmation:
+        return bool(allow_generic_confirmation)
+    if strong_booking_signal and _BOOKING_INTENT_PATTERN.search(normalized):
         return True
     return any(
         phrase in normalized
@@ -1092,6 +1379,23 @@ def _has_booking_intent(text: str) -> bool:
     )
 
 
+def _has_scheduling_intent(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    if _has_booking_intent(text):
+        return True
+    if re.search(r"\b(can|could|would)\s+(?:you|we)\s+do\b", normalized):
+        return True
+    return bool(
+        re.search(
+            r"\b(availability|availabilities|available|free|openings?|slots?|times?|calendar|schedule|book|meeting|call|appointment|"
+            r"disponibilit|creneau|creneaux|rendez-vous|appel|horaire)\b",
+            normalized,
+        )
+    )
+
+
 def _extract_slot_choice(inbound_text: str, latest_offer: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(latest_offer, dict):
         return None
@@ -1101,15 +1405,22 @@ def _extract_slot_choice(inbound_text: str, latest_offer: dict[str, Any] | None)
     normalized = _normalize_text(inbound_text)
     if not normalized:
         return None
-    numeric_choice = re.search(r"\b([1-3])\b", normalized)
-    if numeric_choice:
-        return {"slot_index": int(numeric_choice.group(1))}
+    slot_indexes: set[int] = set()
+    for slot in slots:
+        try:
+            slot_indexes.add(int(slot.get("index")))
+        except Exception:
+            continue
+    for numeric_choice in re.finditer(r"\b(\d+)\b", normalized):
+        index = int(numeric_choice.group(1))
+        if index in slot_indexes:
+            return {"slot_index": index}
     for slot in slots:
         blob = _normalize_text(str(slot.get("search_blob", "")))
         start_time = str(slot.get("start_time", "")).strip()
         if blob and any(part.strip() and part.strip() in normalized for part in blob.split("|")):
             return {"slot_start_time": start_time} if start_time else {}
-    time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm))\b", normalized)
+    time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm)|\d{1,2}\s*h\s*\d{0,2})\b", normalized)
     if time_match:
         for slot in slots:
             haystack = _normalize_text(
@@ -1172,7 +1483,7 @@ def _extract_booking_preferences(text: str) -> dict[str, str]:
         preferences["preferred_period"] = "evening"
 
     range_match = re.search(
-        r"\b(?:between|from)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(?:and|to)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b",
+        r"\b(?:between|from|entre|de)\s+(\d{1,2}(?::\d{2}|\s*h\s*\d{0,2})?\s*(?:am|pm)?)\s+(?:and|to|et|à|a)\s+(\d{1,2}(?::\d{2}|\s*h\s*\d{0,2})?\s*(?:am|pm)?)\b",
         normalized,
     )
     if range_match:
@@ -1182,7 +1493,7 @@ def _extract_booking_preferences(text: str) -> dict[str, str]:
         if range_pair:
             preferences["range_start"], preferences["range_end"] = range_pair
 
-    time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm))\b", normalized)
+    time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm)|\d{1,2}\s*h\s*\d{0,2})\b", normalized)
     if time_match and "range_start" not in preferences:
         preferences["exact_time"] = time_match.group(1)
 
@@ -1220,18 +1531,18 @@ def _normalize_requested_day(value: str | None) -> str | None:
 
 
 def _normalize_time_range(start_raw: str, end_raw: str) -> tuple[str, str] | None:
-    start_match = re.search(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", start_raw)
-    end_match = re.search(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", end_raw)
+    start_match = re.search(r"^(\d{1,2})(?::(\d{2})|\s*h\s*(\d{1,2})?)?\s*(am|pm)?$", start_raw)
+    end_match = re.search(r"^(\d{1,2})(?::(\d{2})|\s*h\s*(\d{1,2})?)?\s*(am|pm)?$", end_raw)
     if not start_match or not end_match:
         return None
 
     start_hour = int(start_match.group(1))
-    start_minute = int(start_match.group(2) or "0")
-    start_meridiem = (start_match.group(3) or "").strip()
+    start_minute = int(start_match.group(2) or start_match.group(3) or "0")
+    start_meridiem = (start_match.group(4) or "").strip()
 
     end_hour = int(end_match.group(1))
-    end_minute = int(end_match.group(2) or "0")
-    end_meridiem = (end_match.group(3) or "").strip()
+    end_minute = int(end_match.group(2) or end_match.group(3) or "0")
+    end_meridiem = (end_match.group(4) or "").strip()
 
     if not start_meridiem and end_meridiem:
         if end_meridiem == "pm" and start_hour > end_hour:

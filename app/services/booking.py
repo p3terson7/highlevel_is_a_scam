@@ -14,6 +14,9 @@ from sqlalchemy.orm import Session
 
 from app.db.models import CalendarBooking, Client, ConversationStateEnum, Lead, Message
 from app.db.session import get_session_factory
+from app.services.booking_copy import render_booking_slot_reply
+from app.services.booking_planner import plan_booking_slots
+from app.services.booking_request import build_booking_time_request
 from app.services.i18n import client_language, format_datetime_for_language, normalize_language
 
 _CALENDLY_API_BASE = "https://api.calendly.com"
@@ -23,6 +26,28 @@ _INTERNAL_MODE_ALIASES = {"internal", "calendar"}
 _INTERNAL_DEFAULT_SLOT_MINUTES = 30
 _INTERNAL_DEFAULT_NOTICE_MINUTES = 120
 _INTERNAL_DEFAULT_HORIZON_DAYS = 14
+_PENDING_RESCHEDULE_KEY = "pending_reschedule_confirmation"
+_RESCHEDULE_PENDING_STEP = "reschedule_confirmation_pending"
+_SLOT_COMMITMENT_RE = re.compile(
+    r"\b("
+    r"lock (?:it|that) in|book (?:it|that)|reserve (?:it|that)|go with (?:it|that)|"
+    r"that works|that'?s good|works for me|let'?s do (?:it|that)|confirm (?:it|that)|"
+    r"bloque(?:z|r)?(?:-le)?|r[ée]serve(?:z|r)?(?:-le)?|ça marche|ca marche|parfait|"
+    r"allez-y|confirm(?:e|ez)(?:-le)?"
+    r")\b",
+    re.IGNORECASE,
+)
+_RESCHEDULE_CONFIRM_RE = re.compile(
+    r"\b(yes|yeah|yep|sure|confirm|confirmed|go ahead|do it|move it|reschedule|switch it|"
+    r"lock (?:it|that) in|book (?:it|that)|oui|certainement|confirmez|confirmer|allez-y|"
+    r"d[ée]placez|replanifiez|bloquez|r[ée]servez|ça marche|ca marche)\b",
+    re.IGNORECASE,
+)
+_RESCHEDULE_DECLINE_RE = re.compile(
+    r"\b(no|nope|don'?t|do not|keep (?:it|the original|the first)|leave it|cancel that|"
+    r"non|gardez|conservez|laissez|pas besoin|ne changez pas)\b",
+    re.IGNORECASE,
+)
 
 
 class BookingProviderError(RuntimeError):
@@ -127,12 +152,10 @@ def looks_like_slot_selection_message(inbound_text: str) -> bool:
     if _booked_from_reply(raw):
         return False
 
-    if re.fullmatch(r"(option\s*)?[1-3]", normalized):
-        return True
-    if len(normalized.split()) <= 4 and re.search(r"\b(1|2|3)\b", normalized):
+    if re.fullmatch(r"(option\s*)?\d+", normalized):
         return True
 
-    has_time_marker = bool(re.search(r"\b\d{1,2}(:\d{2})?\s?(am|pm)\b", normalized))
+    has_time_marker = _has_specific_time_request(raw)
     has_day_marker = any(
         token in normalized
         for token in (
@@ -148,6 +171,7 @@ def looks_like_slot_selection_message(inbound_text: str) -> bool:
             "tonight",
             "next week",
             "this week",
+            "demain",
         )
     )
     if not has_time_marker and not has_day_marker:
@@ -157,6 +181,10 @@ def looks_like_slot_selection_message(inbound_text: str) -> bool:
         return False
 
     return True
+
+
+def looks_like_booking_commitment(inbound_text: str) -> bool:
+    return _slot_commitment_requested(inbound_text)
 
 
 def _internal_calendar_config(client: Client) -> dict[str, Any]:
@@ -345,8 +373,62 @@ def _cancel_existing_internal_bookings_for_lead(
     return cancelled
 
 
+def _scheduled_internal_booking_for_lead(db: Session, *, client_id: int, lead_id: int) -> CalendarBooking | None:
+    return db.scalar(
+        select(CalendarBooking)
+        .where(
+            CalendarBooking.client_id == client_id,
+            CalendarBooking.lead_id == lead_id,
+            CalendarBooking.provider == _INTERNAL_PROVIDER,
+            CalendarBooking.status == "scheduled",
+        )
+        .order_by(CalendarBooking.start_at.asc(), CalendarBooking.id.asc())
+        .limit(1)
+    )
+
+
+def _slot_matches_booking(slot: dict[str, Any], booking: CalendarBooking) -> bool:
+    start_at = _to_utc_datetime(str(slot.get("start_time", "")).strip())
+    end_at = _to_utc_datetime(str(slot.get("end_time", "")).strip())
+    if start_at is None:
+        return False
+    if end_at is None:
+        return _as_utc(booking.start_at) == _as_utc(start_at)
+    return _as_utc(booking.start_at) == _as_utc(start_at) and _as_utc(booking.end_at) == _as_utc(end_at)
+
+
 def _booked_from_reply(inbound_text: str) -> bool:
     return calendar_booking_confirmed(inbound_text)
+
+
+def _slot_commitment_requested(inbound_text: str) -> bool:
+    return bool(_SLOT_COMMITMENT_RE.search(str(inbound_text or "")))
+
+
+def _offer_has_slots(offer: dict[str, Any] | None) -> bool:
+    return isinstance(offer, dict) and isinstance(offer.get("slots"), list) and bool(offer.get("slots"))
+
+
+def _reschedule_confirmed(inbound_text: str) -> bool:
+    return bool(_RESCHEDULE_CONFIRM_RE.search(str(inbound_text or "")))
+
+
+def _reschedule_declined(inbound_text: str) -> bool:
+    return bool(_RESCHEDULE_DECLINE_RE.search(str(inbound_text or "")))
+
+
+def _has_specific_time_request(inbound_text: str) -> bool:
+    raw = str(inbound_text or "").strip().lower()
+    normalized = _normalize_slot_text(raw)
+    return bool(
+        re.search(r"\b\d{1,2}(:\d{2})?\s?(am|pm)\b", normalized)
+        or re.search(r"\b\d{1,2}\s*h\s*\d{0,2}\b", raw)
+    )
+
+
+def _is_numeric_slot_reply(inbound_text: str) -> bool:
+    normalized = _normalize_slot_text(inbound_text)
+    return bool(re.fullmatch(r"(option\s*)?\d+", normalized))
 
 
 def _to_utc_datetime(raw_value: str) -> datetime | None:
@@ -407,12 +489,18 @@ class BookingService:
                 raw_payload={"booking_offer": {"provider": provider, "slots": []}},
             )
 
-        slots = _spread_first_offer_slots(
-            slots=slots,
-            limit=max(1, min(limit, len(slots))),
+        request = build_booking_time_request(
+            text="",
+            timezone_name=client.timezone or "UTC",
+            source="initial_offer",
+        )
+        plan = plan_booking_slots(
+            slots=all_available_slots,
+            request=request,
+            limit=max(1, min(limit, len(all_available_slots))),
             timezone_name=client.timezone or "UTC",
         )
-        slots = _reindex_slots(slots)
+        slots = _reindex_slots(plan.slots)
         coverage_summary = _availability_coverage_summary(
             slots=all_available_slots,
             timezone_name=client.timezone or "UTC",
@@ -420,37 +508,28 @@ class BookingService:
             language=language,
         )
         timezone_label = self._timezone_abbreviation(client.timezone)
-        if language == "fr":
-            lines = ["Je peux réserver un appel directement."]
-            if coverage_summary:
-                lines.append(f"J'ai des disponibilités notamment {coverage_summary}.")
-            lines.extend(
-                [
-                    "Voici quelques options réparties pour confirmer maintenant:",
-                    *[f"{slot.index}) {slot.display_time}" for slot in slots],
-                    f"{_slot_selection_prompt(slots, language=language)}. Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux. Heures affichées en {timezone_label}.",
-                ]
-            )
-        else:
-            lines = ["I can book a call directly."]
-            if coverage_summary:
-                lines.append(f"I have call openings including {coverage_summary}.")
-            lines.extend(
-                [
-                    "Here are a few spread-out call times to lock in now:",
-                    *[f"{slot.index}) {slot.display_time}" for slot in slots],
-                    f"{_slot_selection_prompt(slots)}. If none of those work, just send me a time that's better for you. Times shown in {timezone_label}.",
-                ]
-            )
+        reply_text = render_booking_slot_reply(
+            slots=slots,
+            request=request,
+            plan=plan,
+            timezone_label=timezone_label,
+            language=language,
+            coverage_summary=coverage_summary,
+            timezone_name=client.timezone or "UTC",
+        )
         raw_payload = {
             "booking_offer": {
                 "provider": provider,
                 "event_type_uri": self._calendly_config(client)["calendly_event_type_uri"] if provider == "calendly" else "",
                 "slots": [slot.__dict__ for slot in slots],
                 "generated_at": datetime.now(timezone.utc).isoformat(),
+                "request": request.to_payload(),
+                "planner": plan.to_payload(),
+                "matched_preference": plan.fallback_reason is None,
+                "match_mode": plan.match_mode,
             }
         }
-        return SlotOffer(reply_text="\n".join(lines), slots=slots, raw_payload=raw_payload)
+        return SlotOffer(reply_text=reply_text, slots=slots, raw_payload=raw_payload)
 
     def find_slots(
         self,
@@ -463,6 +542,7 @@ class BookingService:
         exact_time: str | None = None,
         range_start: str | None = None,
         range_end: str | None = None,
+        request_text: str | None = None,
         limit: int = 3,
         db: Session | None = None,
     ) -> SlotOffer:
@@ -472,18 +552,10 @@ class BookingService:
 
         mode = booking_mode_label(client)
         provider = _INTERNAL_PROVIDER if mode in _INTERNAL_MODE_ALIASES else "calendly"
-        specific_request = bool(preferred_day or avoid_day or preferred_period or exact_time or range_start or range_end)
-        expanded_limit = max(limit * 12, 96)
-        if specific_request:
-            expanded_limit = max(expanded_limit, 96)
-        if provider == _INTERNAL_PROVIDER:
-            slots = self._list_internal_slots(client=client, limit=expanded_limit, db=db)
-        else:
-            slots = self._list_calendly_slots(client=client, limit=expanded_limit)
-        all_available_slots = list(slots)
-
-        filtered = _filter_slots(
-            slots=slots,
+        request = build_booking_time_request(
+            text=request_text or "",
+            timezone_name=client.timezone or "UTC",
+            source="agent_find_slots",
             preferred_day=preferred_day,
             avoid_day=avoid_day,
             preferred_period=preferred_period,
@@ -491,74 +563,26 @@ class BookingService:
             range_start=range_start,
             range_end=range_end,
         )
-        matched_preference = bool(filtered)
-        match_mode = "exact" if filtered else "none"
-        if filtered:
-            slots = _spread_first_offer_slots(
-                slots=filtered,
-                limit=max(1, min(limit, len(filtered))),
-                timezone_name=client.timezone or "UTC",
-            )
-        elif specific_request:
-            relaxed = _filter_slots(
-                slots=slots,
-                preferred_day=preferred_day,
-                avoid_day=avoid_day,
-                preferred_period=None,
-                exact_time=None,
-                range_start=None,
-                range_end=None,
-            )
-            if relaxed:
-                slots = _spread_first_offer_slots(
-                    slots=relaxed,
-                    limit=max(1, min(limit, len(relaxed))),
-                    timezone_name=client.timezone or "UTC",
-                )
-                match_mode = "same_day_alternative" if preferred_day else "closest_alternative"
-            else:
-                slots = _spread_first_offer_slots(
-                    slots=slots,
-                    limit=max(1, min(limit, len(slots))),
-                    timezone_name=client.timezone or "UTC",
-                )
-                match_mode = "closest_alternative"
+        specific_request = request.scope != "broad" or bool(avoid_day)
+        expanded_limit = max(limit * 16, 120)
+        if specific_request:
+            expanded_limit = max(expanded_limit, 240)
+        if provider == _INTERNAL_PROVIDER:
+            slots = self._list_internal_slots(client=client, limit=expanded_limit, db=db)
         else:
-            slots = _spread_first_offer_slots(
-                slots=slots,
-                limit=max(1, min(limit, len(slots))),
-                timezone_name=client.timezone or "UTC",
-            )
-            match_mode = "exact"
+            slots = self._list_calendly_slots(client=client, limit=expanded_limit)
+        all_available_slots = list(slots)
 
-        if not slots:
-            fallback = (
-                "Je ne vois pas de disponibilités pour le moment. Envoyez-moi une journée et une plage horaire, et je peux vérifier d'autres options."
-                if language == "fr"
-                else "I am not seeing open times right now. Share a day and time window and I can check alternatives."
-            )
-            return SlotOffer(
-                reply_text=fallback,
-                slots=[],
-                raw_payload={
-                    "booking_offer": {
-                        "provider": provider,
-                        "slots": [],
-                        "preferred_day": preferred_day,
-                        "avoid_day": avoid_day,
-                        "preferred_period": preferred_period,
-                        "exact_time": exact_time,
-                        "range_start": range_start,
-                        "range_end": range_end,
-                        "matched_preference": False,
-                        "match_mode": "none",
-                    }
-                },
-            )
-
+        plan = plan_booking_slots(
+            slots=all_available_slots,
+            request=request,
+            limit=max(1, min(limit, len(all_available_slots) or limit)),
+            timezone_name=client.timezone or "UTC",
+        )
+        slots = plan.slots
         slots = _reindex_slots(slots)
         timezone_label = self._timezone_abbreviation(client.timezone)
-        intro = "J'ai trouvé quelques moments qui devraient fonctionner:" if language == "fr" else "I found a few call times that should work:"
+        coverage_summary = ""
         if not specific_request:
             coverage_summary = _availability_coverage_summary(
                 slots=all_available_slots,
@@ -566,59 +590,34 @@ class BookingService:
                 day_limit=3,
                 language=language,
             )
-            if coverage_summary:
-                intro = f"J'ai des disponibilités notamment {coverage_summary}." if language == "fr" else f"I have call openings including {coverage_summary}."
-        elif preferred_day:
-            day_label = preferred_day.strip().title()
-            intro = f"J'ai trouvé quelques options pour {day_label}:" if language == "fr" else f"I found a few {day_label} call options:"
-            if not matched_preference:
-                if match_mode == "same_day_alternative":
-                    intro = (
-                        f"J'ai trouvé des disponibilités pour {day_label}, mais pas dans cette plage exacte. Voici les moments les plus proches pour {day_label}:"
-                        if language == "fr"
-                        else f"I found {day_label} call openings, but not in that exact window. Here are the closest {day_label} times:"
-                    )
-                else:
-                    intro = (
-                        f"Je ne vois pas de disponibilités pour {day_label} qui correspondent à cette demande, mais voici les prochains moments les plus proches:"
-                        if language == "fr"
-                        else f"I’m not seeing {day_label} call openings that match that request, but here are the next closest times:"
-                    )
-        elif avoid_day and not matched_preference:
-            intro = (
-                f"J'ai évité {avoid_day.strip().title()} et trouvé les prochains moments les plus proches:"
-                if language == "fr"
-                else f"I skipped {avoid_day.strip().title()} and found the next closest times:"
-            )
-        elif (preferred_period or range_start or range_end) and not matched_preference:
-            intro = "Je ne vois pas cette plage exacte, mais voici les moments les plus proches disponibles:" if language == "fr" else "I’m not seeing that exact window, but here are the closest times I have:"
-        elif exact_time and not matched_preference:
-            intro = "Je ne vois pas cette heure exacte, mais voici les options les plus proches:" if language == "fr" else "I’m not seeing that exact time, but here are the closest options:"
-        lines = [
-            intro,
-            *[f"{slot.index}) {slot.display_time}" for slot in slots],
-            (
-                f"{_slot_selection_prompt(slots, language=language)}. Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux. Heures affichées en {timezone_label}."
-                if language == "fr"
-                else f"{_slot_selection_prompt(slots)}. If none of those work, just send me a time that's better for you. Times shown in {timezone_label}."
-            ),
-        ]
+        reply_text = render_booking_slot_reply(
+            slots=slots,
+            request=request,
+            plan=plan,
+            timezone_label=timezone_label,
+            language=language,
+            coverage_summary=coverage_summary,
+            timezone_name=client.timezone or "UTC",
+        )
         return SlotOffer(
-            reply_text="\n".join(lines),
+            reply_text=reply_text,
             slots=slots,
             raw_payload={
                 "booking_offer": {
                     "provider": provider,
                     "slots": [slot.__dict__ for slot in slots],
                     "generated_at": datetime.now(timezone.utc).isoformat(),
-                    "preferred_day": preferred_day,
-                    "avoid_day": avoid_day,
-                    "preferred_period": preferred_period,
-                    "exact_time": exact_time,
-                    "range_start": range_start,
-                    "range_end": range_end,
-                    "matched_preference": matched_preference,
-                    "match_mode": match_mode,
+                    "preferred_day": request.preferred_day or preferred_day,
+                    "preferred_date": request.requested_dates[0] if request.requested_dates else None,
+                    "avoid_day": request.avoid_weekdays[0] if request.avoid_weekdays else avoid_day,
+                    "preferred_period": request.periods[0] if request.periods else preferred_period,
+                    "exact_time": request.exact_time or exact_time,
+                    "range_start": request.range_start or range_start,
+                    "range_end": request.range_end or range_end,
+                    "matched_preference": plan.fallback_reason is None,
+                    "match_mode": plan.match_mode,
+                    "request": request.to_payload(),
+                    "planner": plan.to_payload(),
                 }
             },
         )
@@ -678,12 +677,15 @@ class BookingService:
 
         was_rescheduled = bool(booking.get("rescheduled_from_booking_ids") or booking.get("rescheduled_from_event_uri"))
         language = client_language(client, lead=lead)
+        display_time = _slot_display_from_dict(matched, timezone_name=client.timezone or "UTC", language=language)
         if language == "fr":
             reply_prefix = "Mis à jour. Votre appel est maintenant prévu" if was_rescheduled else "Réservé. Votre appel est prévu"
+            reply_text = f"{reply_prefix} pour {display_time}."
         else:
             reply_prefix = "Updated. Your call is now set" if was_rescheduled else "Booked. Your call is set"
+            reply_text = f"{reply_prefix} for {display_time}."
         return {
-            "reply_text": f"{reply_prefix} for {matched.get('display_time')}.",
+            "reply_text": reply_text,
             "booking": booking,
             "runtime_payload": {
                 "calendar_booking": {
@@ -702,20 +704,44 @@ class BookingService:
         lead: Lead,
         inbound_text: str,
         history: Sequence[Message],
+        active_offer: dict[str, Any] | None = None,
+        resolved_slot_index: int | None = None,
+        resolved_slot_start_time: str | None = None,
         db: Session | None = None,
     ) -> BookingSelectionResult | None:
-        latest_offer = self._latest_offer(history)
+        latest_offer = active_offer if _offer_has_slots(active_offer) else self._latest_offer(history)
         if latest_offer is None:
             return None
-        if not looks_like_slot_selection_message(inbound_text):
+        commitment_requested = _slot_commitment_requested(inbound_text)
+        resolved_selection = bool(resolved_slot_index or resolved_slot_start_time)
+        if not resolved_selection and not looks_like_slot_selection_message(inbound_text) and not commitment_requested:
             return None
 
         slots = latest_offer.get("slots", [])
-        matched = self._match_slot(inbound_text, slots)
+        matched: dict[str, Any] | None = None
+        if resolved_slot_start_time:
+            for slot in slots:
+                if str(slot.get("start_time", "")).strip() == str(resolved_slot_start_time).strip():
+                    matched = slot
+                    break
+        if matched is None and resolved_slot_index:
+            for slot in slots:
+                try:
+                    if int(slot.get("index")) == int(resolved_slot_index):
+                        matched = slot
+                        break
+                except Exception:
+                    continue
         if matched is None:
+            matched = self._match_slot(inbound_text, slots)
+        if matched is None and commitment_requested and len(slots) == 1:
+            matched = slots[0]
+        if matched is None:
+            if _has_specific_time_request(inbound_text) and not _is_numeric_slot_reply(inbound_text):
+                return None
             language = client_language(client, lead=lead)
             timezone_label = self._timezone_abbreviation(client.timezone)
-            indexed_slots = _reindex_dict_slots(slots)
+            indexed_slots = _localized_dict_slots(slots, timezone_name=client.timezone or "UTC", language=language)
             if language == "fr":
                 lines = [
                     "Je n'ai pas saisi quelle option vous voulez.",
@@ -732,14 +758,29 @@ class BookingService:
                 handled=True,
                 reply_text="\n".join(lines),
                 next_state=ConversationStateEnum.BOOKING_SENT,
-                raw_payload={"booking_offer": {**latest_offer, "slots": indexed_slots}},
+                raw_payload={"booking_offer": {**latest_offer, "slots": indexed_slots}, "pending_step": "slot_selection_pending"},
                 audit_event_type="calendar_booking_offer_repeated",
                 audit_decision={"inbound": inbound_text, "slots": indexed_slots},
                 transition_reason="calendar_booking_offer_repeated",
             )
 
         offer_provider = str(latest_offer.get("provider", "")).strip().lower()
-        if offer_provider == _INTERNAL_PROVIDER or booking_mode_label(client) in _INTERNAL_MODE_ALIASES:
+        internal_provider = offer_provider == _INTERNAL_PROVIDER or booking_mode_label(client) in _INTERNAL_MODE_ALIASES
+        if internal_provider:
+            existing_booking: CalendarBooking | None = None
+            with _as_session_context(db) as session:
+                existing_booking = _scheduled_internal_booking_for_lead(session, client_id=client.id, lead_id=lead.id)
+            if existing_booking is not None:
+                if _slot_matches_booking(matched, existing_booking):
+                    return self._already_booked_result(client=client, lead=lead, booking=existing_booking, slot=matched, inbound_text=inbound_text)
+                return self._reschedule_confirmation_result(
+                    client=client,
+                    lead=lead,
+                    existing_booking=existing_booking,
+                    matched_slot=matched,
+                    latest_offer=latest_offer,
+                    inbound_text=inbound_text,
+                )
             try:
                 booking = self._book_internal_slot(client=client, lead=lead, slot=matched, db=db)
             except BookingProviderError:
@@ -755,11 +796,183 @@ class BookingService:
                 )
         else:
             booking = self._book_calendly_slot(client=client, lead=lead, slot=matched)
-        was_rescheduled = bool(booking.get("rescheduled_from_booking_ids") or booking.get("rescheduled_from_event_uri"))
+        return self._booking_created_result(client=client, lead=lead, matched=matched, booking=booking, offer_provider=offer_provider, inbound_text=inbound_text)
+
+    def handle_reschedule_confirmation(
+        self,
+        *,
+        client: Client,
+        lead: Lead,
+        inbound_text: str,
+        history: Sequence[Message] | None = None,
+        db: Session | None = None,
+    ) -> BookingSelectionResult | None:
+        _ = history
+        lead_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+        pending = lead_payload.get(_PENDING_RESCHEDULE_KEY)
+        if not isinstance(pending, dict):
+            return None
+
+        language = client_language(client, lead=lead, inbound_text=inbound_text)
+        if _reschedule_declined(inbound_text):
+            reply = (
+                "Aucun problème - je garde l'appel actuel au calendrier."
+                if language == "fr"
+                else "No problem - I'll keep the current call on the calendar."
+            )
+            return BookingSelectionResult(
+                handled=True,
+                reply_text=reply,
+                next_state=ConversationStateEnum.BOOKED,
+                raw_payload={_PENDING_RESCHEDULE_KEY: None, "pending_step": None},
+                audit_event_type="calendar_reschedule_declined",
+                audit_decision={"inbound": inbound_text, "pending_reschedule": pending},
+                transition_reason="calendar_reschedule_declined",
+            )
+
+        if not _reschedule_confirmed(inbound_text):
+            slot = pending.get("slot") if isinstance(pending.get("slot"), dict) else {}
+            existing = pending.get("existing_booking") if isinstance(pending.get("existing_booking"), dict) else {}
+            existing_time = str(existing.get("display_time") or "").strip()
+            new_time = _slot_display_from_dict(slot, timezone_name=client.timezone or "UTC", language=language)
+            reply = (
+                f"Pour confirmer, voulez-vous annuler l'appel actuel ({existing_time}) et passer à {new_time}? Répondez oui pour confirmer, ou non pour garder l'appel actuel."
+                if language == "fr"
+                else f"Just to confirm, should I cancel the current call ({existing_time}) and move you to {new_time}? Reply yes to confirm, or no to keep the current call."
+            )
+            return BookingSelectionResult(
+                handled=True,
+                reply_text=reply,
+                next_state=ConversationStateEnum.BOOKED,
+                raw_payload={_PENDING_RESCHEDULE_KEY: pending, "pending_step": _RESCHEDULE_PENDING_STEP},
+                audit_event_type="calendar_reschedule_confirmation_repeated",
+                audit_decision={"inbound": inbound_text, "pending_reschedule": pending},
+                transition_reason="calendar_reschedule_confirmation_repeated",
+            )
+
+        slot = pending.get("slot") if isinstance(pending.get("slot"), dict) else None
+        if slot is None:
+            reply = (
+                "Je n'ai plus le nouveau créneau en contexte. Envoyez-moi le jour et l'heure souhaités, et je revérifie."
+                if language == "fr"
+                else "I no longer have the new slot in context. Send me the day and time you want, and I'll check again."
+            )
+            return BookingSelectionResult(
+                handled=True,
+                reply_text=reply,
+                next_state=ConversationStateEnum.BOOKED,
+                raw_payload={_PENDING_RESCHEDULE_KEY: None, "pending_step": None},
+                audit_event_type="calendar_reschedule_missing_slot",
+                audit_decision={"inbound": inbound_text, "pending_reschedule": pending},
+                transition_reason="calendar_reschedule_missing_slot",
+            )
+
+        try:
+            booking = self._book_internal_slot(client=client, lead=lead, slot=slot, db=db)
+        except BookingProviderError:
+            refreshed = self.offer_slots(client=client, lead=lead, db=db)
+            return BookingSelectionResult(
+                handled=True,
+                reply_text=refreshed.reply_text,
+                next_state=ConversationStateEnum.BOOKING_SENT,
+                raw_payload={**refreshed.raw_payload, _PENDING_RESCHEDULE_KEY: None, "pending_step": "slot_selection_pending"},
+                audit_event_type="calendar_reschedule_slot_unavailable",
+                audit_decision={"inbound": inbound_text, "pending_reschedule": pending},
+                transition_reason="calendar_booking_offer_repeated",
+            )
+        return self._booking_created_result(
+            client=client,
+            lead=lead,
+            matched=slot,
+            booking=booking,
+            offer_provider=_INTERNAL_PROVIDER,
+            inbound_text=inbound_text,
+            reschedule_pending=pending,
+        )
+
+    def _already_booked_result(
+        self,
+        *,
+        client: Client,
+        lead: Lead,
+        booking: CalendarBooking,
+        slot: dict[str, Any],
+        inbound_text: str,
+    ) -> BookingSelectionResult:
+        language = client_language(client, lead=lead, inbound_text=inbound_text)
+        display_time = _format_internal_booking_time(booking.start_at, timezone_name=booking.timezone, language=language)
+        reply = (
+            f"C'est déjà réservé pour {display_time}. Je garde cet appel au calendrier."
+            if language == "fr"
+            else f"You're already booked for {display_time}. I'll keep that call on the calendar."
+        )
+        return BookingSelectionResult(
+            handled=True,
+            reply_text=reply,
+            next_state=ConversationStateEnum.BOOKED,
+            raw_payload={_PENDING_RESCHEDULE_KEY: None, "pending_step": None},
+            audit_event_type="calendar_booking_already_scheduled",
+            audit_decision={"inbound": inbound_text, "slot": slot, "booking": _internal_booking_info(booking)},
+            transition_reason="calendar_booking_already_scheduled",
+        )
+
+    def _reschedule_confirmation_result(
+        self,
+        *,
+        client: Client,
+        lead: Lead,
+        existing_booking: CalendarBooking,
+        matched_slot: dict[str, Any],
+        latest_offer: dict[str, Any],
+        inbound_text: str,
+    ) -> BookingSelectionResult:
+        language = client_language(client, lead=lead, inbound_text=inbound_text)
+        existing_display = _format_internal_booking_time(existing_booking.start_at, timezone_name=existing_booking.timezone, language=language)
+        new_display = _slot_display_from_dict(matched_slot, timezone_name=client.timezone or "UTC", language=language)
+        pending_slot = dict(matched_slot)
+        pending_slot["display_time"] = new_display
+        pending = {
+            "provider": _INTERNAL_PROVIDER,
+            "slot": pending_slot,
+            "latest_offer": latest_offer,
+            "existing_booking": {
+                **_internal_booking_info(existing_booking),
+                "display_time": existing_display,
+            },
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        reply = (
+            f"Vous avez déjà un appel de consultation prévu pour {existing_display}. Voulez-vous annuler celui-ci et passer à {new_display}? Répondez oui pour confirmer, ou non pour garder l'appel actuel."
+            if language == "fr"
+            else f"You already have a consultation call booked for {existing_display}. Should I cancel that one and move you to {new_display}? Reply yes to confirm, or no to keep the current call."
+        )
+        return BookingSelectionResult(
+            handled=True,
+            reply_text=reply,
+            next_state=ConversationStateEnum.BOOKED,
+            raw_payload={_PENDING_RESCHEDULE_KEY: pending, "pending_step": _RESCHEDULE_PENDING_STEP},
+            audit_event_type="calendar_reschedule_confirmation_requested",
+            audit_decision={"inbound": inbound_text, "pending_reschedule": pending},
+            transition_reason="calendar_reschedule_confirmation_requested",
+        )
+
+    def _booking_created_result(
+        self,
+        *,
+        client: Client,
+        lead: Lead,
+        matched: dict[str, Any],
+        booking: dict[str, Any],
+        offer_provider: str,
+        inbound_text: str,
+        reschedule_pending: dict[str, Any] | None = None,
+    ) -> BookingSelectionResult:
+        was_rescheduled = bool(booking.get("rescheduled_from_booking_ids") or booking.get("rescheduled_from_event_uri") or reschedule_pending)
         language = client_language(client, lead=lead)
+        display_time = _slot_display_from_dict(matched, timezone_name=client.timezone or "UTC", language=language)
         if language == "fr":
             confirmation = [
-                f"{'Mis à jour. Votre appel est maintenant prévu' if was_rescheduled else 'Réservé. Votre appel est prévu'} pour {matched.get('display_time')}.",
+                f"{'Mis à jour. Votre appel est maintenant prévu' if was_rescheduled else 'Réservé. Votre appel est prévu'} pour {display_time}.",
             ]
             if lead.email.strip():
                 confirmation.append(f"La confirmation sera envoyée à {lead.email}.")
@@ -769,7 +982,7 @@ class BookingService:
                 confirmation.append("Ajouté à notre calendrier.")
         else:
             confirmation = [
-                f"{'Updated. Your call is now set' if was_rescheduled else 'Booked. Your call is set'} for {matched.get('display_time')}.",
+                f"{'Updated. Your call is now set' if was_rescheduled else 'Booked. Your call is set'} for {display_time}.",
             ]
             if lead.email.strip():
                 confirmation.append(f"Confirmation will be sent to {lead.email}.")
@@ -782,6 +995,8 @@ class BookingService:
             reply_text=" ".join(confirmation),
             next_state=ConversationStateEnum.BOOKED,
             raw_payload={
+                _PENDING_RESCHEDULE_KEY: None,
+                "pending_step": None,
                 "calendar_booking": {
                     "provider": booking.get("provider", offer_provider or "calendly"),
                     "slot": matched,
@@ -793,6 +1008,7 @@ class BookingService:
                 "inbound": inbound_text,
                 "slot": matched,
                 "booking": booking,
+                "pending_reschedule": reschedule_pending,
             },
             transition_reason="calendar_booking_created",
         )
@@ -999,7 +1215,8 @@ class BookingService:
                 start_at=start_at,
                 end_at=end_at,
             )
-            if _slot_occupied(start_at=start_at, end_at=end_at, existing=existing):
+            blocking_existing = [booking for booking in existing if booking.lead_id != lead.id]
+            if _slot_occupied(start_at=start_at, end_at=end_at, existing=blocking_existing):
                 raise BookingProviderError("That time is no longer available.")
 
             try:
@@ -1161,6 +1378,9 @@ def _normalize_slot_text(text: str) -> str:
         "apres-midi": "afternoon",
         "après-midi": "afternoon",
         "soir": "evening",
+        "aujourd'hui": "today",
+        "aujourd hui": "today",
+        "demain": "tomorrow",
     }
     for source, target in replacements.items():
         value = value.replace(source, target)
@@ -1171,6 +1391,12 @@ def _slot_search_blob(local_dt: datetime) -> str:
     hour = str(int(local_dt.strftime("%I")))
     minute = local_dt.strftime("%M")
     meridiem = local_dt.strftime("%p")
+    hour24 = str(local_dt.hour)
+    compact_24h = f"{hour24}h{minute}"
+    spaced_24h = f"{hour24} h {minute}"
+    compact_24h_hour_only = f"{hour24}h"
+    weekday = local_dt.strftime("%A")
+    weekday_short = local_dt.strftime("%a")
     parts = [
         local_dt.strftime("%A %I %p"),
         local_dt.strftime("%A %I:%M %p"),
@@ -1178,11 +1404,25 @@ def _slot_search_blob(local_dt: datetime) -> str:
         local_dt.strftime("%a %I:%M %p"),
         local_dt.strftime("%B %d %I:%M %p"),
         local_dt.strftime("%m/%d %I:%M %p"),
-        f"{local_dt.strftime('%A')} {hour} {meridiem}",
-        f"{local_dt.strftime('%A')} {hour}:{minute} {meridiem}",
-        f"{local_dt.strftime('%a')} {hour} {meridiem}",
-        f"{local_dt.strftime('%a')} {hour}:{minute} {meridiem}",
+        f"{weekday} {hour} {meridiem}",
+        f"{weekday} {hour}:{minute} {meridiem}",
+        f"{weekday_short} {hour} {meridiem}",
+        f"{weekday_short} {hour}:{minute} {meridiem}",
+        compact_24h,
+        spaced_24h,
+        f"{weekday} {compact_24h}",
+        f"{weekday} {spaced_24h}",
+        f"{weekday_short} {compact_24h}",
+        f"{weekday_short} {spaced_24h}",
     ]
+    if minute == "00":
+        parts.extend(
+            [
+                compact_24h_hour_only,
+                f"{weekday} {compact_24h_hour_only}",
+                f"{weekday_short} {compact_24h_hour_only}",
+            ]
+        )
     variants = set()
     for part in parts:
         normalized = _normalize_slot_text(part)
@@ -1249,6 +1489,13 @@ def _time_text_to_minutes(raw: str | None) -> int | None:
     text = str(raw or "").strip().lower()
     if not text:
         return None
+    h_match = re.search(r"\b(\d{1,2})\s*h\s*(\d{1,2})?\b", text)
+    if h_match:
+        hour = int(h_match.group(1))
+        minute = int(h_match.group(2) or "0")
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            return None
+        return hour * 60 + minute
     match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text)
     if not match:
         return None
@@ -1354,6 +1601,23 @@ def _reindex_dict_slots(slots: Sequence[dict[str, Any]]) -> list[dict[str, Any]]
         item["index"] = idx
         normalized.append(item)
     return normalized
+
+
+def _localized_dict_slots(slots: Sequence[dict[str, Any]], *, timezone_name: str, language: str) -> list[dict[str, Any]]:
+    localized: list[dict[str, Any]] = []
+    for slot in _reindex_dict_slots(slots):
+        item = dict(slot)
+        item["display_time"] = _slot_display_from_dict(item, timezone_name=timezone_name, language=language)
+        localized.append(item)
+    return localized
+
+
+def _slot_display_from_dict(slot: dict[str, Any], *, timezone_name: str, language: str) -> str:
+    language = normalize_language(language)
+    start_at = _to_utc_datetime(str(slot.get("start_time", "")).strip())
+    if start_at is not None:
+        return format_datetime_for_language(start_at, timezone_name=timezone_name, language=language)
+    return str(slot.get("display_time") or "").strip()
 
 
 def _availability_coverage_summary(

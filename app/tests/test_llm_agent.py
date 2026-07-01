@@ -80,6 +80,48 @@ class BookingToolProvider:
         }
 
 
+class CallInterestWithoutToolProvider:
+    name = "call-interest-without-tool"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        _ = system_prompt
+        self.calls += 1
+        payload = json.loads(user_prompt)
+        if self.calls == 1:
+            assert payload["scheduling_intent_detected"] is True
+            return {
+                "reply_text": "Absolutely - I can help with that. The next step is a strategy call with the owner at a convenient time.",
+                "next_state": "QUALIFYING",
+                "conversation_act": "answer_question",
+                "lead_intent": "wants_call_now",
+                "confidence": 0.93,
+                "reasoning_summary": "The lead said they are interested in a call.",
+                "uses_knowledge_context": False,
+                "collected_fields": payload["qualification_memory"],
+                "next_question_key": None,
+                "action": "none",
+                "tool_call": {"name": "none", "args": {}},
+            }
+        tool_result = payload["tool_result"]
+        assert tool_result["kind"] == "slots"
+        return {
+            "reply_text": tool_result["fallback_reply"],
+            "next_state": "BOOKING_SENT",
+            "conversation_act": "offer_slots",
+            "lead_intent": "wants_call_now",
+            "confidence": 0.99,
+            "reasoning_summary": "The backend found live times.",
+            "uses_knowledge_context": False,
+            "collected_fields": payload["conversation_context"]["qualification_memory"],
+            "next_question_key": None,
+            "action": "none",
+            "tool_call": {"name": "none", "args": {}},
+        }
+
+
 class BookedProvider:
     name = "booked"
 
@@ -163,6 +205,48 @@ class HighIntentConciergeProvider:
         }
 
 
+class HighIntentOpeningWithCtaProvider:
+    name = "high-intent-opening-with-cta"
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        _ = system_prompt
+        payload = json.loads(user_prompt)
+        assert payload["initial_outreach"] is True
+        return {
+            "reply_text": (
+                "Hi Strategy Call Contact, I'm Hermes, the assistant for StackLeads. "
+                "I see you're the owner, looking to understand options and next steps within 2 weeks, and you want to avoid wasting time. "
+                "Is there a deadline or key date driving this, or would you rather I help line up a strategy call with the owner at a convenient time?"
+            ),
+            "next_state": "QUALIFYING",
+            "collected_fields": payload["qualification_memory"],
+            "next_question_key": None,
+            "action": "offer_booking",
+            "tool_call": {"name": "none", "args": {}},
+        }
+
+
+class FactualAnswerWithCtaProvider:
+    name = "factual-answer-with-cta"
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        _ = system_prompt
+        payload = json.loads(user_prompt)
+        assert payload["lead_question_detected"] is True
+        assert payload["pricing_question"] is False
+        return {
+            "reply_text": (
+                "We usually work with a handful of active projects at a time so we can stay close to lead response, CRM cleanup, and follow-up quality. "
+                "If you want, I can help line up a strategy call with the owner at a convenient time."
+            ),
+            "next_state": "QUALIFYING",
+            "collected_fields": payload["qualification_memory"],
+            "next_question_key": None,
+            "action": "offer_booking",
+            "tool_call": {"name": "none", "args": {}},
+        }
+
+
 class MediumIntentProvider:
     name = "medium-intent"
 
@@ -212,6 +296,51 @@ class PricingQuestionProvider:
             "collected_fields": payload["qualification_memory"],
             "next_question_key": None,
             "action": "none",
+            "tool_call": {"name": "none", "args": {}},
+        }
+
+
+class PushyPricingBookingProvider:
+    name = "pushy-pricing-booking"
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        _ = system_prompt
+        payload = json.loads(user_prompt)
+        assert payload["pricing_question"] is True
+        assert payload["lead_question_detected"] is True
+        assert payload["explicit_booking_intent"] is False
+        assert payload["scheduling_intent_detected"] is False
+        assert "scheduling_intent" not in payload["intent_reasons"]
+        return {
+            "reply_text": (
+                "I can book a consultation call directly. "
+                "I have openings for Thu Jun 18 at 10:00 AM, Fri Jun 19 at 9:30 AM, or Mon Jun 22 at 9:30 AM."
+            ),
+            "next_state": "BOOKING_SENT",
+            "collected_fields": payload["qualification_memory"],
+            "next_question_key": None,
+            "action": "offer_booking",
+            "tool_call": {"name": "find_slots", "args": {"limit": 3}},
+        }
+
+
+class RepetitivePricingCtaProvider:
+    name = "repetitive-pricing-cta"
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        _ = system_prompt
+        payload = json.loads(user_prompt)
+        assert payload["cta_state"]["suppress_meeting_cta"] is True
+        return {
+            "reply_text": (
+                "I do not have confirmed package or pricing details here. "
+                "It usually depends on scope and timeline. "
+                "Would you like me to set up a consultation call?"
+            ),
+            "next_state": "QUALIFYING",
+            "collected_fields": payload["qualification_memory"],
+            "next_question_key": None,
+            "action": "offer_booking",
             "tool_call": {"name": "none", "args": {}},
         }
 
@@ -279,6 +408,7 @@ class FakeBookingService:
         exact_time=None,
         range_start=None,
         range_end=None,
+        request_text=None,
         limit: int = 3,
         db=None,
     ):
@@ -290,6 +420,7 @@ class FakeBookingService:
         _ = exact_time
         _ = range_start
         _ = range_end
+        _ = request_text
         _ = db
         slots = [
             type("Slot", (), {"__dict__": {"index": 1, "display_time": "Tue Apr 07 at 10:00 AM", "start_time": "2026-04-07T14:00:00Z", "end_time": "2026-04-07T14:30:00Z"}})(),
@@ -322,6 +453,7 @@ class ExactTimeFallbackBookingService(FakeBookingService):
         exact_time=None,
         range_start=None,
         range_end=None,
+        request_text=None,
         limit: int = 3,
         db=None,
     ):
@@ -333,6 +465,7 @@ class ExactTimeFallbackBookingService(FakeBookingService):
                 "exact_time": exact_time,
                 "range_start": range_start,
                 "range_end": range_end,
+                "request_text": request_text,
                 "limit": limit,
             }
         )
@@ -483,6 +616,29 @@ def test_booking_ready_turn_uses_tool_and_returns_slots_reply():
     assert response.action == "none"
     assert response.runtime_payload["booking_offer"]["slots"]
     assert "10:00 AM" in response.reply_text
+
+
+def test_call_interest_without_tool_is_validated_into_live_slot_offer():
+    provider = CallInterestWithoutToolProvider()
+    agent = LLMAgent(provider=provider)
+
+    response = agent.run_turn(
+        client=_client(),
+        lead=_lead(),
+        inbound_text="alright, im interested in a call.",
+        history=[],
+        booking_service=FakeBookingService(),
+        db=None,
+    )
+
+    assert provider.calls == 2
+    assert response.next_state == ConversationStateEnum.BOOKING_SENT
+    assert response.action == "none"
+    assert response.tool_call.name == "none"
+    assert response.runtime_payload["conversation_act"] == "offer_slots"
+    assert response.runtime_payload["booking_offer"]["slots"]
+    assert "10:00 AM" in response.reply_text
+    assert "call" in response.reply_text.lower() or "times" in response.reply_text.lower()
 
 
 def test_exact_time_request_after_offer_checks_calendar_instead_of_rejecting_current_options():
@@ -665,6 +821,27 @@ def test_identity_question_is_answered_as_hermes_without_calling_provider():
     assert "i am the founder" not in text
 
 
+def test_factual_answer_strips_generic_meeting_cta():
+    agent = LLMAgent(provider=FactualAnswerWithCtaProvider())
+    client = _client()
+    client.business_name = "StackLeads"
+
+    response = agent.next_reply(
+        client=client,
+        lead=_lead(),
+        inbound_text="How many projects do you guys have?",
+        history=[],
+    )
+
+    text = response.reply_text.lower()
+    assert response.action == "none"
+    assert response.tool_call.name == "none"
+    assert response.runtime_payload["meeting_cta_stripped"] is True
+    assert "handful of active projects" in text
+    assert "strategy call" not in text
+    assert "line up" not in text
+
+
 def test_high_intent_form_answers_are_used_as_known_context():
     agent = LLMAgent(provider=HighIntentConciergeProvider())
     form_answers = {
@@ -692,6 +869,32 @@ def test_high_intent_form_answers_are_used_as_known_context():
     assert "12,000" in response.reply_text
     assert "within 2 weeks" in response.reply_text.lower()
     assert "are you the decision-maker" not in response.reply_text.lower()
+
+
+def test_initial_outreach_strips_generic_meeting_cta_but_keeps_question():
+    agent = LLMAgent(provider=HighIntentOpeningWithCtaProvider())
+    form_answers = {
+        "decision_maker_role": "Owner",
+        "main_goal": "Understand options and next steps",
+        "growth_bottleneck": "Avoid wasting time",
+        "timeline": "Within 2 weeks",
+    }
+
+    response = agent.next_reply(
+        client=_client(),
+        lead=_lead(form_answers=form_answers, source=LeadSource.META),
+        inbound_text="New lead submitted from Meta Lead Ads. This is the first outbound SMS after the form submit.",
+        history=[],
+    )
+
+    text = response.reply_text.lower()
+    assert response.action == "none"
+    assert response.tool_call.name == "none"
+    assert response.runtime_payload["meeting_cta_stripped"] is True
+    assert "deadline or key date" in text
+    assert "strategy call" not in text
+    assert "line up" not in text
+    assert response.reply_text.count("?") == 1
 
 
 def test_medium_intent_lead_clarifies_before_booking():
@@ -750,12 +953,86 @@ def test_pricing_question_is_suppressed_without_ai_pricing_context():
 
     assert response.runtime_payload["intent_level"] == "HIGH_INTENT"
     text = response.reply_text.lower()
-    assert "pricing" not in text
-    assert "cost" not in text
     assert "budget" not in text
-    assert "package details" in text
+    assert "pricing details" in text
+    assert "depends on" in text
+    assert "consultation call" in text
+    assert "set that up" in text
     assert "$" not in response.reply_text
     assert response.tool_call.name == "none"
+
+
+def test_pricing_question_blocks_pushy_booking_tool_on_second_message():
+    agent = LLMAgent(provider=PushyPricingBookingProvider())
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body=(
+                "Hi Kylian, I'm Hermes, the assistant for StackLeads. "
+                "Is there a deadline or key date driving this?"
+            ),
+            raw_payload={"agent": {"next_question_key": "urgency_driver"}},
+        )
+    ]
+
+    response = agent.next_reply(
+        client=_client(),
+        lead=_lead(
+            form_answers={
+                "decision_role": "Owner",
+                "main_goal": "Understand options and next steps",
+                "service_interest": "AI lead response system",
+                "when_to_start": "Within 2 weeks",
+            }
+        ),
+        inbound_text="yes, the deadline is end of June. How much do you guys charge?",
+        history=history,
+    )
+
+    text = response.reply_text.lower()
+    assert response.next_state == ConversationStateEnum.QUALIFYING
+    assert response.action == "none"
+    assert response.tool_call.name == "none"
+    assert response.runtime_payload["booking_blocked_reason"] == "answer_first_question"
+    assert "pricing details" in text
+    assert "depends on" in text
+    assert "consultation call" in text
+    assert "set that up" in text
+    assert response.runtime_payload["soft_cta_type"] == "consultation_call"
+    assert "10:00 am" not in text
+
+
+def test_soft_pricing_cta_is_not_repeated_when_lead_ignores_it():
+    agent = LLMAgent(provider=RepetitivePricingCtaProvider())
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body=(
+                "I do not have confirmed package or pricing details here. "
+                "It usually depends on scope, timeline, service area, package level, and any special requirements. "
+                "The team can review that on a consultation call; would you like me to help set that up?"
+            ),
+        )
+    ]
+
+    response = agent.next_reply(
+        client=_client(),
+        lead=_lead(
+            form_answers={
+                "decision_role": "Owner",
+                "service_interest": "AI lead response system",
+                "when_to_start": "Within 2 weeks",
+            }
+        ),
+        inbound_text="okay?",
+        history=history,
+    )
+
+    text = response.reply_text.lower()
+    assert response.action == "none"
+    assert response.tool_call.name == "none"
+    assert "set that up" not in text
+    assert "consultation call" not in text
 
 
 def test_call_refusal_suppresses_repeated_meeting_cta():

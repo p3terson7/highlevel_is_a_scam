@@ -26,7 +26,7 @@
           window.location.hash = "dashboard";
           saveLocalState();
           await Promise.all([loadConversations(), loadCrmLeads(), loadCalendar(), loadCrmTasks(), loadDashboard()]);
-          await Promise.all([loadClients(), loadOwnerWorkspace(state.selectedClientKey)]);
+          await Promise.all([loadClients(), loadOwnerWorkspace(state.selectedClientKey), loadAutomationHealth(state.selectedClientKey)]);
           if (state.activeCrmLeadId) {
             await loadCrmLeadDetail(state.activeCrmLeadId);
           }
@@ -34,7 +34,7 @@
         } else {
           await Promise.all([loadDashboard(), loadClients()]);
           if (state.selectedClientKey) {
-            await Promise.all([loadClientDetail(state.selectedClientKey), loadLogs(state.selectedClientKey), loadOwnerWorkspace(state.selectedClientKey)]);
+            await Promise.all([loadClientDetail(state.selectedClientKey), loadLogs(state.selectedClientKey), loadOwnerWorkspace(state.selectedClientKey), loadAutomationHealth(state.selectedClientKey)]);
           } else {
             renderClientWorkspace();
             renderLogs();
@@ -318,6 +318,48 @@
             setActiveView("crm");
             return;
           }
+          if (action === "refresh-automation-health") {
+            await loadAutomationHealth(state.selectedClientKey);
+            showNotice("Automation health refreshed.", "ok");
+            return;
+          }
+          if (action === "open-automation-details") {
+            if (isClientRole()) {
+              setActiveView("settings");
+            } else {
+              setActiveView("logs");
+              await loadLogs(state.selectedClientKey);
+            }
+            return;
+          }
+          if (action === "open-contact-drawer") {
+            openContactActionDrawer(target.dataset.leadId, target.dataset.source || "");
+            return;
+          }
+          if (action === "close-contact-drawer") {
+            closeContactActionDrawer();
+            return;
+          }
+          if (action === "contact-drawer-send") {
+            await sendContactDrawerMessage();
+            return;
+          }
+          if (action === "contact-drawer-agent-control") {
+            await setContactDrawerAgentControl(target.dataset.paused === "true");
+            return;
+          }
+          if (action === "contact-drawer-open-thread") {
+            await openThreadFromContactDrawer();
+            return;
+          }
+          if (action === "contact-drawer-create-meeting") {
+            createMeetingFromContactDrawer();
+            return;
+          }
+          if (action === "contact-drawer-booking-link") {
+            await sendBookingLinkFromContactDrawer();
+            return;
+          }
           if (action === "calendar-select-day") {
             selectCalendarDate(target.dataset.dateKey);
             return;
@@ -367,6 +409,7 @@
             return;
           }
           if (action === "open-crm-lead") {
+            if (state.contactActionDrawer?.open) closeContactActionDrawer();
             setActiveView("leads");
             await openCrmLead(target.dataset.leadId);
             return;

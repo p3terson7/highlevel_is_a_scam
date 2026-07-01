@@ -124,6 +124,8 @@ def ui_dashboard(
             "conversation_state": lead.conversation_state.value,
             "created_at": lead.created_at.isoformat(),
             "last_message_snippet": _snippet(_message_preview_text(latest_messages.get(lead.id))),
+            "last_message_direction": latest_messages.get(lead.id).direction.value if latest_messages.get(lead.id) else "",
+            "last_message_delivery": delivery_status_for_message(latest_messages.get(lead.id)) if latest_messages.get(lead.id) else None,
         }
         for lead in recent_lead_rows
     ]

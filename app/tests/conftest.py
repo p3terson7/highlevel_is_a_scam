@@ -11,6 +11,7 @@ from app.db.models import Base, Client, ConversationStateEnum
 from app.db.session import get_engine, get_session_factory, reset_db_caches
 from app.services.booking import BookingSelectionResult, BookingSlot, SlotOffer
 from app.services.llm_agent import AgentResponse
+from app.services.sms_delivery import with_initial_delivery_status
 
 
 class FakeSMSService:
@@ -38,6 +39,14 @@ class FakeSMSService:
         sid = f"SM{len(self.sent) + 1:06d}"
         self.sent.append({"to": to_number, "body": body, "sid": sid, "media_urls": media_urls or []})
         return sid
+
+    def with_delivery_status(self, raw_payload: dict | None, provider_sid: str) -> dict:
+        return with_initial_delivery_status(
+            raw_payload,
+            provider_sid=provider_sid,
+            provider="mock",
+            callback_url="",
+        )
 
 
 class FakeLLMAgent:
@@ -180,9 +189,10 @@ class FakeBookingService:
             },
         )
 
-    def find_slots(self, *, client: Client, lead, preferred_day: str | None = None, avoid_day: str | None = None, preferred_period: str | None = None, exact_time: str | None = None, range_start: str | None = None, range_end: str | None = None, limit: int = 3, db=None) -> SlotOffer:
+    def find_slots(self, *, client: Client, lead, preferred_day: str | None = None, avoid_day: str | None = None, preferred_period: str | None = None, exact_time: str | None = None, range_start: str | None = None, range_end: str | None = None, request_text: str | None = None, limit: int = 3, db=None) -> SlotOffer:
         _ = avoid_day
         _ = preferred_period
+        _ = request_text
         offer = self.offer_slots(client=client, lead=lead, limit=limit, db=db)
         if preferred_day and preferred_day.lower().startswith("tue"):
             slots = [
@@ -320,12 +330,70 @@ class FakeBookingService:
             },
         }
 
-    def handle_slot_selection(self, *, client: Client, lead, inbound_text: str, history, db=None):
+    def handle_slot_selection(
+        self,
+        *,
+        client: Client,
+        lead,
+        inbound_text: str,
+        history,
+        active_offer=None,
+        resolved_slot_index=None,
+        resolved_slot_start_time=None,
+        db=None,
+    ):
         _ = client
-        _ = history
+        _ = resolved_slot_start_time
         _ = db
         self.selection_calls += 1
-        if inbound_text.strip() not in {"1", "Monday 10am", "Monday 10 AM"}:
+        latest_offer = active_offer if isinstance(active_offer, dict) else None
+        for message in reversed(history):
+            if latest_offer is not None:
+                break
+            offer = (message.raw_payload or {}).get("booking_offer")
+            if isinstance(offer, dict) and isinstance(offer.get("slots"), list):
+                latest_offer = offer
+                break
+        fallback_slots = [
+            {
+                "index": 1,
+                "start_time": "2026-03-09T15:00:00Z",
+                "end_time": "2026-03-09T15:30:00Z",
+                "display_time": "Mon Mar 09 at 10:00 AM",
+                "display_hint": "Monday 10:00 AM",
+                "search_blob": "monday 10am",
+            },
+            {
+                "index": 2,
+                "start_time": "2026-03-09T17:00:00Z",
+                "end_time": "2026-03-09T17:30:00Z",
+                "display_time": "Mon Mar 09 at 12:00 PM",
+                "display_hint": "Monday 12:00 PM",
+                "search_blob": "monday 12pm",
+            },
+        ]
+        slots = (latest_offer or {}).get("slots") or fallback_slots
+        lower = inbound_text.strip().lower()
+        if resolved_slot_index:
+            selected = next((slot for slot in slots if int(slot.get("index", 0)) == int(resolved_slot_index)), slots[0] if slots else fallback_slots[0])
+            return BookingSelectionResult(
+                handled=True,
+                reply_text=f"Booked. You are set for {selected.get('display_time', 'Mon Mar 09 at 10:00 AM')}. Confirmation will be sent to {lead.email}.",
+                next_state=ConversationStateEnum.BOOKED,
+                raw_payload={
+                    "calendar_booking": {
+                        "provider": "calendly",
+                        "slot": selected,
+                        "booking": {"event_uri": "https://api.calendly.com/scheduled_events/1"},
+                    }
+                },
+                audit_event_type="calendar_booking_created",
+                audit_decision={"inbound": inbound_text},
+                transition_reason="calendar_booking_created",
+            )
+        if "3 pm" in lower or "3pm" in lower:
+            return None
+        if lower not in {"1", "monday 10am", "monday 10 am"} and "monday 10" not in lower:
             return BookingSelectionResult(
                 handled=True,
                 reply_text="I did not catch which slot you want.\n1) Mon Mar 09 at 10:00 AM\n2) Mon Mar 09 at 12:00 PM\nReply with 1 or 2.",
@@ -333,22 +401,7 @@ class FakeBookingService:
                 raw_payload={
                     "booking_offer": {
                         "provider": "calendly",
-                        "slots": [
-                            {
-                                "index": 1,
-                                "start_time": "2026-03-09T15:00:00Z",
-                                "display_time": "Mon Mar 09 at 10:00 AM",
-                                "display_hint": "Monday 10:00 AM",
-                                "search_blob": "monday 10am",
-                            },
-                            {
-                                "index": 2,
-                                "start_time": "2026-03-09T17:00:00Z",
-                                "display_time": "Mon Mar 09 at 12:00 PM",
-                                "display_hint": "Monday 12:00 PM",
-                                "search_blob": "monday 12pm",
-                            },
-                        ],
+                        "slots": slots,
                     }
                 },
                 audit_event_type="calendar_booking_offer_repeated",
@@ -356,14 +409,15 @@ class FakeBookingService:
                 transition_reason="calendar_booking_offer_repeated",
             )
 
+        selected = slots[0] if slots else fallback_slots[0]
         return BookingSelectionResult(
             handled=True,
-            reply_text=f"Booked. You are set for Mon Mar 09 at 10:00 AM. Confirmation will be sent to {lead.email}.",
+            reply_text=f"Booked. You are set for {selected.get('display_time', 'Mon Mar 09 at 10:00 AM')}. Confirmation will be sent to {lead.email}.",
             next_state=ConversationStateEnum.BOOKED,
             raw_payload={
                 "calendar_booking": {
                     "provider": "calendly",
-                    "slot": {"index": 1, "start_time": "2026-03-09T15:00:00Z", "display_time": "Mon Mar 09 at 10:00 AM"},
+                    "slot": selected,
                     "booking": {"event_uri": "https://api.calendly.com/scheduled_events/1"},
                 }
             },
