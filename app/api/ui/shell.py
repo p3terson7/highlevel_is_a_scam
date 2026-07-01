@@ -21,14 +21,18 @@ _UI_ASSET_TYPES = {
 }
 
 
+def ui_shell_response() -> HTMLResponse:
+    return HTMLResponse(_UI_FILE.read_text(encoding="utf-8"))
+
+
 @router.get("/ui", response_class=HTMLResponse)
 def ui_index() -> HTMLResponse:
-    return HTMLResponse(_UI_FILE.read_text(encoding="utf-8"))
+    return ui_shell_response()
 
 
 @router.get("/ui/", response_class=HTMLResponse)
 def ui_index_slash() -> HTMLResponse:
-    return HTMLResponse(_UI_FILE.read_text(encoding="utf-8"))
+    return ui_shell_response()
 
 
 @router.get("/ui/assets/{asset_name}")

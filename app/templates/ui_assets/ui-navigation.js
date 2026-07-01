@@ -1,3 +1,73 @@
+      const UI_ROUTE_BY_VIEW = {
+        dashboard: "/",
+        clients: "/clients",
+        conversations: "/inbox",
+        crm: "/pipeline",
+        leads: "/records",
+        calendar: "/calendar",
+        tasks: "/tasks",
+        logs: "/logs",
+        settings: "/settings",
+        "test-lab": "/test-lab",
+      };
+
+      const UI_VIEW_BY_ROUTE = {
+        "": "dashboard",
+        home: "dashboard",
+        dashboard: "dashboard",
+        clients: "clients",
+        inbox: "conversations",
+        conversations: "conversations",
+        pipeline: "crm",
+        crm: "crm",
+        records: "leads",
+        leads: "leads",
+        calendar: "calendar",
+        tasks: "tasks",
+        logs: "logs",
+        settings: "settings",
+        "test-lab": "test-lab",
+        test_lab: "test-lab",
+      };
+
+      function allowedViewsForRole() {
+        return state.session?.role === "client"
+          ? ["dashboard", "conversations", "crm", "leads", "calendar", "tasks", "settings"]
+          : ["dashboard", "clients", "conversations", "crm", "leads", "calendar", "tasks", "logs", "settings", "test-lab"];
+      }
+
+      function viewFromRouteToken(token) {
+        let normalized = String(token || "").trim().replace(/^#/, "").replace(/^\/+|\/+$/g, "");
+        if (normalized === "ui") normalized = "";
+        if (normalized.startsWith("ui/")) normalized = normalized.slice(3);
+        const firstSegment = normalized.split("/")[0] || "";
+        return UI_VIEW_BY_ROUTE[firstSegment] || null;
+      }
+
+      function viewFromLocation() {
+        const hashView = viewFromRouteToken(window.location.hash);
+        if (hashView) return hashView;
+        return viewFromRouteToken(window.location.pathname) || "dashboard";
+      }
+
+      function pathForView(view) {
+        return UI_ROUTE_BY_VIEW[view] || UI_ROUTE_BY_VIEW.dashboard;
+      }
+
+      function updateRouteForView(view, mode = "push") {
+        if (!mode || mode === "none") return;
+        const nextPath = pathForView(view);
+        const currentPath = window.location.pathname || "/";
+        if (currentPath === nextPath && !window.location.hash) return;
+        const method = mode === "replace" ? "replaceState" : "pushState";
+        window.history[method]({ view }, "", nextPath);
+      }
+
+      function routeOptionsFromLegacyArg(arg) {
+        if (typeof arg === "boolean") return { route: arg ? "push" : "none" };
+        return arg || {};
+      }
+
       function updateWindowIndicators() {
         const isAdmin = !isClientRole();
         const selectedRuntime = state.clientDetail?.provider_runtime || state.ownerWorkspace?.runtime || state.runtime || {};
@@ -103,20 +173,23 @@
           const clientAllowedViews = new Set(["dashboard", "conversations", "crm", "leads", "calendar", "tasks", "settings"]);
           if (!clientAllowedViews.has(state.activeView)) {
             state.activeView = "dashboard";
-            window.location.hash = "dashboard";
+            updateRouteForView("dashboard", "replace");
           }
         }
         updateChromeContext();
       }
 
-      function setActiveView(view, pushHash = true) {
-        state.activeView = view;
-        if (view === "conversations" && isMobileViewport()) {
+      function setActiveView(view, options = {}) {
+        const routeOptions = routeOptionsFromLegacyArg(options);
+        const allowed = allowedViewsForRole();
+        const nextView = allowed.includes(view) ? view : "dashboard";
+        state.activeView = nextView;
+        if (nextView === "conversations" && isMobileViewport()) {
           state.conversationMobilePanel = "list";
         }
-        if (pushHash) window.location.hash = view;
-        document.querySelectorAll(".view").forEach((node) => node.classList.toggle("active", node.id === `view-${view}`));
-        document.querySelectorAll(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === view));
+        updateRouteForView(nextView, routeOptions.route ?? "push");
+        document.querySelectorAll(".view").forEach((node) => node.classList.toggle("active", node.id === `view-${nextView}`));
+        document.querySelectorAll(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === nextView));
         if (isMobileViewport()) {
           const workspace = document.querySelector(".workspace");
           if (workspace) workspace.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -183,14 +256,14 @@
       }
 
       function routeFromHash() {
-        const view = (window.location.hash || `#${state.activeView}`).replace(/^#/, "");
-        const allowed = state.session?.role === "client"
-          ? ["dashboard", "conversations", "crm", "leads", "calendar", "tasks", "settings"]
-          : ["dashboard", "clients", "conversations", "crm", "leads", "calendar", "tasks", "logs", "settings", "test-lab"];
+        const view = viewFromLocation();
+        const allowed = allowedViewsForRole();
         const nextView = allowed.includes(view) ? view : "dashboard";
         setActiveView(nextView, false);
         if (view !== nextView) {
-          window.location.hash = nextView;
+          updateRouteForView(nextView, "replace");
+        } else if (window.location.hash || window.location.pathname !== pathForView(nextView)) {
+          updateRouteForView(nextView, "replace");
         }
       }
 

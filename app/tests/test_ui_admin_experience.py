@@ -33,6 +33,18 @@ def test_ui_shell_and_session_endpoint(test_context):
     assert payload["can_seed_demo"] is True
 
 
+def test_ui_home_and_deep_links_render_shell(test_context):
+    for path in ["/", "/dashboard", "/calendar", "/settings", "/ui", "/ui/dashboard", "/not-a-real-page"]:
+        page = test_context.client.get(path)
+        assert page.status_code == 200
+        assert "Lead Ops Console" in page.text
+        assert "Operator workspace" in page.text
+
+    missing_api = test_context.client.get("/ui/api/not-a-real-endpoint")
+    assert missing_api.status_code == 404
+    assert "Lead Ops Console" not in missing_api.text
+
+
 def test_dashboard_omits_stringified_none_for_ai_error(test_context):
     ai_test = test_context.client.post(
         "/admin/test/ai",
