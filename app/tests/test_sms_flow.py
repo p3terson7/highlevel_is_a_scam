@@ -180,6 +180,76 @@ def test_sms_inbound_paused_agent_logs_message_without_reply(test_context):
         assert audit.decision["reason"] == "operator_testing"
 
 
+def test_sms_status_callback_marks_outbound_delivery_warning(test_context):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = Lead(
+            client_id=1,
+            external_lead_id="meta-lead-delivery-001",
+            source=LeadSource.META,
+            full_name="Delivery Lead",
+            phone="+15550008888",
+            email="delivery@example.com",
+            city="Denver",
+            form_answers={"interest": "roof replacement"},
+            raw_payload={"source": "seed"},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.flush()
+        db.add(
+            Message(
+                client_id=1,
+                lead_id=lead.id,
+                direction=MessageDirection.OUTBOUND,
+                body="Hi, can we help?",
+                provider_message_sid="SM-DELIVERY-001",
+                raw_payload=test_context.fake_sms.with_delivery_status({"source": "test"}, "SM-DELIVERY-001"),
+            )
+        )
+        db.commit()
+        lead_id = lead.id
+
+    response = test_context.client.post(
+        "/sms/status-callback",
+        data={
+            "MessageSid": "SM-DELIVERY-001",
+            "MessageStatus": "undelivered",
+            "ErrorCode": "30005",
+            "ErrorMessage": "Unknown destination handset",
+            "To": "+15550008888",
+            "From": "+15550000000",
+        },
+    )
+
+    assert response.status_code == 200
+
+    with SessionLocal() as db:
+        message = db.scalar(select(Message).where(Message.provider_message_sid == "SM-DELIVERY-001"))
+        assert message is not None
+        delivery = message.raw_payload["delivery"]
+        assert delivery["status"] == "undelivered"
+        assert delivery["severity"] == "warning"
+        assert delivery["label_fr"] == "SMS non livré"
+        assert "téléphone injoignable" in delivery["description_fr"]
+        lead = db.get(Lead, lead_id)
+        assert lead is not None
+        assert lead.raw_payload["sms_contactability"]["status"] == "sms_failed"
+        audit = db.scalar(select(AuditLog).where(AuditLog.lead_id == lead_id, AuditLog.event_type == "sms_delivery_failed"))
+        assert audit is not None
+
+    thread = test_context.client.get(
+        f"/ui/api/conversations/{lead_id}/thread",
+        headers={"X-Admin-Token": "test-admin-token"},
+    )
+    assert thread.status_code == 200
+    outbound = next(item for item in thread.json()["messages"] if item["provider_message_sid"] == "SM-DELIVERY-001")
+    assert outbound["delivery"]["severity"] == "warning"
+    assert outbound["delivery"]["label"] == "SMS not delivered"
+    assert outbound["delivery"]["label_fr"] == "SMS non livré"
+
+
 def test_sms_inbound_explicit_human_request_handoffs_without_llm(test_context):
     response = test_context.client.post(
         f"/sms/inbound/{test_context.client_key}",

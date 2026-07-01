@@ -51,6 +51,7 @@ from app.services.runtime_config import (
     load_runtime_overrides,
 )
 from app.services.sms_service import SMSService, build_sms_service
+from app.services.sms_delivery import apply_twilio_delivery_callback
 from app.workers.tasks import enqueue_process_inbound_sms, get_redis_connection
 
 router = APIRouter(prefix="/sms", tags=["sms"])
@@ -101,7 +102,11 @@ def _store_outbound_message(
     body: str,
     provider_sid: str,
     raw_payload: dict[str, Any] | None = None,
+    sms_service: SMSService | None = None,
 ) -> None:
+    payload = raw_payload or {}
+    if sms_service is not None:
+        payload = sms_service.with_delivery_status(payload, provider_sid)
     db.add(
         Message(
             lead_id=lead.id,
@@ -109,7 +114,7 @@ def _store_outbound_message(
             direction=MessageDirection.OUTBOUND,
             body=body,
             provider_message_sid=provider_sid,
-            raw_payload=raw_payload or {},
+            raw_payload=payload,
         )
     )
 
@@ -172,6 +177,78 @@ def _twilio_media_items(payload: dict[str, str]) -> list[dict[str, str]]:
         if media_url:
             items.append({"index": str(index), "url": media_url, "content_type": content_type})
     return items
+
+
+@router.post("/status-callback")
+async def sms_status_callback(
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> Response:
+    form = await request.form()
+    payload = {str(key): str(value) for key, value in form.items()}
+    provider_sid = str(payload.get("MessageSid") or payload.get("SmsSid") or "").strip()
+    if not provider_sid:
+        return _empty_twiml_response()
+
+    message = db.scalar(
+        select(Message)
+        .where(
+            Message.direction == MessageDirection.OUTBOUND,
+            Message.provider_message_sid == provider_sid,
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(1)
+    )
+    if message is None:
+        db.add(
+            AuditLog(
+                client_id=None,
+                lead_id=None,
+                event_type="sms_delivery_callback_unmatched",
+                decision={"provider_sid": provider_sid, "payload": payload},
+            )
+        )
+        db.commit()
+        return _empty_twiml_response()
+
+    client = db.get(Client, message.client_id)
+    if client is not None:
+        effective_runtime = get_effective_runtime_map_for_client(
+            settings=settings,
+            overrides=load_runtime_overrides(db),
+            client=client,
+        )
+        if not verify_twilio_signature(request=request, form_data=payload, auth_token=effective_runtime["twilio_auth_token"]):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid Twilio signature")
+
+    now = datetime.now(timezone.utc)
+    delivery = apply_twilio_delivery_callback(message, payload=payload, now=now)
+    lead = db.get(Lead, message.lead_id)
+    if lead is not None:
+        lead.updated_at = now
+        if delivery.get("severity") == "warning":
+            raw_payload = dict(lead.raw_payload or {})
+            raw_payload["sms_contactability"] = {
+                "status": "sms_failed",
+                "reason": delivery.get("status") or "",
+                "label": delivery.get("label") or "SMS not delivered",
+                "description": delivery.get("description") or "",
+                "provider_message_sid": provider_sid,
+                "updated_at": now.isoformat(),
+            }
+            lead.raw_payload = raw_payload
+    db.add(
+        AuditLog(
+            client_id=message.client_id,
+            lead_id=message.lead_id,
+            event_type="sms_delivery_failed" if delivery.get("severity") == "warning" else "sms_delivery_updated",
+            decision={"provider_sid": provider_sid, "delivery": delivery},
+            created_at=now,
+        )
+    )
+    db.commit()
+    return _empty_twiml_response()
 
 
 async def _store_inbound_media_attachments(
@@ -320,7 +397,7 @@ async def inbound_sms(
 
         reply_text = sms_service.render_template(client, "stop_confirmation", context={})
         sid = sms_service.send_message(to_number=lead.phone, body=reply_text)
-        _store_outbound_message(db, lead, reply_text, sid, raw_payload={"reason": "stop"})
+        _store_outbound_message(db, lead, reply_text, sid, raw_payload={"reason": "stop"}, sms_service=sms_service)
 
         if previous_state != lead.conversation_state:
             db.add(
@@ -389,7 +466,7 @@ async def inbound_sms(
     if decision.is_help:
         reply_text = sms_service.render_template(client, "help_response", context={})
         sid = sms_service.send_message(to_number=lead.phone, body=reply_text)
-        _store_outbound_message(db, lead, reply_text, sid, raw_payload={"reason": "help"})
+        _store_outbound_message(db, lead, reply_text, sid, raw_payload={"reason": "help"}, sms_service=sms_service)
         lead.last_outbound_at = now
         db.add(
             AuditLog(

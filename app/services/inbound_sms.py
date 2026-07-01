@@ -63,14 +63,18 @@ def _store_outbound_message(
     provider_sid: str,
     raw_payload: dict[str, Any] | None = None,
     created_at: datetime | None = None,
+    sms_service: SMSService | None = None,
 ) -> None:
+    payload = raw_payload or {}
+    if sms_service is not None:
+        payload = sms_service.with_delivery_status(payload, provider_sid)
     values = {
         "lead_id": lead.id,
         "client_id": lead.client_id,
         "direction": MessageDirection.OUTBOUND,
         "body": body,
         "provider_message_sid": provider_sid,
-        "raw_payload": raw_payload or {},
+        "raw_payload": payload,
     }
     if created_at is not None:
         values["created_at"] = created_at
@@ -268,6 +272,7 @@ def _apply_booking_selection_result(
         provider_sid=sid,
         raw_payload=outbound_raw_payload,
         created_at=turn_time,
+        sms_service=sms_service,
     )
 
     previous_state = lead.conversation_state
@@ -504,6 +509,7 @@ def _apply_handoff_decision(
         provider_sid=sid,
         raw_payload=outbound_raw_payload,
         created_at=turn_time,
+        sms_service=sms_service,
     )
 
     previous_state = lead.conversation_state
@@ -758,7 +764,12 @@ def process_inbound_turn(
     effective_action = action
 
     if not reply_text:
-        reply_text = "I’m still with you. Let me send a fresh set of times."
+        language = client_language(client, lead=lead, inbound_text=inbound_text)
+        reply_text = (
+            "Je suis toujours là. Je vais vous envoyer de nouveaux créneaux."
+            if language == "fr"
+            else "I’m still with you. Let me send a fresh set of times."
+        )
         runtime_payload.setdefault("pending_step", next_pending_step)
         db.add(
             AuditLog(
@@ -821,10 +832,19 @@ def process_inbound_turn(
                     next_state = ConversationStateEnum.QUALIFYING
             if next_pending_step is None and (pending_step_before or runtime_payload.get("booking_offer")):
                 next_pending_step = pending_step_before or "slot_selection_pending"
+            language = client_language(client, lead=lead, inbound_text=inbound_text)
             if pending_step_before or runtime_payload.get("booking_offer"):
-                reply_text = "I can lock that in once you pick one of the offered times, or send your exact preferred time."
+                reply_text = (
+                    "Je peux réserver dès que vous choisissez un des créneaux proposés, ou vous pouvez m'envoyer l'heure exacte souhaitée."
+                    if language == "fr"
+                    else "I can lock that in once you pick one of the offered times, or send your exact preferred time."
+                )
             else:
-                reply_text = "I can lock that in as soon as you share your preferred day and time."
+                reply_text = (
+                    "Je peux réserver dès que vous m'envoyez la journée et l'heure qui vous conviennent."
+                    if language == "fr"
+                    else "I can lock that in as soon as you share your preferred day and time."
+                )
     elif lead.conversation_state == ConversationStateEnum.BOOKED and next_state == ConversationStateEnum.QUALIFYING:
         next_state = ConversationStateEnum.BOOKED
 
@@ -863,6 +883,7 @@ def process_inbound_turn(
         provider_sid=sid,
         raw_payload=outbound_raw_payload,
         created_at=turn_time,
+        sms_service=sms_service,
     )
 
     previous_state = lead.conversation_state

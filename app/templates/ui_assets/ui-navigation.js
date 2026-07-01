@@ -205,6 +205,7 @@
               <div class="item-title">${escapeHtml(item.lead_name || item.phone || `Contact ${item.lead_id}`)}</div>
               <div class="actions">
                 ${item.crm_stage ? renderBadge(item.crm_stage, "info") : ""}
+                ${renderMessageDeliveryStatus(item.last_message_delivery, { compact: true, onlyWarnings: true })}
                 ${maybeRenderConversationState(item.crm_stage, item.state)}
               </div>
             </div>

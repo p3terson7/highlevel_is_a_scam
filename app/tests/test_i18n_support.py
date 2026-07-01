@@ -5,7 +5,7 @@ from sqlalchemy import select
 from app.db.models import Client, ConversationStateEnum, Lead, LeadSource
 from app.db.session import get_session_factory
 from app.services.agent_v3 import LLMAgentV3
-from app.services.agent_v3_helpers import _ensure_slot_fallback_line
+from app.services.agent_v3_helpers import _apply_response_guardrails, _ensure_slot_fallback_line
 from app.services.booking import BookingService
 from app.services.i18n import client_language, detect_language, format_datetime_for_language, remember_lead_language
 from app.services.sms_service import SMSService, load_default_templates
@@ -142,6 +142,22 @@ def test_slot_fallback_line_replaces_existing_english_suffix_in_french():
 
     assert "If none of those work" not in reply
     assert reply.endswith("Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux.")
+
+
+def test_agent_guardrails_localize_common_english_booking_copy_in_french():
+    reply = _apply_response_guardrails(
+        "Je peux réserver un appel. 1) Wed Jun 24 at 10:00 AM. Reply with 1 and I'll lock it in. If none of those work, just send me a time that's better for you. Times shown in EDT.",
+        {"response_language": "fr"},
+    )
+
+    assert "Wed Jun" not in reply
+    assert "10:00 AM" not in reply
+    assert "Reply with" not in reply
+    assert "If none of those work" not in reply
+    assert "Times shown" not in reply
+    assert "mercredi 24 juin à 10 h 00" in reply
+    assert "Répondez 1 et je le réserve" in reply
+    assert "Heures affichées en EDT" in reply
 
 
 def test_agent_context_and_prompt_include_response_language(test_context):

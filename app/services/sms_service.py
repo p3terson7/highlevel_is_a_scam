@@ -13,6 +13,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.db.models import Client
 from app.services.i18n import client_language, normalize_language
+from app.services.sms_delivery import twilio_status_callback_url, with_initial_delivery_status
 
 logger = get_logger(__name__)
 
@@ -30,9 +31,10 @@ class SMSProvider(Protocol):
 
 
 class TwilioSMSProvider:
-    def __init__(self, account_sid: str, auth_token: str, from_number: str) -> None:
+    def __init__(self, account_sid: str, auth_token: str, from_number: str, status_callback_url: str = "") -> None:
         self._client = TwilioClient(account_sid, auth_token)
         self._from_number = from_number
+        self._status_callback_url = status_callback_url
 
     def send_sms(self, to_number: str, body: str, media_urls: list[str] | None = None) -> str:
         payload: dict[str, Any] = {"from_": self._from_number, "to": to_number}
@@ -40,13 +42,20 @@ class TwilioSMSProvider:
             payload["body"] = body
         if media_urls:
             payload["media_url"] = media_urls
+        if self._status_callback_url:
+            payload["status_callback"] = self._status_callback_url
         message = self._client.messages.create(**payload)
         return str(message.sid)
 
 
 @lru_cache(maxsize=16)
-def _cached_twilio_provider(account_sid: str, auth_token: str, from_number: str) -> TwilioSMSProvider:
-    return TwilioSMSProvider(account_sid=account_sid, auth_token=auth_token, from_number=from_number)
+def _cached_twilio_provider(account_sid: str, auth_token: str, from_number: str, status_callback_url: str) -> TwilioSMSProvider:
+    return TwilioSMSProvider(
+        account_sid=account_sid,
+        auth_token=auth_token,
+        from_number=from_number,
+        status_callback_url=status_callback_url,
+    )
 
 
 def clear_sms_provider_cache() -> None:
@@ -61,9 +70,11 @@ class LoggingSMSProvider:
 
 
 class SMSService:
-    def __init__(self, provider: SMSProvider, templates: dict[str, str]) -> None:
+    def __init__(self, provider: SMSProvider, templates: dict[str, str], *, provider_kind: str = "mock", status_callback_url: str = "") -> None:
         self._provider = provider
         self._templates = templates
+        self.provider_kind = provider_kind
+        self.status_callback_url = status_callback_url
 
     def render_template(
         self,
@@ -106,6 +117,14 @@ class SMSService:
                 provider_code=provider_code,
             ) from exc
 
+    def with_delivery_status(self, raw_payload: dict[str, Any] | None, provider_sid: str) -> dict[str, Any]:
+        return with_initial_delivery_status(
+            raw_payload,
+            provider_sid=provider_sid,
+            provider=self.provider_kind,
+            callback_url=self.status_callback_url,
+        )
+
 
 @lru_cache
 def load_default_templates() -> dict[str, str]:
@@ -125,22 +144,31 @@ def build_sms_service(settings: Settings, runtime_overrides: dict[str, str] | No
     account_sid = (runtime_overrides or {}).get("twilio_account_sid", settings.twilio_account_sid)
     auth_token = (runtime_overrides or {}).get("twilio_auth_token", settings.twilio_auth_token)
     from_number = (runtime_overrides or {}).get("twilio_from_number", settings.twilio_from_number)
+    status_callback_url = twilio_status_callback_url(settings, runtime_overrides)
 
     provider: SMSProvider
+    provider_kind = "mock"
     if account_sid and auth_token and from_number:
+        provider_kind = "twilio"
         provider = _cached_twilio_provider(
             account_sid=account_sid,
             auth_token=auth_token,
             from_number=from_number,
+            status_callback_url=status_callback_url,
         )
     else:
         provider = LoggingSMSProvider()
 
-    return SMSService(provider=provider, templates=load_default_templates())
+    return SMSService(
+        provider=provider,
+        templates=load_default_templates(),
+        provider_kind=provider_kind,
+        status_callback_url=status_callback_url if provider_kind == "twilio" else "",
+    )
 
 
 def build_mock_sms_service() -> SMSService:
-    return SMSService(provider=LoggingSMSProvider(), templates=load_default_templates())
+    return SMSService(provider=LoggingSMSProvider(), templates=load_default_templates(), provider_kind="mock")
 
 
 def _delivery_error_details(exc: Exception) -> tuple[str, int | None, str | None]:

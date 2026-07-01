@@ -40,6 +40,7 @@ from app.services.booking import (
     internal_calendar_preview_config,
 )
 from app.services.agent_control import get_agent_control, set_agent_control
+from app.services.sms_delivery import delivery_status_for_message
 from app.services.crm import (
     CRM_STAGE_CONTACTED,
     CRM_STAGE_QUALIFIED,
@@ -879,7 +880,7 @@ def _send_outbound_message(
             direction=MessageDirection.OUTBOUND,
             body=cleaned_body,
             provider_message_sid=provider_sid,
-            raw_payload=raw_payload,
+            raw_payload=sms_service.with_delivery_status(raw_payload, provider_sid),
             created_at=created_at,
         )
     )
@@ -985,6 +986,7 @@ def _build_conversation_items(
                 "notes_count": notes_count,
                 "last_message_snippet": _snippet(_message_preview_text(latest_message)),
                 "last_message_direction": latest_message.direction.value if latest_message else None,
+                "last_message_delivery": delivery_status_for_message(latest_message) if latest_message else None,
                 "last_activity_at": last_activity_at.isoformat(),
                 "created_at": lead.created_at.isoformat(),
             }

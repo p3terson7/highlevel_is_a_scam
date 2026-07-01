@@ -122,6 +122,7 @@ def ui_conversation_thread(
                 "body": message.body,
                 "provider_message_sid": message.provider_message_sid,
                 "attachments": attachments_by_message.get(message.id, []),
+                "delivery": delivery_status_for_message(message),
             }
         )
     for state_row in state_history:
@@ -261,6 +262,7 @@ def ui_conversation_thread(
                 "body": message.body,
                 "provider_message_sid": message.provider_message_sid,
                 "attachments": attachments_by_message.get(message.id, []),
+                "delivery": delivery_status_for_message(message),
                 "created_at": message.created_at.isoformat(),
             }
             for message in messages
@@ -355,7 +357,10 @@ def ui_send_booking_link(
             direction=MessageDirection.OUTBOUND,
             body=body,
             provider_message_sid=provider_sid,
-            raw_payload={"source": "ui_admin_action", "action": "send_booking_link"},
+            raw_payload=resolved_sms_service.with_delivery_status(
+                {"source": "ui_admin_action", "action": "send_booking_link"},
+                provider_sid,
+            ),
             created_at=now,
         )
     )
@@ -531,7 +536,7 @@ async def ui_send_manual_media_message(
     message.provider_message_sid = provider_sid
     serialized_attachment = _serialize_attachment(attachment)
     message.raw_payload = {
-        **(message.raw_payload or {}),
+        **resolved_sms_service.with_delivery_status(message.raw_payload or {}, provider_sid),
         "provider_media_urls": media_urls,
         "attachments": [serialized_attachment],
     }

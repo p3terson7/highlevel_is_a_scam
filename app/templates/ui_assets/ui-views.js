@@ -48,6 +48,7 @@
                 const signalBadges = [
                   scoreLabel ? renderBadge(`Score ${scoreLabel}`, Number(item.lead_score) >= 80 ? "ok" : Number(item.lead_score) >= 55 ? "info" : "warn") : "",
                   valueLabel ? renderBadge(valueLabel, "info") : "",
+                  renderMessageDeliveryStatus(item.last_message_delivery, { compact: true, onlyWarnings: true }),
                 ].filter(Boolean).join("");
                 const nextTask = item.next_task_title
                   ? `<div class="crm-card-next"><span>${escapeHtml(t("Next task"))}</span>${escapeHtml(item.next_task_title)}${item.next_task_due_date ? ` · ${escapeHtml(item.next_task_due_date)}` : ""}</div>`
@@ -333,6 +334,7 @@
                     </div>
                     ${msg.body ? `<div class="crm-message-body">${escapeHtml(msg.body || "")}</div>` : ""}
                     ${renderMessageAttachments(msg.attachments || [])}
+                    ${outbound ? renderMessageDeliveryStatus(msg.delivery) : ""}
                   </div>
                 </div>
               `;
@@ -1133,6 +1135,7 @@
                     <div class="actions">
                       ${isUnreadConversation(item) ? renderBadge("new", "info") : ""}
                       ${item.crm_stage ? renderBadge(item.crm_stage, "info") : ""}
+                      ${renderMessageDeliveryStatus(item.last_message_delivery, { compact: true, onlyWarnings: true })}
                       ${maybeRenderConversationState(item.crm_stage, item.state)}
                     </div>
                   </div>
@@ -1252,6 +1255,7 @@
                       <div class="bubble ${outbound ? "outbound" : ""}">
                         ${item.body ? `<div>${escapeHtml(item.body)}</div>` : ""}
                         ${renderMessageAttachments(item.attachments || [])}
+                        ${outbound ? renderMessageDeliveryStatus(item.delivery) : ""}
                         <div class="bubble-meta">
                           ${meta.map((entry) => `<span>${escapeHtml(entry)}</span>`).join("")}
                         </div>

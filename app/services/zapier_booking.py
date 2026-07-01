@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.db.models import AuditLog, CalendarBooking, Client, Lead
+from app.services.i18n import client_language, normalize_language
 from app.services.lead_summary import format_answer_value
 
 ZAPIER_BOOKING_WEBHOOK_CONFIG_KEY = "zapier_booking_webhook_url"
@@ -186,6 +187,7 @@ def _meeting_payload(
     booking: CalendarBooking | None,
     calendar_booking: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    language = client_language(client, lead=lead)
     title = _meeting_title(client=client, lead=lead)
     if booking is not None:
         timezone_name = booking.timezone or client.timezone or "UTC"
@@ -210,6 +212,7 @@ def _meeting_payload(
                 start_at=booking.start_at,
                 end_at=booking.end_at,
                 timezone_name=timezone_name,
+                language=language,
             )
         )
         return payload
@@ -253,6 +256,7 @@ def _meeting_payload(
             start_at=start_at,
             end_at=end_at,
             timezone_name=timezone_name,
+            language=language,
         )
     )
     return payload
@@ -263,17 +267,20 @@ def _local_time_fields(
     start_at: datetime | None,
     end_at: datetime | None,
     timezone_name: str,
+    language: str = "en",
 ) -> dict[str, Any]:
+    language = normalize_language(language)
     start_local = _as_local(start_at, timezone_name)
     end_local = _as_local(end_at, timezone_name)
     duration_minutes = None
     if start_at is not None and end_at is not None:
         duration_minutes = int((end_at - start_at).total_seconds() / 60)
-    date_label = _local_date_label(start_local)
+    date_label = _local_date_label(start_local, language=language)
     time_range_label = _local_time_range_label(
         start_local=start_local,
         end_local=end_local,
         timezone_name=timezone_name,
+        language=language,
     )
     return {
         "local_start_at": _iso(start_local),
@@ -292,6 +299,8 @@ def _local_time_fields(
         "end_time_24h": end_local.strftime("%H:%M") if end_local else None,
         "start_time_12h": _clock_label(start_local),
         "end_time_12h": _clock_label(end_local),
+        "start_time_display": _clock_label(start_local, language=language),
+        "end_time_display": _clock_label(end_local, language=language),
         "time_range_label": time_range_label,
         "duration_minutes": duration_minutes,
     }
@@ -422,6 +431,7 @@ def _calendar_event_payload(
     meeting: dict[str, Any],
     form: dict[str, Any],
 ) -> dict[str, Any]:
+    language = client_language(client, lead=lead)
     summary = str(
         meeting.get("summary")
         or meeting.get("title")
@@ -441,7 +451,7 @@ def _calendar_event_payload(
         "timezone": meeting.get("timezone") or client.timezone,
         "attendee_emails": attendee_emails,
         "attendee_email": lead.email,
-        "location": "Conference call",
+        "location": "Appel de consultation" if language == "fr" else "Conference call",
     }
 
 
@@ -453,34 +463,54 @@ def _email_confirmation_payload(
     calendar_event: dict[str, Any],
     form: dict[str, Any],
 ) -> dict[str, Any]:
+    language = client_language(client, lead=lead)
     business_name = _business_name(client)
     lead_name = _lead_display_name(lead)
-    first_name = lead.full_name.split()[0] if lead.full_name else "there"
-    time_label = str(meeting.get("time_range_label") or "the scheduled time")
-    subject = f"{business_name}: meeting confirmed with {lead_name}"
-    details = _email_details_lines(lead=lead, meeting=meeting, form=form)
-    body_text = "\n".join(
-        [
-            f"Hi {first_name},",
-            "",
-            f"Your meeting with {business_name} is booked.",
-            "",
-            f"When: {time_label}",
-            f"Topic: {calendar_event.get('summary') or meeting.get('title')}",
-            "",
-            "Details shared:",
-            *details,
-            "",
-            "Looking forward to meeting.",
-        ]
-    )
+    first_name = lead.full_name.split()[0] if lead.full_name else ("bonjour" if language == "fr" else "there")
+    time_label = str(meeting.get("time_range_label") or ("l'heure prévue" if language == "fr" else "the scheduled time"))
+    subject = f"{business_name}: rencontre confirmée avec {lead_name}" if language == "fr" else f"{business_name}: meeting confirmed with {lead_name}"
+    details = _email_details_lines(lead=lead, meeting=meeting, form=form, language=language)
+    if language == "fr":
+        body_text = "\n".join(
+            [
+                f"Bonjour {first_name},",
+                "",
+                f"Votre rencontre avec {business_name} est réservée.",
+                "",
+                f"Quand: {time_label}",
+                f"Sujet: {calendar_event.get('summary') or meeting.get('title')}",
+                "",
+                "Détails partagés:",
+                *details,
+                "",
+                "Au plaisir de vous parler.",
+            ]
+        )
+        intro = f"Votre rencontre avec {business_name} est réservée."
+    else:
+        body_text = "\n".join(
+            [
+                f"Hi {first_name},",
+                "",
+                f"Your meeting with {business_name} is booked.",
+                "",
+                f"When: {time_label}",
+                f"Topic: {calendar_event.get('summary') or meeting.get('title')}",
+                "",
+                "Details shared:",
+                *details,
+                "",
+                "Looking forward to meeting.",
+            ]
+        )
+        intro = f"Your meeting with {business_name} is booked."
     body_html = _email_confirmation_html(
         client=client,
         lead=lead,
         meeting=meeting,
         calendar_event=calendar_event,
         form=form,
-        intro=f"Your meeting with {business_name} is booked.",
+        intro=intro,
     )
     return {
         "to": lead.email,
@@ -490,7 +520,7 @@ def _email_confirmation_payload(
         "body_text": body_text,
         "body_html": body_html,
         "structured_description": {
-            "intro": f"Your meeting with {business_name} is booked.",
+            "intro": intro,
             "meeting": {
                 "title": calendar_event.get("summary"),
                 "time": time_label,
@@ -516,25 +546,36 @@ def _calendar_description(
     meeting: dict[str, Any],
     form: dict[str, Any],
 ) -> str:
-    lines = [
-        "MEETING",
-        f"Title: {meeting.get('title') or _meeting_title(client=client, lead=lead)}",
-        f"Business: {_business_name(client)}",
-        f"When: {meeting.get('time_range_label') or ''}",
-    ]
-    lines.extend(["", "CONTACT"])
-    lines.append(f"Lead: {_lead_display_name(lead)}")
+    language = client_language(client, lead=lead)
+    if language == "fr":
+        lines = [
+            "RENCONTRE",
+            f"Titre: {meeting.get('title') or _meeting_title(client=client, lead=lead)}",
+            f"Entreprise: {_business_name(client)}",
+            f"Quand: {meeting.get('time_range_label') or ''}",
+        ]
+        lines.extend(["", "CONTACT"])
+        lines.append(f"Lead: {_lead_display_name(lead)}")
+    else:
+        lines = [
+            "MEETING",
+            f"Title: {meeting.get('title') or _meeting_title(client=client, lead=lead)}",
+            f"Business: {_business_name(client)}",
+            f"When: {meeting.get('time_range_label') or ''}",
+        ]
+        lines.extend(["", "CONTACT"])
+        lines.append(f"Lead: {_lead_display_name(lead)}")
     if lead.email:
-        lines.append(f"Email: {lead.email}")
+        lines.append(f"Courriel: {lead.email}" if language == "fr" else f"Email: {lead.email}")
     if lead.phone:
-        lines.append(f"Phone: {lead.phone}")
+        lines.append(f"Téléphone: {lead.phone}" if language == "fr" else f"Phone: {lead.phone}")
     if lead.city:
-        lines.append(f"Location / City: {lead.city}")
+        lines.append(f"Ville / emplacement: {lead.city}" if language == "fr" else f"Location / City: {lead.city}")
     if meeting.get("notes"):
         lines.extend(["", f"Notes: {meeting['notes']}"])
     form_rows = _form_answer_rows(form)
     if form_rows:
-        lines.extend(["", "FORM ANSWERS"])
+        lines.extend(["", "RÉPONSES DU FORMULAIRE" if language == "fr" else "FORM ANSWERS"])
         lines.extend(f"- {label}: {value}" for label, value in form_rows)
     return "\n".join(line for line in lines if line is not None)
 
@@ -546,43 +587,44 @@ def _calendar_description_html(
     meeting: dict[str, Any],
     form: dict[str, Any],
 ) -> str:
+    language = client_language(client, lead=lead)
     business_name = _business_name(client)
     title = str(meeting.get("title") or _meeting_title(client=client, lead=lead))
     time_label = str(meeting.get("time_range_label") or "")
-    contact_rows = _contact_rows(lead)
+    contact_rows = _contact_rows(lead, language=language)
     form_rows = _form_answer_rows(form)
     notes = str(meeting.get("notes") or "").strip()
     return _simple_calendar_html(
         sections=[
             (
-                "Meeting",
+                "Rencontre" if language == "fr" else "Meeting",
                 [
-                    ("Title", title),
-                    ("Business", business_name),
-                    ("When", time_label),
+                    ("Titre" if language == "fr" else "Title", title),
+                    ("Entreprise" if language == "fr" else "Business", business_name),
+                    ("Quand" if language == "fr" else "When", time_label),
                 ],
             ),
             ("Contact", contact_rows),
-            ("Form answers", form_rows),
-            ("Notes", [("Internal notes", notes)] if notes else []),
+            ("Réponses du formulaire" if language == "fr" else "Form answers", form_rows),
+            ("Notes", [("Notes internes" if language == "fr" else "Internal notes", notes)] if notes else []),
         ],
     )
 
 
-def _email_details_lines(*, lead: Lead, meeting: dict[str, Any], form: dict[str, Any]) -> list[str]:
+def _email_details_lines(*, lead: Lead, meeting: dict[str, Any], form: dict[str, Any], language: str = "en") -> list[str]:
     lines: list[str] = []
     if lead.email:
-        lines.append(f"- Email: {lead.email}")
+        lines.append(f"- {'Courriel' if language == 'fr' else 'Email'}: {lead.email}")
     if lead.phone:
-        lines.append(f"- Phone: {lead.phone}")
+        lines.append(f"- {'Téléphone' if language == 'fr' else 'Phone'}: {lead.phone}")
     if lead.city:
-        lines.append(f"- Location / City: {lead.city}")
+        lines.append(f"- {'Ville / emplacement' if language == 'fr' else 'Location / City'}: {lead.city}")
     if meeting.get("notes"):
         lines.append(f"- Notes: {meeting['notes']}")
     for row in form.get("answers", [])[:10]:
         if isinstance(row, dict):
             lines.append(f"- {row.get('question')}: {row.get('answer')}")
-    return lines or ["- No additional form details were provided."]
+    return lines or ["- Aucun détail de formulaire supplémentaire n'a été fourni." if language == "fr" else "- No additional form details were provided."]
 
 
 def _email_confirmation_html(
@@ -594,28 +636,37 @@ def _email_confirmation_html(
     form: dict[str, Any],
     intro: str,
 ) -> str:
+    language = client_language(client, lead=lead)
     business_name = _business_name(client)
     lead_name = _lead_display_name(lead)
-    time_label = str(meeting.get("time_range_label") or "the scheduled time")
+    time_label = str(meeting.get("time_range_label") or ("l'heure prévue" if language == "fr" else "the scheduled time"))
     title = str(calendar_event.get("summary") or meeting.get("title") or _meeting_title(client=client, lead=lead))
     return _styled_card_html(
-        title="Meeting confirmed",
+        title="Rencontre confirmée" if language == "fr" else "Meeting confirmed",
         eyebrow=business_name,
-        intro=f"Hi {lead.full_name.split()[0] if lead.full_name else 'there'}, {intro}",
+        intro=(
+            f"Bonjour {lead.full_name.split()[0] if lead.full_name else ''}, {intro}".strip()
+            if language == "fr"
+            else f"Hi {lead.full_name.split()[0] if lead.full_name else 'there'}, {intro}"
+        ),
         sections=[
             (
-                "Meeting",
+                "Rencontre" if language == "fr" else "Meeting",
                 [
-                    ("Title", title),
-                    ("When", time_label),
+                    ("Titre" if language == "fr" else "Title", title),
+                    ("Quand" if language == "fr" else "When", time_label),
                     ("Lead", lead_name),
                 ],
             ),
-            ("Contact", _contact_rows(lead)),
-            ("Form answers", _form_answer_rows(form)),
+            ("Contact", _contact_rows(lead, language=language)),
+            ("Réponses du formulaire" if language == "fr" else "Form answers", _form_answer_rows(form)),
         ],
         compact=False,
-        footer=f"If anything changes, reply to this email and {escape(business_name)} will help update the meeting.",
+        footer=(
+            f"Si quelque chose change, répondez à ce courriel et {escape(business_name)} vous aidera à mettre la rencontre à jour."
+            if language == "fr"
+            else f"If anything changes, reply to this email and {escape(business_name)} will help update the meeting."
+        ),
     )
 
 
@@ -709,14 +760,14 @@ def _simple_calendar_html(*, sections: list[tuple[str, list[tuple[str, str]]]]) 
     return "".join(html)
 
 
-def _contact_rows(lead: Lead) -> list[tuple[str, str]]:
+def _contact_rows(lead: Lead, *, language: str = "en") -> list[tuple[str, str]]:
     rows = [("Lead", _lead_display_name(lead))]
     if lead.email:
-        rows.append(("Email", lead.email))
+        rows.append(("Courriel" if language == "fr" else "Email", lead.email))
     if lead.phone:
-        rows.append(("Phone", lead.phone))
+        rows.append(("Téléphone" if language == "fr" else "Phone", lead.phone))
     if lead.city:
-        rows.append(("Location / City", lead.city))
+        rows.append(("Ville / emplacement" if language == "fr" else "Location / City", lead.city))
     return rows
 
 
@@ -733,7 +784,8 @@ def _form_answer_rows(form: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def _meeting_title(*, client: Client, lead: Lead) -> str:
-    return f"{_business_name(client)} meeting - {_lead_display_name(lead)}"
+    noun = "rencontre" if client_language(client, lead=lead) == "fr" else "meeting"
+    return f"{_business_name(client)} {noun} - {_lead_display_name(lead)}"
 
 
 def _lead_display_name(lead: Lead) -> str:
@@ -771,9 +823,28 @@ def _zapier_mapping_hints() -> dict[str, Any]:
     }
 
 
-def _local_date_label(value: datetime | None) -> str | None:
+_FR_WEEKDAYS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+_FR_MONTHS = [
+    "janvier",
+    "février",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "août",
+    "septembre",
+    "octobre",
+    "novembre",
+    "décembre",
+]
+
+
+def _local_date_label(value: datetime | None, *, language: str = "en") -> str | None:
     if value is None:
         return None
+    if normalize_language(language) == "fr":
+        return f"{_FR_WEEKDAYS[value.weekday()]} {value.day} {_FR_MONTHS[value.month - 1]} {value.year}"
     return f"{value.strftime('%A, %B')} {value.day}, {value.year}"
 
 
@@ -782,21 +853,29 @@ def _local_time_range_label(
     start_local: datetime | None,
     end_local: datetime | None,
     timezone_name: str,
+    language: str = "en",
 ) -> str | None:
     if start_local is None:
         return None
-    date_label = _local_date_label(start_local)
-    start_label = _clock_label(start_local)
-    end_label = _clock_label(end_local)
+    language = normalize_language(language)
+    date_label = _local_date_label(start_local, language=language)
+    start_label = _clock_label(start_local, language=language)
+    end_label = _clock_label(end_local, language=language)
     tz_label = start_local.tzname() or timezone_name
     if end_label:
+        if language == "fr":
+            return f"{date_label} de {start_label} à {end_label} {tz_label}"
         return f"{date_label} from {start_label} to {end_label} {tz_label}"
+    if language == "fr":
+        return f"{date_label} à {start_label} {tz_label}"
     return f"{date_label} at {start_label} {tz_label}"
 
 
-def _clock_label(value: datetime | None) -> str | None:
+def _clock_label(value: datetime | None, *, language: str = "en") -> str | None:
     if value is None:
         return None
+    if normalize_language(language) == "fr":
+        return f"{value.hour} h {value.minute:02d}"
     return value.strftime("%I:%M %p").lstrip("0")
 
 

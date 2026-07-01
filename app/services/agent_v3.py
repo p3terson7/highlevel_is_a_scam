@@ -282,7 +282,7 @@ class LLMAgentV3:
                             decision.next_state = ConversationStateEnum.QUALIFYING
                     decision.tool_call = ToolCall()
                     if not decision.reply_text or "booked" in decision.reply_text.lower():
-                        decision.reply_text = "I can lock that in once you pick one of the offered times."
+                        decision.reply_text = _localized_agent_reply("pick_slot_first", context)
                     return _finalize_response_with_context(decision, context)
 
             tool_result = self._execute_tool(
@@ -328,6 +328,7 @@ class LLMAgentV3:
             "- answered_missing_field_keys were already asked and answered; do not ask those same missing-field questions again.\n"
             "- Use conversation_context.response_language for the reply language. "
             f"{language_instruction(workspace_language)}\n"
+            "- If response_language is fr, every lead-facing word must be French. Do not use English weekday/month abbreviations, AM/PM, 'Reply with', 'Times shown', or 'If none of those work'. Format times like 'mercredi 24 juin à 10 h 00'.\n"
             f"- On the first outbound SMS in English, start with: \"Hi {{first_name}}, I'm {_ASSISTANT_NAME}, the assistant for {{business_name}}.\" "
             f"In French, start with: \"Bonjour {{first_name}}, ici {_ASSISTANT_NAME}, l'assistante de {{business_name}}.\" "
             "Then acknowledge the inquiry and help toward an answer or booking.\n"
@@ -394,6 +395,7 @@ class LLMAgentV3:
             "Rules:\n"
             f"- You are {_ASSISTANT_NAME}, the assistant for the business. Never write as the founder, owner, or a human employee.\n"
             f"- Use conversation_context.response_language for the reply language. {language_instruction(workspace_language)}\n"
+            "- If response_language is fr, every lead-facing word must be French. Do not use English weekday/month abbreviations, AM/PM, 'Reply with', 'Times shown', or 'If none of those work'. Format times like 'mercredi 24 juin à 10 h 00'.\n"
             "- Use the tool_result as the source of truth.\n"
             "- Use conversation_context.business_profile_context as always-on website-derived business memory when wording the final answer.\n"
             "- Never invent availability or claim a slot is unavailable unless tool_result.match_mode says the request could not be matched exactly.\n"
@@ -595,7 +597,7 @@ class LLMAgentV3:
             )
         )
         if current_state == ConversationStateEnum.BOOKED.value and bool(context.get("closing_only")):
-            decision.reply_text = decision.reply_text or "Perfect. See you then."
+            decision.reply_text = decision.reply_text or _localized_agent_reply("booked_closing", context)
             decision.next_state = ConversationStateEnum.BOOKED
             decision.action = "none"
             decision.next_question_key = None
@@ -622,7 +624,7 @@ class LLMAgentV3:
             decision.action = "mark_booked"
             decision.next_state = ConversationStateEnum.BOOKED
             decision.next_question_key = None
-            decision.reply_text = decision.reply_text or "Perfect. You're booked."
+            decision.reply_text = decision.reply_text or _localized_agent_reply("booked", context)
             return _finalize_response_with_context(decision, context)
 
         if bool(context.get("handoff_intent")) and decision.tool_call.name == "none":
@@ -662,7 +664,7 @@ class LLMAgentV3:
                 else:
                     decision.next_state = ConversationStateEnum.QUALIFYING
                 if not decision.reply_text or "booked" in decision.reply_text.lower():
-                    decision.reply_text = "I can lock that in once you pick one of the offered times."
+                    decision.reply_text = _localized_agent_reply("pick_slot_first", context)
 
         cta_state = context.get("cta_state") if isinstance(context.get("cta_state"), dict) else {}
         planned_act = str(decision.conversation_act or "answer_question")
@@ -845,7 +847,7 @@ class LLMAgentV3:
             decision.next_state = ConversationStateEnum.BOOKING_SENT
             decision.next_question_key = None
             if not decision.reply_text:
-                decision.reply_text = "I can share a few times that work."
+                decision.reply_text = _localized_agent_reply("share_times", context)
 
         if decision.tool_call.name != "none":
             decision.next_question_key = None
@@ -881,7 +883,7 @@ class LLMAgentV3:
                     asked_question_keys=[*context.get("asked_question_keys", []), decision.next_question_key],
                 )
             if decision.next_question_key and (decision.reply_text.count("?") == 0 or decision.next_question_key != original_key):
-                question = _QUESTION_SPEC_BY_KEY[decision.next_question_key].question
+                question = _question_text_for_language(decision.next_question_key, str(context.get("response_language") or "en"))
                 if decision.reply_text.count("?") > 0:
                     decision.reply_text = _replace_question(decision.reply_text, question)
                 else:
@@ -904,9 +906,9 @@ class LLMAgentV3:
             last_outbound_text = _latest_outbound_text(context.get("recent_messages"))
             if last_outbound_text and _normalize_text(last_outbound_text) == _normalize_text(decision.reply_text):
                 if decision.action == "ask_next_question" and decision.next_question_key in _QUESTION_SPEC_BY_KEY:
-                    decision.reply_text = _QUESTION_SPEC_BY_KEY[decision.next_question_key].question
+                    decision.reply_text = _question_text_for_language(decision.next_question_key, str(context.get("response_language") or "en"))
                 elif current_state == ConversationStateEnum.BOOKED.value:
-                    decision.reply_text = "You're all set. Text me here anytime if something changes before the meeting."
+                    decision.reply_text = _localized_agent_reply("booked_followup", context)
                 else:
                     decision.reply_text = _non_booking_bridge_reply(context)
 
@@ -951,16 +953,16 @@ class LLMAgentV3:
         kind = str(tool_result.get("kind") or "none")
         runtime_payload = dict(tool_result.get("runtime_payload") or {})
         current_state = str(context.get("current_state") or "").upper()
-        reply_text = str(tool_result.get("reply_hint") or tool_result.get("fallback_reply") or decision.reply_text or "Understood.").strip()
+        reply_text = str(tool_result.get("reply_hint") or tool_result.get("fallback_reply") or decision.reply_text or _localized_agent_reply("understood", context)).strip()
         next_state = ConversationStateEnum.BOOKING_SENT if kind in {"slots", "no_slots"} else decision.next_state
         action: ActionType = "none"
 
         if kind == "booked":
-            reply_text = str(tool_result.get("fallback_reply") or "Perfect. You're booked.").strip()
+            reply_text = str(tool_result.get("fallback_reply") or _localized_agent_reply("booked", context)).strip()
             next_state = ConversationStateEnum.BOOKED
             action = "mark_booked"
         elif kind == "handoff":
-            reply_text = str(tool_result.get("fallback_reply") or "Understood. I’ll have someone reach out.").strip()
+            reply_text = str(tool_result.get("fallback_reply") or _localized_agent_reply("handoff", context)).strip()
             next_state = ConversationStateEnum.HANDOFF
             action = "handoff_to_human"
         elif kind in {"slots", "no_slots"}:
@@ -1012,7 +1014,7 @@ class LLMAgentV3:
             final.runtime_payload["flow_state"] = "CONFIRMED"
         final.collected_fields = _merge_memory(decision.collected_fields, final.collected_fields)
         if not final.reply_text:
-            final.reply_text = str(tool_result.get("fallback_reply") or decision.reply_text or "Understood.")
+            final.reply_text = str(tool_result.get("fallback_reply") or decision.reply_text or _localized_agent_reply("understood", context))
         if tool_result.get("kind") == "slots":
             # The structured offer must exactly match the times the lead sees.
             final.reply_text = str(tool_result.get("fallback_reply") or final.reply_text)
@@ -1203,13 +1205,7 @@ class LLMAgentV3:
             asked_question_keys=context.get("asked_question_keys", []),
         )
         if next_key:
-            if str(context.get("response_language") or "en") == "fr":
-                reply = {
-                    "decision_makers": "Êtes-vous la personne qui prend la décision, et est-ce que quelqu'un d'autre devrait participer à l'appel?",
-                    "urgency_driver": "Y a-t-il une échéance ou une date importante derrière cette demande?",
-                }.get(next_key, _QUESTION_SPEC_BY_KEY[next_key].question)
-            else:
-                reply = _QUESTION_SPEC_BY_KEY[next_key].question
+            reply = _question_text_for_language(next_key, str(context.get("response_language") or "en"))
             return _finalize_response_with_context(
                 AgentResponse(
                     reply_text=reply,

@@ -450,6 +450,13 @@ def ui_client_automation_health(
             detail="Starts conversations from new lead forms.",
         ),
         row(
+            "sms_delivery",
+            "SMS delivery",
+            {"sms_delivery_updated", "sms_delivery_failed"},
+            configured=runtime["twilio_configured"],
+            detail="Tracks Twilio delivery callbacks and flags failed or undelivered SMS.",
+        ),
+        row(
             "ai_replies",
             "AI replies",
             {"agent_decision", "agent_provider_fallback", "agent_empty_reply_fallback", "agent_reply_suppressed"},

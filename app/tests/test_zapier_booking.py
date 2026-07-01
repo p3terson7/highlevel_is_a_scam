@@ -129,6 +129,70 @@ def test_manual_calendar_booking_posts_configured_zapier_payload(test_context, m
         )
 
 
+def test_manual_calendar_booking_payload_respects_french_workspace_language(test_context, monkeypatch):
+    webhook_url = "https://hooks.zapier.com/hooks/catch/test/booking-fr/"
+    captured: dict = {}
+    session_factory = get_session_factory()
+
+    with session_factory() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.provider_config = {"zapier_booking_webhook_url": webhook_url, "language": "fr"}
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="zapier-lead-fr-1",
+            source=LeadSource.META,
+            full_name="Camille Tremblay",
+            phone="+15145550123",
+            email="camille@example.com",
+            city="Montréal",
+            form_answers={"objectif": "Réserver une consultation"},
+            raw_payload={"source": "test"},
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.QUALIFYING,
+            crm_stage="Qualified",
+        )
+        db.add(lead)
+        db.commit()
+        lead_id = lead.id
+
+    def fake_post_json(*, url: str, payload: dict, timeout_seconds: int) -> httpx.Response:
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["timeout_seconds"] = timeout_seconds
+        return httpx.Response(200, json={"ok": True}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(zapier_booking, "_post_json", fake_post_json)
+
+    response = test_context.client.post(
+        f"/ui/api/clients/{test_context.client_key}/calendar/meetings",
+        headers=_admin_headers(),
+        json={
+            "lead_id": lead_id,
+            "start_at": "2026-06-15T10:30",
+            "duration_minutes": 45,
+            "timezone": "America/Toronto",
+            "title": "Appel stratégique",
+            "notes": "Valider les prochaines étapes.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = captured["payload"]
+    assert payload["meeting"]["title"] == "Acme Solar rencontre - Camille Tremblay"
+    assert payload["meeting"]["time_range_label"] == "lundi 15 juin 2026 de 10 h 30 à 11 h 15 EDT"
+    assert payload["calendar_event"]["location"] == "Appel de consultation"
+    assert "RENCONTRE" in payload["calendar_event"]["description"]
+    assert "Quand: lundi 15 juin 2026 de 10 h 30 à 11 h 15 EDT" in payload["calendar_event"]["description"]
+    assert "RÉPONSES DU FORMULAIRE" in payload["calendar_event"]["description"]
+    assert "Meeting confirmed" not in payload["email_confirmation"]["body_html"]
+    assert "Rencontre confirmée" in payload["email_confirmation"]["body_html"]
+    assert payload["email_confirmation"]["subject"] == "Acme Solar: rencontre confirmée avec Camille Tremblay"
+    assert "Votre rencontre avec Acme Solar est réservée." in payload["email_confirmation"]["body_text"]
+    assert "When:" not in payload["email_confirmation"]["body_text"]
+
+
 def test_zapier_booking_webhook_skips_clients_without_url(test_context, monkeypatch):
     calls = 0
     session_factory = get_session_factory()

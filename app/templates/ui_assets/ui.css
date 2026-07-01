@@ -3616,6 +3616,74 @@
         color: rgba(236, 244, 255, 0.94);
       }
 
+      .message-delivery-status {
+        display: flex;
+        align-items: flex-start;
+        gap: 7px;
+        margin-top: 8px;
+        padding: 7px 9px;
+        border: 1px solid currentColor;
+        border-radius: 12px;
+        background: rgba(2, 8, 18, 0.16);
+        color: rgba(236, 244, 255, 0.92);
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1.35;
+      }
+
+      .message-delivery-status small {
+        display: block;
+        margin-top: 2px;
+        color: currentColor;
+        font-weight: 500;
+        opacity: 0.86;
+      }
+
+      .message-delivery-status.compact {
+        display: inline-flex;
+        margin: 0;
+        min-height: 22px;
+        padding: 0 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        line-height: 20px;
+        white-space: nowrap;
+      }
+
+      .message-delivery-status.info {
+        color: #cfe8ff;
+        background: rgba(255, 255, 255, 0.13);
+        border-color: rgba(207, 232, 255, 0.32);
+      }
+
+      .message-delivery-status.ok {
+        color: #d9ffe7;
+        background: rgba(36, 214, 126, 0.13);
+        border-color: rgba(217, 255, 231, 0.32);
+      }
+
+      .message-delivery-status.warn {
+        color: #fff2ce;
+        background: rgba(255, 180, 45, 0.18);
+        border-color: rgba(255, 242, 206, 0.44);
+      }
+
+      .delivery-dot {
+        flex: 0 0 auto;
+        width: 7px;
+        height: 7px;
+        margin-top: 4px;
+        border-radius: 999px;
+        background: currentColor;
+        box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+      }
+
+      .message-delivery-status.compact .delivery-dot {
+        margin-top: 0;
+        width: 6px;
+        height: 6px;
+      }
+
       .timeline-event {
         align-self: center;
         max-width: 84%;

@@ -11,6 +11,7 @@ from app.db.models import Base, Client, ConversationStateEnum
 from app.db.session import get_engine, get_session_factory, reset_db_caches
 from app.services.booking import BookingSelectionResult, BookingSlot, SlotOffer
 from app.services.llm_agent import AgentResponse
+from app.services.sms_delivery import with_initial_delivery_status
 
 
 class FakeSMSService:
@@ -38,6 +39,14 @@ class FakeSMSService:
         sid = f"SM{len(self.sent) + 1:06d}"
         self.sent.append({"to": to_number, "body": body, "sid": sid, "media_urls": media_urls or []})
         return sid
+
+    def with_delivery_status(self, raw_payload: dict | None, provider_sid: str) -> dict:
+        return with_initial_delivery_status(
+            raw_payload,
+            provider_sid=provider_sid,
+            provider="mock",
+            callback_url="",
+        )
 
 
 class FakeLLMAgent:

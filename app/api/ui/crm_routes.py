@@ -113,6 +113,7 @@ def ui_crm_leads(
                 "agent_control": get_agent_control(lead),
                 "last_message_snippet": _snippet(_message_preview_text(latest_message)),
                 "last_message_direction": latest_message.direction.value if latest_message else "",
+                "last_message_delivery": delivery_status_for_message(latest_message) if latest_message else None,
                 "lead_summary": summary,
                 "last_activity_at": last_activity_at.isoformat(),
                 "created_at": lead.created_at.isoformat(),
@@ -359,6 +360,7 @@ def ui_crm_lead_detail(
                 "body": msg.body,
                 "provider_message_sid": msg.provider_message_sid,
                 "attachments": attachments_by_message.get(msg.id, []),
+                "delivery": delivery_status_for_message(msg),
                 "created_at": msg.created_at.isoformat(),
             }
             for msg in messages

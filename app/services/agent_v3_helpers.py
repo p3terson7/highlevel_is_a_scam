@@ -231,6 +231,99 @@ def _ensure_slot_fallback_line(text: str, *, language: str = "en") -> str:
     return f"{clean} {fallback}"
 
 
+_FR_MONTH_ABBR = {
+    "jan": "janvier",
+    "feb": "février",
+    "mar": "mars",
+    "apr": "avril",
+    "may": "mai",
+    "jun": "juin",
+    "jul": "juillet",
+    "aug": "août",
+    "sep": "septembre",
+    "oct": "octobre",
+    "nov": "novembre",
+    "dec": "décembre",
+}
+_FR_WEEKDAY_ABBR = {
+    "mon": "lundi",
+    "tue": "mardi",
+    "wed": "mercredi",
+    "thu": "jeudi",
+    "fri": "vendredi",
+    "sat": "samedi",
+    "sun": "dimanche",
+}
+_QUESTION_TEXT_FR = {
+    "decision_makers": "Êtes-vous la personne qui prend la décision, et est-ce que quelqu'un d'autre devrait participer à l'appel?",
+    "urgency_driver": "Y a-t-il une échéance ou une date importante derrière cette demande?",
+}
+_GENERIC_MISSING_QUESTION_FR = {
+    "desired_outcome": "À quoi ressemblerait un bon résultat pour vous?",
+    "request_type": "Quel type d'aide recherchez-vous?",
+    "timeline": "Idéalement, quand aimeriez-vous commencer ou régler ça?",
+    "decision_process": "Êtes-vous la bonne personne pour coordonner la suite, ou faut-il inclure quelqu'un d'autre?",
+    "follow_up_contact": "Quel est le meilleur courriel ou moyen de contact si l'équipe doit envoyer des détails?",
+}
+_LOCALIZED_AGENT_REPLIES = {
+    "pick_slot_first": {
+        "en": "I can lock that in once you pick one of the offered times.",
+        "fr": "Je peux le réserver dès que vous choisissez un des créneaux proposés.",
+    },
+    "booked": {
+        "en": "Perfect. You're booked.",
+        "fr": "Parfait. Votre appel est réservé.",
+    },
+    "booked_closing": {
+        "en": "Perfect. See you then.",
+        "fr": "Parfait. À bientôt pour l'appel.",
+    },
+    "booked_followup": {
+        "en": "You're all set. Text me here anytime if something changes before the meeting.",
+        "fr": "C'est tout bon. Répondez ici si quelque chose change avant l'appel.",
+    },
+    "share_times": {
+        "en": "I can share a few times that work.",
+        "fr": "Je peux vous envoyer quelques créneaux disponibles.",
+    },
+    "understood": {
+        "en": "Understood.",
+        "fr": "Compris.",
+    },
+    "handoff": {
+        "en": "Understood. I'll have someone reach out.",
+        "fr": "Compris. Je vais demander à quelqu'un de vous contacter.",
+    },
+}
+
+
+def _question_text_for_language(key: str | None, language: str) -> str:
+    key = str(key or "")
+    language = normalize_language(language)
+    if language == "fr" and key in _QUESTION_TEXT_FR:
+        return _QUESTION_TEXT_FR[key]
+    spec = _QUESTION_SPEC_BY_KEY.get(key)
+    return spec.question if spec else ""
+
+
+def _missing_field_question_for_language(field: dict[str, Any], language: str) -> str:
+    key = str(field.get("key") or "")
+    language = normalize_language(language)
+    if language == "fr" and key in _GENERIC_MISSING_QUESTION_FR:
+        return _GENERIC_MISSING_QUESTION_FR[key]
+    return str(field.get("question") or "")
+
+
+def _localized_agent_reply(key: str, context_or_language: dict[str, Any] | str | None = None) -> str:
+    if isinstance(context_or_language, dict):
+        language = str(context_or_language.get("response_language") or "en")
+    else:
+        language = str(context_or_language or "en")
+    language = normalize_language(language)
+    options = _LOCALIZED_AGENT_REPLIES.get(key, _LOCALIZED_AGENT_REPLIES["understood"])
+    return options.get(language) or options["en"]
+
+
 def _should_check_fresh_slots(preferences: dict[str, str]) -> bool:
     return any(
         bool(preferences.get(key))
@@ -819,7 +912,7 @@ def _non_booking_bridge_reply(context: dict[str, Any]) -> str:
             return "Pas de problème. Je peux vous aider à vous faire une idée générale d'abord. Cherchez-vous surtout à comprendre le processus, les délais ou l'adéquation?"
         missing = context.get("recommended_missing_field")
         if isinstance(missing, dict) and missing.get("question"):
-            return str(missing["question"])
+            return _missing_field_question_for_language(missing, language)
         return "Ça fait du sens. Qu'est-ce qui serait le plus utile à clarifier en premier?"
     if context.get("call_refusal") or (context.get("cta_state") or {}).get("meeting_rejected"):
         return "No problem. I can keep helping here instead. What would you like to understand next?"
@@ -837,7 +930,7 @@ def _non_booking_bridge_reply(context: dict[str, Any]) -> str:
         return "No problem. I can help you get a general idea first. Are you mostly trying to understand process, timeline, or fit?"
     missing = context.get("recommended_missing_field")
     if isinstance(missing, dict) and missing.get("question"):
-        return str(missing["question"])
+        return _missing_field_question_for_language(missing, language)
     return "That makes sense. What would be most helpful to clarify first?"
 
 
@@ -850,7 +943,103 @@ def _apply_response_guardrails(text: str, context: dict[str, Any]) -> str:
     clean = _remove_redundant_acknowledged_fact_clauses(clean, context)
     clean = _remove_disallowed_pricing_language(clean, context)
     clean = _ensure_initial_intro(clean, context)
+    clean = _enforce_response_language(clean, context)
     return clean
+
+
+def _enforce_response_language(text: str, context: dict[str, Any]) -> str:
+    language = normalize_language(str(context.get("response_language") or "en"))
+    if language != "fr":
+        return text
+    clean = _replace_common_english_booking_copy(text)
+    clean = _localize_english_slot_dates(clean)
+    clean = _localize_english_clock_times(clean)
+    clean = re.sub(r"\bconsultation call\b", "appel de consultation", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bstrategy call\b", "appel de consultation", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bthe team\b", "l'équipe", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+([,.!?])", r"\1", clean)
+    return re.sub(r"\s{2,}", " ", clean).strip()
+
+
+def _replace_common_english_booking_copy(text: str) -> str:
+    clean = str(text or "")
+    clean = re.sub(
+        r"\bIf none of those work, just send me a time that's better for you\.?",
+        "Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux.",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bTimes shown in ([A-Z]{2,5})\.?",
+        r"Heures affichées en \1.",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bReply with ([^.;]+?) to book the call, or send the exact time you want\.?",
+        r"Répondez \1 pour réserver l'appel, ou envoyez l'heure exacte souhaitée.",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bReply with ([^.;]+?) and I(?:'|’)ll lock it in\.?",
+        r"Répondez \1 et je le réserve.",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bI can lock that in once you pick one of the offered times\.?",
+        _LOCALIZED_AGENT_REPLIES["pick_slot_first"]["fr"],
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(
+        r"\bPerfect\. You(?:'|’)re booked\.?",
+        _LOCALIZED_AGENT_REPLIES["booked"]["fr"],
+        clean,
+        flags=re.IGNORECASE,
+    )
+    return clean
+
+
+def _localize_english_slot_dates(text: str) -> str:
+    pattern = re.compile(
+        r"\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+"
+        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+        r"(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b",
+        re.IGNORECASE,
+    )
+
+    def repl(match: re.Match[str]) -> str:
+        day = _FR_WEEKDAY_ABBR.get(match.group(1).lower()[:3], match.group(1))
+        month = _FR_MONTH_ABBR.get(match.group(2).lower()[:3], match.group(2))
+        day_number = int(match.group(3))
+        hour = int(match.group(4))
+        minute = int(match.group(5) or "0")
+        meridiem = match.group(6).lower()
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        if meridiem == "am" and hour == 12:
+            hour = 0
+        return f"{day} {day_number} {month} à {hour} h {minute:02d}"
+
+    return pattern.sub(repl, text)
+
+
+def _localize_english_clock_times(text: str) -> str:
+    pattern = re.compile(r"\b(\d{1,2})(?::(\d{2}))\s*(AM|PM)\b", re.IGNORECASE)
+
+    def repl(match: re.Match[str]) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2) or "0")
+        meridiem = match.group(3).lower()
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        if meridiem == "am" and hour == 12:
+            hour = 0
+        return f"{hour} h {minute:02d}"
+
+    return pattern.sub(repl, text)
 
 
 def _remove_disallowed_pricing_language(text: str, context: dict[str, Any]) -> str:

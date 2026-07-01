@@ -33,7 +33,7 @@ from app.services.lead_intake import normalize_webhook_payload, upsert_lead
 from app.services.lead_summary import build_lead_summary_text, normalize_form_answers
 from app.services.llm_agent import build_llm_agent
 from app.services.runtime_config import get_effective_runtime_map_for_client, load_runtime_overrides
-from app.services.sms_service import build_sms_service
+from app.services.sms_service import SMSService, build_sms_service
 
 logger = get_logger(__name__)
 
@@ -298,7 +298,11 @@ def _record_outbound(
     body: str,
     provider_sid: str,
     raw_payload: dict[str, Any] | None = None,
+    sms_service: SMSService | None = None,
 ) -> None:
+    payload = raw_payload or {}
+    if sms_service is not None:
+        payload = sms_service.with_delivery_status(payload, provider_sid)
     db.add(
         Message(
             lead_id=lead.id,
@@ -306,7 +310,7 @@ def _record_outbound(
             direction=MessageDirection.OUTBOUND,
             body=body,
             provider_message_sid=provider_sid,
-            raw_payload=raw_payload or {},
+            raw_payload=payload,
         )
     )
 
@@ -455,7 +459,14 @@ def send_initial_sms_task(lead_id: int) -> dict[str, Any]:
                 enqueue_followup = True
 
             provider_sid = sms_service.send_message(to_number=lead.phone, body=body)
-            _record_outbound(db, lead=lead, body=body, provider_sid=provider_sid, raw_payload=outbound_payload)
+            _record_outbound(
+                db,
+                lead=lead,
+                body=body,
+                provider_sid=provider_sid,
+                raw_payload=outbound_payload,
+                sms_service=sms_service,
+            )
 
             now = datetime.now(timezone.utc)
             previous_state = lead.conversation_state
@@ -547,7 +558,14 @@ def send_followup_sms_task(lead_id: int, reason: str = "after_hours_followup") -
                 context={"booking_url": client.booking_url, "business_name": client.business_name},
             )
             provider_sid = sms_service.send_message(to_number=lead.phone, body=body)
-            _record_outbound(db, lead=lead, body=body, provider_sid=provider_sid, raw_payload={"reason": reason})
+            _record_outbound(
+                db,
+                lead=lead,
+                body=body,
+                provider_sid=provider_sid,
+                raw_payload={"reason": reason},
+                sms_service=sms_service,
+            )
             lead.last_outbound_at = datetime.now(timezone.utc)
             previous_crm_stage = lead.crm_stage
             lead.crm_stage = progress_crm_stage(lead.crm_stage, CRM_STAGE_CONTACTED)
