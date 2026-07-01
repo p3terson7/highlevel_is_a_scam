@@ -303,6 +303,29 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
     return candidates
 
 
+def normalize_simple_payload(payload: dict[str, Any]) -> list[NormalizedLead]:
+    lead_data = payload.get("lead") if isinstance(payload.get("lead"), dict) else payload
+    if not isinstance(lead_data, dict):
+        return []
+    answers = lead_data.get("form_answers", lead_data)
+    if not isinstance(answers, dict):
+        answers = {}
+    answers = normalize_form_answers(answers)
+    name, phone, email, city = _extract_common_fields(answers)
+    return [
+        NormalizedLead(
+            external_lead_id=str(lead_data.get("id") or payload.get("lead_id") or "") or None,
+            full_name=name,
+            phone=phone,
+            email=email,
+            city=city,
+            form_answers=answers,
+            raw_payload=lead_data,
+            consented=True,
+        )
+    ]
+
+
 def normalize_webhook_payload(
     source: str,
     payload: dict[str, Any],
@@ -322,6 +345,8 @@ def normalize_webhook_payload(
         )
     if source == LeadSource.LINKEDIN.value:
         return normalize_linkedin_payload(payload, client)
+    if source == LeadSource.MANUAL.value:
+        return normalize_simple_payload(payload)
     return []
 
 

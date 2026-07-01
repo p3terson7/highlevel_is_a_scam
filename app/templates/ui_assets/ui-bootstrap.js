@@ -3,7 +3,6 @@
         await loadRuntime();
         if (isClientRole()) {
           state.selectedClientKey = state.session.client_key || "";
-          state.activeView = "dashboard";
           state.globalSearch = "";
           state.activeLeadId = null;
           state.activeCrmLeadId = null;
@@ -23,7 +22,6 @@
             clientKey: state.selectedClientKey,
             status: "all",
           };
-          window.location.hash = "dashboard";
           saveLocalState();
           await Promise.all([loadConversations(), loadCrmLeads(), loadCalendar(), loadCrmTasks(), loadDashboard()]);
           await Promise.all([loadClients(), loadOwnerWorkspace(state.selectedClientKey), loadAutomationHealth(state.selectedClientKey)]);
@@ -434,6 +432,7 @@
           }
         });
         window.addEventListener("hashchange", routeFromHash);
+        window.addEventListener("popstate", routeFromHash);
         window.addEventListener("resize", () => {
           applyPaneSizes();
           updateConversationMobileLayout();

@@ -4,12 +4,14 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import HTMLResponse
 
 from app.api.routes_health import router as health_router
 from app.api.routes_sms import router as sms_router
 from app.api.routes_ui import router as ui_router
 from app.api.routes_webhooks import router as webhook_router
+from app.api.ui.shell import ui_shell_response
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger, reset_request_id, set_request_id
 from app.core.metrics import incr
@@ -35,6 +37,18 @@ app.include_router(webhook_router)
 app.include_router(sms_router)
 app.include_router(ui_router)
 
+_NON_UI_ROUTE_PREFIXES = {
+    "admin",
+    "api",
+    "docs",
+    "health",
+    "metrics",
+    "openapi.json",
+    "redoc",
+    "sms",
+    "webhooks",
+}
+
 
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
@@ -58,6 +72,26 @@ async def request_context_middleware(request: Request, call_next):
     return response
 
 
-@app.get("/")
-def root() -> dict[str, str]:
-    return {"service": settings.app_name, "status": "running"}
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def root() -> HTMLResponse:
+    return ui_shell_response()
+
+
+def _should_serve_ui_fallback(path: str, request: Request) -> bool:
+    normalized = path.strip("/")
+    if not normalized:
+        return True
+    if normalized.startswith(("ui/api", "ui/assets")):
+        return False
+    first_segment = normalized.split("/", 1)[0]
+    if first_segment in _NON_UI_ROUTE_PREFIXES:
+        return False
+    accept_header = request.headers.get("accept", "")
+    return not accept_header or "text/html" in accept_header or "*/*" in accept_header
+
+
+@app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
+def ui_fallback(path: str, request: Request) -> HTMLResponse:
+    if _should_serve_ui_fallback(path, request):
+        return ui_shell_response()
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")

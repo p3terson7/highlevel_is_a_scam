@@ -43,11 +43,7 @@
           const cards = leads.length
             ? leads.map((item) => {
                 const visibleTags = uniqueStatusTags(item.tags || [], [item.crm_stage, item.conversation_state], 2);
-                const scoreLabel = formatScoreLabel(item.lead_score);
-                const valueLabel = formatCompactCurrency(item.estimated_value);
                 const signalBadges = [
-                  scoreLabel ? renderBadge(`Score ${scoreLabel}`, Number(item.lead_score) >= 80 ? "ok" : Number(item.lead_score) >= 55 ? "info" : "warn") : "",
-                  valueLabel ? renderBadge(valueLabel, "info") : "",
                   renderMessageDeliveryStatus(item.last_message_delivery, { compact: true, onlyWarnings: true }),
                 ].filter(Boolean).join("");
                 const nextTask = item.next_task_title

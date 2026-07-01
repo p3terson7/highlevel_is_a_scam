@@ -1,6 +1,6 @@
 from sqlalchemy import select
 
-from app.db.models import AuditLog, Lead, Message, MessageDirection
+from app.db.models import AuditLog, Lead, LeadSource, Message, MessageDirection
 from app.db.session import get_session_factory
 
 
@@ -232,6 +232,58 @@ def test_zapier_webhook_parses_blob_payload_into_context_fields(test_context):
             "answer": "Software & Technology",
         } in lead.raw_payload["submitted_form_answers"]
         assert lead.crm_stage == "Contacted"
+
+
+def test_website_form_webhook_uses_linkedin_utm_as_source(test_context):
+    payload = {
+        "source_page_url": "https://3dpreciscan.com/soumission?utm_source=linkedin&utm_medium=paid_social",
+        "referrer": "https://www.linkedin.com/",
+        "lead": {
+            "full_name": "LinkedIn Website Lead",
+            "phone": "+1 (555) 333-4444",
+            "email": "linkedin.website@example.com",
+        },
+        "form_answers": {
+            "type_client": "Company",
+            "service_interest": "Scan 3D",
+            "timeline": "2 semaines",
+            "message": "Besoin d'une soumission pour une pièce industrielle.",
+        },
+        "tracking": {
+            "utm_source": "linkedin",
+            "utm_medium": "paid_social",
+            "utm_campaign": "scan-3d-linkedin",
+            "utm_content": "soumission-button",
+        },
+    }
+
+    response = test_context.client.post(f"/webhooks/form/{test_context.client_key}", json=payload)
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    assert response.json()["source"] == "linkedin"
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.scalar(
+            select(Lead).where(Lead.email == "linkedin.website@example.com", Lead.client_id == 1)
+        )
+        assert lead is not None
+        assert lead.source == LeadSource.LINKEDIN
+        assert lead.phone == "+15553334444"
+        assert lead.form_answers["utm_source"] == "linkedin"
+        assert lead.form_answers["utm_campaign"] == "scan-3d-linkedin"
+        assert lead.form_answers["service_interest"] == "Scan 3D"
+        assert lead.crm_stage == "Contacted"
+
+        webhook_log = db.scalar(
+            select(AuditLog).where(
+                AuditLog.client_id == 1,
+                AuditLog.event_type == "website_form_webhook_received",
+            )
+        )
+        assert webhook_log is not None
+        assert webhook_log.decision["queued_source"] == "linkedin"
 
         outbound_messages = db.scalars(
             select(Message).where(

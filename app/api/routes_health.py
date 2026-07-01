@@ -43,6 +43,7 @@ def _webhook_urls(client_key: str) -> dict[str, str]:
         "meta_verify": f"/webhooks/meta/{client_key}",
         "meta_events": f"/webhooks/meta/{client_key}",
         "zapier_events": f"/webhooks/zapier/{client_key}",
+        "website_form": f"/webhooks/form/{client_key}",
         "linkedin_events": f"/webhooks/linkedin/{client_key}",
         "twilio_sms": f"/sms/inbound/{client_key}",
     }
