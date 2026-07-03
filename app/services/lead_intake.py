@@ -10,9 +10,45 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.db.models import Client, Lead, LeadSource
-from app.services.lead_summary import normalize_form_answers
+from app.services.lead_summary import filter_question_form_answers, normalize_form_answers
 
 logger = get_logger(__name__)
+
+_IDENTITY_CONTEXT_KEYS = (
+    "id",
+    "lead_id",
+    "external_lead_id",
+    "leadgen_id",
+    "lead_gen_id",
+    "linkedin_lead_id",
+    "lead_gen_form_response_id",
+    "full_name",
+    "name",
+    "contact_name",
+    "first_name",
+    "last_name",
+    "phone",
+    "phone_number",
+    "mobile_phone",
+    "cell",
+    "mobile",
+    "email",
+    "email_address",
+    "city",
+    "location_city",
+    "location",
+)
+
+_EXTERNAL_ID_KEYS = (
+    "id",
+    "lead_id",
+    "external_lead_id",
+    "leadgen_id",
+    "lead_gen_id",
+    "linkedin_lead_id",
+    "lead_gen_form_response_id",
+    "lead_gen_form_response",
+)
 
 
 @dataclass
@@ -59,6 +95,29 @@ def _field_lookup(answers: dict[str, Any], keys: list[str]) -> str:
     return ""
 
 
+def _identity_context(form_answers: dict[str, Any], *payloads: Any) -> dict[str, Any]:
+    context = dict(form_answers)
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for key in _IDENTITY_CONTEXT_KEYS:
+            value = payload.get(key)
+            if value not in (None, ""):
+                context.setdefault(key, value)
+    return context
+
+
+def _extract_external_id(*payloads: Any) -> str | None:
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for key in _EXTERNAL_ID_KEYS:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value).strip() or None
+    return None
+
+
 def _extract_common_fields(form_answers: dict[str, Any]) -> tuple[str, str, str, str]:
     full_name = _field_lookup(
         form_answers,
@@ -69,6 +128,11 @@ def _extract_common_fields(form_answers: dict[str, Any]) -> tuple[str, str, str,
             "first_name",
         ],
     )
+    last_name = _field_lookup(form_answers, ["last_name"])
+    if full_name and last_name and last_name.lower() not in full_name.lower():
+        full_name = f"{full_name} {last_name}".strip()
+    elif not full_name and last_name:
+        full_name = last_name
     email = _field_lookup(form_answers, ["email", "email_address"])
     phone = normalize_phone(
         _field_lookup(
@@ -164,15 +228,16 @@ def normalize_meta_payload(
         if not isinstance(form_answers, dict):
             form_answers = {}
         form_answers = normalize_form_answers(form_answers)
-        name, phone, email, city = _extract_common_fields(form_answers)
+        identity = _identity_context(form_answers, lead_payload, payload)
+        name, phone, email, city = _extract_common_fields(identity)
         candidates.append(
             NormalizedLead(
-                external_lead_id=str(lead_payload.get("id") or payload.get("lead_id") or "") or None,
+                external_lead_id=_extract_external_id(lead_payload, payload, form_answers),
                 full_name=name,
                 phone=phone,
                 email=email,
                 city=city,
-                form_answers=form_answers,
+                form_answers=filter_question_form_answers(form_answers),
                 raw_payload=lead_payload,
                 consented=True,
             )
@@ -200,7 +265,8 @@ def normalize_meta_payload(
                 value = {**value, **fetched}
             form_answers = normalize_form_answers(form_answers)
 
-            name, phone, email, city = _extract_common_fields(form_answers)
+            identity = _identity_context(form_answers, value)
+            name, phone, email, city = _extract_common_fields(identity)
             candidates.append(
                 NormalizedLead(
                     external_lead_id=leadgen_id or None,
@@ -208,7 +274,7 @@ def normalize_meta_payload(
                     phone=phone,
                     email=email,
                     city=city,
-                    form_answers=form_answers,
+                    form_answers=filter_question_form_answers(form_answers),
                     raw_payload=value,
                     consented=True,
                 )
@@ -222,15 +288,16 @@ def normalize_meta_payload(
             if not isinstance(form_answers, dict):
                 form_answers = {}
             form_answers = normalize_form_answers(form_answers)
-            name, phone, email, city = _extract_common_fields(form_answers)
+            identity = _identity_context(form_answers, item)
+            name, phone, email, city = _extract_common_fields(identity)
             candidates.append(
                 NormalizedLead(
-                    external_lead_id=str(item.get("id") or item.get("lead_id") or "") or None,
+                    external_lead_id=_extract_external_id(item, form_answers),
                     full_name=name,
                     phone=phone,
                     email=email,
                     city=city,
-                    form_answers=form_answers,
+                    form_answers=filter_question_form_answers(form_answers),
                     raw_payload=item,
                     consented=True,
                 )
@@ -266,15 +333,16 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
             answers = {}
         answers = normalize_form_answers(answers)
 
-        name, phone, email, city = _extract_common_fields(answers)
+        identity = _identity_context(answers, lead_data, element)
+        name, phone, email, city = _extract_common_fields(identity)
         candidates.append(
             NormalizedLead(
-                external_lead_id=lead_id or None,
+                external_lead_id=lead_id or _extract_external_id(lead_data, answers),
                 full_name=name,
                 phone=phone,
                 email=email,
                 city=city,
-                form_answers=answers,
+                form_answers=filter_question_form_answers(answers),
                 raw_payload=element,
                 consented=True,
             )
@@ -286,15 +354,16 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
         if not isinstance(answers, dict):
             answers = {}
         answers = normalize_form_answers(answers)
-        name, phone, email, city = _extract_common_fields(answers)
+        identity = _identity_context(answers, lead_data, payload)
+        name, phone, email, city = _extract_common_fields(identity)
         candidates.append(
             NormalizedLead(
-                external_lead_id=str(lead_data.get("id") or payload.get("lead_id") or "") or None,
+                external_lead_id=_extract_external_id(lead_data, payload, answers),
                 full_name=name,
                 phone=phone,
                 email=email,
                 city=city,
-                form_answers=answers,
+                form_answers=filter_question_form_answers(answers),
                 raw_payload=lead_data,
                 consented=True,
             )
@@ -311,15 +380,16 @@ def normalize_simple_payload(payload: dict[str, Any]) -> list[NormalizedLead]:
     if not isinstance(answers, dict):
         answers = {}
     answers = normalize_form_answers(answers)
-    name, phone, email, city = _extract_common_fields(answers)
+    identity = _identity_context(answers, lead_data, payload)
+    name, phone, email, city = _extract_common_fields(identity)
     return [
         NormalizedLead(
-            external_lead_id=str(lead_data.get("id") or payload.get("lead_id") or "") or None,
+            external_lead_id=_extract_external_id(lead_data, payload, answers),
             full_name=name,
             phone=phone,
             email=email,
             city=city,
-            form_answers=answers,
+            form_answers=filter_question_form_answers(answers),
             raw_payload=lead_data,
             consented=True,
         )

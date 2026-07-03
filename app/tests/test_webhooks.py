@@ -231,6 +231,9 @@ def test_zapier_webhook_parses_blob_payload_into_context_fields(test_context):
             "question": "Business Type",
             "answer": "Software & Technology",
         } in lead.raw_payload["submitted_form_answers"]
+        assert "full_name" not in lead.form_answers
+        assert "email" not in lead.form_answers
+        assert "phone_number" not in lead.form_answers
         assert lead.crm_stage == "Contacted"
 
 
@@ -271,9 +274,13 @@ def test_website_form_webhook_uses_linkedin_utm_as_source(test_context):
         assert lead is not None
         assert lead.source == LeadSource.LINKEDIN
         assert lead.phone == "+15553334444"
-        assert lead.form_answers["utm_source"] == "linkedin"
-        assert lead.form_answers["utm_campaign"] == "scan-3d-linkedin"
         assert lead.form_answers["service_interest"] == "Scan 3D"
+        assert "email" not in lead.form_answers
+        assert "phone_number" not in lead.form_answers
+        assert "utm_source" not in lead.form_answers
+        assert "utm_campaign" not in lead.form_answers
+        assert lead.raw_payload["tracking"]["utm_source"] == "linkedin"
+        assert lead.raw_payload["tracking"]["utm_campaign"] == "scan-3d-linkedin"
         assert lead.crm_stage == "Contacted"
 
         webhook_log = db.scalar(
@@ -338,5 +345,12 @@ def test_website_form_webhook_parses_zapier_key_value_blob(test_context):
         assert lead.form_answers["besoin_principal"] == "Inspection dimensionnelle / Conformité"
         assert lead.form_answers["type_piece_equipement"] == "Pièce plastique moulée / thermoformée"
         assert lead.form_answers["echeance"] == "Urgent : moins de 7 jours"
-        assert lead.form_answers["utm_source"] == "linkedin"
+        assert "email" not in lead.form_answers
+        assert "phone_number" not in lead.form_answers
+        assert "full_name" not in lead.form_answers
+        assert "last_name" not in lead.form_answers
+        assert "form_name" not in lead.form_answers
+        assert "linkedin_lead_id" not in lead.form_answers
+        assert "utm_source" not in lead.form_answers
+        assert lead.raw_payload["tracking"]["utm_source"] == "linkedin"
         assert lead.crm_stage == "Contacted"

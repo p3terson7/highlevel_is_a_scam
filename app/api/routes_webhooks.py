@@ -18,7 +18,7 @@ from app.core.security import (
 )
 from app.db.models import AuditLog, Client
 from app.db.session import get_db
-from app.services.lead_summary import normalize_form_answers
+from app.services.lead_summary import filter_question_form_answers, normalize_form_answers
 from app.services.runtime_config import get_effective_runtime_map_for_client, load_runtime_overrides
 from app.workers.tasks import enqueue_process_webhook
 
@@ -146,6 +146,71 @@ def _source_from_tracking(payload: dict[str, Any], tracking: dict[str, Any]) -> 
     return "manual"
 
 
+def _first_payload_value(*sources: Any, keys: tuple[str, ...]) -> str:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+    return ""
+
+
+def _lead_identity_from_payload(
+    payload: dict[str, Any],
+    lead_payload: dict[str, Any],
+    raw_answers: dict[str, Any],
+) -> dict[str, Any]:
+    first_name = _first_payload_value(lead_payload, payload, raw_answers, keys=("first_name",))
+    last_name = _first_payload_value(lead_payload, payload, raw_answers, keys=("last_name",))
+    full_name = _first_payload_value(
+        lead_payload,
+        payload,
+        raw_answers,
+        keys=("full_name", "name", "contact_name"),
+    )
+    if full_name and last_name and last_name.lower() not in full_name.lower():
+        full_name = f"{full_name} {last_name}".strip()
+    elif not full_name:
+        full_name = " ".join(part for part in (first_name, last_name) if part).strip()
+
+    identity = {
+        "full_name": full_name,
+        "phone": _first_payload_value(
+            lead_payload,
+            payload,
+            raw_answers,
+            keys=("phone", "phone_number", "mobile_phone", "cell", "mobile"),
+        ),
+        "email": _first_payload_value(lead_payload, payload, raw_answers, keys=("email", "email_address")),
+        "city": _first_payload_value(lead_payload, payload, raw_answers, keys=("city", "location_city", "location")),
+    }
+    return {key: value for key, value in identity.items() if value}
+
+
+def _external_lead_id_from_payload(
+    payload: dict[str, Any],
+    lead_payload: dict[str, Any],
+    raw_answers: dict[str, Any],
+) -> str:
+    return _first_payload_value(
+        lead_payload,
+        payload,
+        raw_answers,
+        keys=(
+            "id",
+            "lead_id",
+            "external_lead_id",
+            "leadgen_id",
+            "lead_gen_id",
+            "linkedin_lead_id",
+            "lead_gen_form_response_id",
+            "lead_gen_form_response",
+        ),
+    )
+
+
 def _coerce_website_form_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     payload = _deep_merge_dicts(
         _parse_key_value_blob(payload.get("")),
@@ -158,45 +223,19 @@ def _coerce_website_form_payload(payload: dict[str, Any]) -> tuple[str, dict[str
         payload.get("answers"),
         lead_payload.get("form_answers"),
     )
-    for key in (
-        "full_name",
-        "name",
-        "first_name",
-        "last_name",
-        "phone",
-        "phone_number",
-        "mobile_phone",
-        "email",
-        "email_address",
-        "city",
-        "location",
-        "location_city",
-        "company",
-        "message",
-    ):
-        value = lead_payload.get(key, payload.get(key))
-        if value not in (None, ""):
-            form_answers.setdefault(key, value)
-
-    form_answers = normalize_form_answers(form_answers)
-    tracking = _tracking_from_payload(payload, form_answers)
-    form_answers.update(tracking)
-
-    external_lead_id = str(
-        lead_payload.get("id")
-        or lead_payload.get("external_lead_id")
-        or payload.get("id")
-        or payload.get("lead_id")
-        or payload.get("external_lead_id")
-        or ""
-    ).strip()
+    raw_form_answers = normalize_form_answers(form_answers)
+    tracking = _tracking_from_payload(payload, raw_form_answers)
+    clean_form_answers = filter_question_form_answers(raw_form_answers)
+    external_lead_id = _external_lead_id_from_payload(payload, lead_payload, raw_form_answers)
+    lead_identity = _lead_identity_from_payload(payload, lead_payload, raw_form_answers)
 
     source = _source_from_tracking(payload, tracking)
     normalized = {
         "lead": {
             "id": external_lead_id or None,
-            "form_answers": form_answers,
-            "submitted_form_answers": _question_answer_rows(form_answers),
+            **lead_identity,
+            "form_answers": clean_form_answers,
+            "submitted_form_answers": _question_answer_rows(clean_form_answers),
             "tracking": tracking,
             "source_page_url": payload.get("source_page_url") or payload.get("page_url") or payload.get("url") or "",
             "referrer": payload.get("referrer") or payload.get("referrer_url") or "",
@@ -286,14 +325,24 @@ def _coerce_zapier_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(value, (str, int, float, bool)):
                 form_answers[key] = value
                 original_answers.append({"question": key, "answer": value})
-    form_answers = normalize_form_answers(form_answers)
+
+    raw_form_answers = normalize_form_answers(form_answers)
+    clean_form_answers = filter_question_form_answers(raw_form_answers)
+    clean_original_answers = [
+        row
+        for row in original_answers
+        if filter_question_form_answers({row.get("question"): row.get("answer")})
+    ]
 
     lead_payload: dict[str, Any] = {
-        "form_answers": form_answers,
-        "submitted_form_answers": original_answers,
+        **_lead_identity_from_payload(payload, {}, raw_form_answers),
+        "form_answers": clean_form_answers,
+        "submitted_form_answers": clean_original_answers or _question_answer_rows(clean_form_answers),
     }
     if leadgen_id:
         lead_payload["id"] = leadgen_id
+    elif external_lead_id := _external_lead_id_from_payload(payload, {}, raw_form_answers):
+        lead_payload["id"] = external_lead_id
     return {"lead": lead_payload}
 
 

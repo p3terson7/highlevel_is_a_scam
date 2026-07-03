@@ -48,6 +48,40 @@ _PRIORITY_KEYS = (
     "phone_number",
 )
 
+_NON_QUESTION_FORM_KEYS = {
+    "id",
+    "lead_id",
+    "external_lead_id",
+    "leadgen_id",
+    "lead_gen_id",
+    "linkedin_lead_id",
+    "lead_gen_form_response",
+    "lead_gen_form_response_id",
+    "leadgen_form_response",
+    "form_id",
+    "form_name",
+    "full_name",
+    "last_name",
+    "contact_name",
+    "email",
+    "phone_number",
+    "city",
+    "location",
+    "location_city",
+    "source",
+    "lead_source",
+    "source_page_url",
+    "page_url",
+    "url",
+    "referrer",
+    "referrer_url",
+    "gclid",
+    "fbclid",
+    "li_fat_id",
+    "msclkid",
+    "ad_id",
+}
+
 
 def _canonical_key(raw_key: Any) -> str:
     base = re.sub(r"[^a-z0-9]+", "_", str(raw_key or "").strip().lower()).strip("_")
@@ -92,6 +126,16 @@ def normalize_form_answers(raw_answers: Mapping[str, Any] | None) -> dict[str, A
             continue
         output[key] = value
     return output
+
+
+def filter_question_form_answers(raw_answers: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Keep only actual lead questionnaire answers, not identity/tracking metadata."""
+    answers = normalize_form_answers(raw_answers)
+    return {
+        key: value
+        for key, value in answers.items()
+        if key not in _NON_QUESTION_FORM_KEYS and not key.startswith("utm_")
+    }
 
 
 def format_answer_value(value: Any) -> str:
