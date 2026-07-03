@@ -1431,6 +1431,7 @@
           meta_verify: `/webhooks/meta/${clientConfig.client_key}`,
           meta_events: `/webhooks/meta/${clientConfig.client_key}`,
           zapier_events: `/webhooks/zapier/${clientConfig.client_key}`,
+          website_form: `/webhooks/form/${clientConfig.client_key}`,
           linkedin_events: `/webhooks/linkedin/${clientConfig.client_key}`,
           twilio_sms: `/sms/inbound/${clientConfig.client_key}`,
         } : null);

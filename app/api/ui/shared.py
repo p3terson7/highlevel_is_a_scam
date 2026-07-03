@@ -77,9 +77,15 @@ from app.services.sms_service import SMSDeliveryError, SMSService, build_mock_sm
 from app.workers.tasks import _meta_initial_seed_text
 
 _UI_FILE = Path(__file__).resolve().parents[1] / "templates" / "ui.html"
-_WEBHOOK_EVENT_TYPES = {"meta_webhook_received", "linkedin_webhook_received", "zapier_webhook_received"}
+_WEBHOOK_EVENT_TYPES = {
+    "meta_webhook_received",
+    "linkedin_webhook_received",
+    "zapier_webhook_received",
+    "website_form_webhook_received",
+}
 _ZAPIER_CONSOLE_EVENTS = {
     "zapier_webhook_received",
+    "website_form_webhook_received",
     "lead_normalized",
     "initial_ai_sms_sent",
     "initial_sms_sent",
