@@ -1,0 +1,1193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Liquid Glass Lensing — CRM Implementation Notes</title>
+  <style>
+    :root {
+      --bg-1: #eef5ff;
+      --bg-2: #f8edf8;
+      --bg-3: #f4fbf6;
+      --ink: #111318;
+      --muted: rgba(17, 19, 24, 0.68);
+      --faint: rgba(17, 19, 24, 0.48);
+      --panel: rgba(255, 255, 255, 0.72);
+      --line: rgba(17, 19, 24, 0.1);
+      --line-strong: rgba(17, 19, 24, 0.18);
+      --accent: #1677ff;
+      --accent-2: #7c3aed;
+      --success: #0b7a4b;
+      --warning: #b35c00;
+      --danger: #b42318;
+      --radius-lg: 34px;
+      --radius-md: 24px;
+      --radius-sm: 16px;
+      --shadow: 0 18px 52px rgba(37, 52, 84, 0.14), 0 2px 8px rgba(37, 52, 84, 0.08);
+      --scene:
+        radial-gradient(650px 420px at 14% 8%, rgba(95, 168, 255, 0.54), transparent 60%),
+        radial-gradient(600px 400px at 88% 8%, rgba(255, 119, 196, 0.40), transparent 62%),
+        radial-gradient(620px 460px at 72% 88%, rgba(139, 92, 246, 0.31), transparent 64%),
+        radial-gradient(580px 380px at 5% 88%, rgba(80, 210, 155, 0.35), transparent 60%),
+        linear-gradient(135deg, #f9fbff 0%, #edf3fb 42%, #fbf1f8 100%);
+      --glass-blur: 24px;
+      --glass-opacity: 0.46;
+      --rim-zoom: 1.05;
+      --rim-size: 16px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--scene);
+      background-attachment: fixed;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -2;
+      background-image:
+        linear-gradient(rgba(17, 19, 24, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(17, 19, 24, 0.04) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.6), transparent 72%);
+    }
+
+    a { color: inherit; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 278px minmax(0, 1fr);
+      gap: 28px;
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .side {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      min-height: calc(100vh - 48px);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      background: rgba(255,255,255,0.42);
+      -webkit-backdrop-filter: blur(26px) saturate(150%);
+      backdrop-filter: blur(26px) saturate(150%);
+      box-shadow: var(--shadow);
+      border: 1px solid rgba(255,255,255,0.55);
+    }
+
+    .side::before,
+    .liquid::before,
+    .demo-toolbar::before,
+    .mini-glass::before,
+    .popover::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      background:
+        radial-gradient(140% 88% at 20% 0%, rgba(255,255,255,0.62), rgba(255,255,255,0.10) 42%, transparent 68%),
+        linear-gradient(145deg, rgba(255,255,255,0.70), rgba(255,255,255,0.08) 34%, rgba(255,255,255,0.20) 72%, rgba(255,255,255,0.40));
+      padding: 1px;
+      -webkit-mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+      mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      mask-composite: exclude;
+    }
+
+    .brand {
+      padding: 22px 22px 18px;
+      border-bottom: 1px solid rgba(17,19,24,.08);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      box-shadow: 0 0 0 5px rgba(22,119,255,.12);
+    }
+
+    .brand h1 {
+      margin: 12px 0 0;
+      font-size: 24px;
+      line-height: 1.05;
+      letter-spacing: -.04em;
+    }
+
+    nav {
+      display: grid;
+      gap: 6px;
+      padding: 14px;
+    }
+
+    nav a {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 38px;
+      padding: 8px 11px;
+      border-radius: 16px;
+      color: rgba(17,19,24,.72);
+      text-decoration: none;
+      font-weight: 560;
+      transition: background .16s ease, color .16s ease;
+    }
+
+    nav a:hover {
+      background: rgba(255,255,255,.46);
+      color: var(--ink);
+    }
+
+    nav span:last-child {
+      color: rgba(17,19,24,.34);
+      font-weight: 650;
+    }
+
+    .main {
+      display: grid;
+      gap: 22px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      min-height: 500px;
+      border-radius: 44px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.68), rgba(255,255,255,.34)),
+        var(--scene);
+      background-attachment: fixed;
+      border: 1px solid rgba(255,255,255,.62);
+      box-shadow: var(--shadow);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.02fr) minmax(360px, .98fr);
+      min-height: 500px;
+      gap: 22px;
+      align-items: center;
+      padding: clamp(28px, 5vw, 56px);
+    }
+
+    .hero h2 {
+      margin: 0;
+      max-width: 820px;
+      font-size: clamp(46px, 6.2vw, 84px);
+      line-height: .95;
+      letter-spacing: -.065em;
+      font-weight: 720;
+    }
+
+    .hero h2 .soft {
+      display: block;
+      color: rgba(17,19,24,.50);
+      font-weight: 670;
+    }
+
+    .hero p {
+      max-width: 640px;
+      margin: 22px 0 0;
+      font-size: 18px;
+      color: var(--muted);
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 26px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.48);
+      border: 1px solid rgba(255,255,255,.52);
+      color: rgba(17,19,24,.76);
+      font-weight: 600;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.4);
+    }
+
+    .showcase {
+      position: relative;
+      min-height: 360px;
+      border-radius: 36px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 20% 16%, rgba(255,255,255,.74), transparent 28%),
+        radial-gradient(circle at 88% 22%, rgba(255,255,255,.36), transparent 30%),
+        rgba(255,255,255,.18);
+      border: 1px solid rgba(255,255,255,.42);
+    }
+
+    .fake-crm {
+      position: absolute;
+      inset: 26px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      padding: 18px;
+      border-radius: 28px;
+      background: rgba(255,255,255,.44);
+      border: 1px solid rgba(255,255,255,.42);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr .8fr .6fr;
+      gap: 10px;
+      align-items: center;
+      min-height: 38px;
+      padding: 8px 10px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.44);
+      color: rgba(17,19,24,.48);
+      font-size: 13px;
+    }
+
+    .row.head {
+      color: rgba(17,19,24,.40);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      background: rgba(255,255,255,.24);
+    }
+
+    .status {
+      width: fit-content;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(11,122,75,.11);
+      color: var(--success);
+    }
+
+    .status.warn {
+      color: var(--warning);
+      background: rgba(179,92,0,.11);
+    }
+
+    .liquid {
+      position: absolute;
+      left: 38px;
+      right: 38px;
+      bottom: 34px;
+      min-height: 78px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 16px;
+      border-radius: 30px;
+      overflow: hidden;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,calc(var(--glass-opacity) + .16)), rgba(255,255,255,var(--glass-opacity)));
+      -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%) contrast(105%);
+      backdrop-filter: blur(var(--glass-blur)) saturate(160%) contrast(105%);
+      border: 1px solid rgba(255,255,255,.56);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.62),
+        inset 0 -1px 0 rgba(255,255,255,.16),
+        0 20px 54px rgba(37,52,84,.20);
+    }
+
+    .liquid::after {
+      content: "";
+      position: absolute;
+      inset: calc(-1 * var(--rim-size));
+      border-radius: inherit;
+      pointer-events: none;
+      background: var(--scene);
+      background-attachment: fixed;
+      transform: scale(var(--rim-zoom));
+      filter: saturate(175%) contrast(112%) brightness(1.05);
+      opacity: .42;
+      padding: var(--rim-size);
+      -webkit-mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+      mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      mask-composite: exclude;
+    }
+
+    .liquid > * {
+      position: relative;
+      z-index: 1;
+    }
+
+    .toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .glass-icon {
+      width: 46px;
+      height: 46px;
+      border-radius: 17px;
+      display: grid;
+      place-items: center;
+      background: rgba(255,255,255,.36);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.48);
+      border: 1px solid rgba(255,255,255,.38);
+      font-size: 20px;
+    }
+
+    .liquid strong {
+      display: block;
+      font-size: 15px;
+      line-height: 1.15;
+    }
+
+    .liquid small {
+      color: rgba(17,19,24,.58);
+      font-weight: 590;
+    }
+
+    .toolbar-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: end;
+    }
+
+    button,
+    .btn {
+      appearance: none;
+      border: 0;
+      min-height: 38px;
+      padding: 9px 13px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.46);
+      color: var(--ink);
+      font: inherit;
+      font-weight: 700;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.48), 0 1px 2px rgba(37,52,84,.08);
+    }
+
+    .btn.primary {
+      background: linear-gradient(135deg, rgba(22,119,255,.90), rgba(124,58,237,.86));
+      color: white;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 8px 18px rgba(22,119,255,.24);
+    }
+
+    .card {
+      border-radius: 34px;
+      background: rgba(255,255,255,.64);
+      border: 1px solid rgba(255,255,255,.58);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 28px 30px 20px;
+      border-bottom: 1px solid rgba(17,19,24,.08);
+    }
+
+    .card h3 {
+      margin: 0;
+      font-size: clamp(26px, 3vw, 40px);
+      line-height: 1.02;
+      letter-spacing: -.045em;
+    }
+
+    .card p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      max-width: 800px;
+    }
+
+    .content {
+      padding: 28px 30px 30px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .note {
+      padding: 18px;
+      border-radius: 22px;
+      background: rgba(255,255,255,.48);
+      border: 1px solid rgba(17,19,24,.08);
+    }
+
+    .note h4 {
+      margin: 0 0 8px;
+      font-size: 17px;
+      letter-spacing: -.02em;
+    }
+
+    .note p,
+    .note ul,
+    .note ol {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .note ul,
+    .note ol { padding-left: 18px; }
+    .note li + li { margin-top: 6px; }
+
+    .compare {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .demo-card {
+      min-height: 280px;
+      border-radius: 28px;
+      padding: 18px;
+      position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(rgba(255,255,255,.20), rgba(255,255,255,.20)),
+        var(--scene);
+      background-attachment: fixed;
+      border: 1px solid rgba(255,255,255,.50);
+    }
+
+    .demo-toolbar {
+      position: absolute;
+      left: 20px;
+      right: 20px;
+      top: 132px;
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 26px;
+      background: rgba(255,255,255,.46);
+      -webkit-backdrop-filter: blur(24px) saturate(160%);
+      backdrop-filter: blur(24px) saturate(160%);
+      border: 1px solid rgba(255,255,255,.52);
+      box-shadow: 0 16px 34px rgba(37,52,84,.15), inset 0 1px 0 rgba(255,255,255,.58);
+      overflow: hidden;
+    }
+
+    .demo-toolbar.lensed::after {
+      content: "";
+      position: absolute;
+      inset: -18px;
+      border-radius: inherit;
+      background: var(--scene);
+      background-attachment: fixed;
+      transform: scale(1.06);
+      filter: saturate(180%) contrast(116%) brightness(1.04);
+      opacity: .48;
+      padding: 18px;
+      pointer-events: none;
+      -webkit-mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+      mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      mask-composite: exclude;
+    }
+
+    .demo-toolbar > * { position: relative; z-index: 1; }
+
+    .tiny-bars {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .bar {
+      height: 14px;
+      border-radius: 999px;
+      background: rgba(17,19,24,.10);
+    }
+
+    .bar:nth-child(2) { width: 78%; }
+    .bar:nth-child(3) { width: 56%; }
+    .bar:nth-child(4) { width: 84%; }
+
+    .label {
+      position: absolute;
+      top: 18px;
+      left: 18px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.58);
+      color: rgba(17,19,24,.62);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .control {
+      display: grid;
+      gap: 8px;
+      padding: 14px;
+      border-radius: 20px;
+      background: rgba(255,255,255,.44);
+      border: 1px solid rgba(17,19,24,.08);
+    }
+
+    .control label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    pre {
+      margin: 0;
+      padding: 18px;
+      border-radius: 22px;
+      background: rgba(9, 12, 18, .92);
+      color: rgba(255,255,255,.88);
+      overflow: auto;
+      font-size: 12.5px;
+      line-height: 1.65;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
+    }
+
+    .code-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+      color: rgba(17,19,24,.62);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+
+    .copy {
+      cursor: pointer;
+      min-height: 30px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.54);
+      color: rgba(17,19,24,.70);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .pill-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .pill {
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.44);
+      border: 1px solid rgba(17,19,24,.08);
+      color: rgba(17,19,24,.68);
+      font-size: 13px;
+      font-weight: 680;
+    }
+
+    .crm-blueprint {
+      position: relative;
+      min-height: 520px;
+      border-radius: 34px;
+      padding: 24px;
+      background:
+        linear-gradient(rgba(255,255,255,.36), rgba(255,255,255,.18)),
+        var(--scene);
+      background-attachment: fixed;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.54);
+    }
+
+    .blue-shell {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      gap: 16px;
+      height: 100%;
+      min-height: 470px;
+    }
+
+    .mini-glass,
+    .popover {
+      position: relative;
+      overflow: hidden;
+      border-radius: 28px;
+      background: rgba(255,255,255,.46);
+      -webkit-backdrop-filter: blur(24px) saturate(155%);
+      backdrop-filter: blur(24px) saturate(155%);
+      border: 1px solid rgba(255,255,255,.54);
+      box-shadow: 0 18px 44px rgba(37,52,84,.14), inset 0 1px 0 rgba(255,255,255,.58);
+    }
+
+    .mini-glass.sidebar-demo {
+      padding: 16px;
+    }
+
+    .nav-item {
+      height: 34px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-radius: 15px;
+      padding: 0 10px;
+      color: rgba(17,19,24,.62);
+      font-weight: 680;
+      font-size: 13px;
+    }
+
+    .nav-item.active {
+      color: #fff;
+      background: linear-gradient(135deg, rgba(22,119,255,.88), rgba(124,58,237,.84));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.28);
+    }
+
+    .nav-group { display: grid; gap: 6px; margin-top: 14px; }
+
+    .content-demo {
+      display: grid;
+      grid-template-rows: 68px minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .top-demo {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-radius: 26px;
+    }
+
+    .table-demo {
+      border-radius: 24px;
+      background: rgba(255,255,255,.80);
+      border: 1px solid rgba(17,19,24,.08);
+      overflow: hidden;
+    }
+
+    .table-row {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr .8fr .7fr;
+      gap: 12px;
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(17,19,24,.07);
+      color: rgba(17,19,24,.66);
+    }
+
+    .table-row:first-child {
+      color: rgba(17,19,24,.42);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      background: rgba(255,255,255,.56);
+    }
+
+    .table-row:last-child { border-bottom: 0; }
+
+    .popover {
+      position: absolute;
+      right: 46px;
+      top: 116px;
+      width: 270px;
+      padding: 10px;
+      border-radius: 24px;
+    }
+
+    .pop-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 42px;
+      padding: 9px 10px;
+      border-radius: 15px;
+      color: rgba(17,19,24,.72);
+      font-weight: 680;
+    }
+
+    .pop-row:hover { background: rgba(255,255,255,.44); }
+
+    .warn-box {
+      padding: 15px 16px;
+      border-radius: 20px;
+      background: rgba(255,255,255,.50);
+      border: 1px solid rgba(17,19,24,.08);
+      color: var(--muted);
+    }
+
+    .two-tone {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .do, .dont {
+      border-radius: 22px;
+      padding: 16px;
+      border: 1px solid rgba(17,19,24,.08);
+      background: rgba(255,255,255,.48);
+    }
+
+    .do h4 { color: var(--success); }
+    .dont h4 { color: var(--danger); }
+    .do h4, .dont h4 { margin: 0 0 10px; }
+    .do ul, .dont ul { margin: 0; padding-left: 18px; color: var(--muted); }
+
+    footer {
+      color: var(--muted);
+      padding: 6px 4px 32px;
+      text-align: center;
+    }
+
+    @media (max-width: 1080px) {
+      .layout { grid-template-columns: 1fr; }
+      .side { position: relative; top: 0; min-height: auto; }
+      nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .hero-grid, .grid-2, .compare, .blue-shell { grid-template-columns: 1fr; }
+      .showcase { min-height: 430px; }
+      .controls, .grid-3 { grid-template-columns: 1fr; }
+      .popover { display: none; }
+    }
+
+    @media (max-width: 680px) {
+      .layout { padding: 12px; }
+      .hero, .card { border-radius: 28px; }
+      .hero-grid { padding: 24px; }
+      .fake-crm { inset: 16px; }
+      .liquid { left: 18px; right: 18px; bottom: 18px; align-items: start; flex-direction: column; }
+      nav { grid-template-columns: 1fr 1fr; }
+      .card-header, .content { padding: 22px; }
+      .row, .table-row { grid-template-columns: 1fr; }
+      .toolbar-actions { justify-content: start; }
+    }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" aria-hidden="true" focusable="false">
+    <!-- Reference SVG filter skeleton. Browser support for URL-based backdrop filters varies. -->
+    <filter id="liquid-lens-reference" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feImage href="" result="lensMap" preserveAspectRatio="none" />
+      <feGaussianBlur in="SourceGraphic" stdDeviation="12" result="blurred" />
+      <feColorMatrix in="blurred" type="saturate" values="1.45" result="frosted" />
+      <feDisplacementMap in="frosted" in2="lensMap" scale="14" xChannelSelector="R" yChannelSelector="G" result="displaced" />
+    </filter>
+  </svg>
+
+  <div class="layout">
+    <aside class="side">
+      <div class="brand">
+        <div class="eyebrow"><span class="dot"></span> Liquid Glass Study</div>
+        <h1>Lensing & refraction for CRM interfaces</h1>
+      </div>
+      <nav aria-label="Page sections">
+        <a href="#idea"><span>Core idea</span><span>01</span></a>
+        <a href="#compare"><span>Blur vs lens</span><span>02</span></a>
+        <a href="#anatomy"><span>Anatomy</span><span>03</span></a>
+        <a href="#implementation"><span>Implementation</span><span>04</span></a>
+        <a href="#crm"><span>CRM usage</span><span>05</span></a>
+        <a href="#checklist"><span>Checklist</span><span>06</span></a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <section class="hero" id="idea">
+        <div class="hero-grid">
+          <div>
+            <div class="eyebrow"><span class="dot"></span> Not just backdrop blur</div>
+            <h2>Liquid Glass is <span>frost + lensing.</span><span class="soft">The rim bends the scene.</span></h2>
+            <p>
+              The convincing part is spatial displacement: pixels behind the glass are sampled from slightly different positions near the edge, producing a subtle zoomed, pinched, refracted lens effect.
+            </p>
+            <div class="chips">
+              <span class="chip">Backdrop blur</span>
+              <span class="chip">Rim displacement</span>
+              <span class="chip">Specular edge light</span>
+              <span class="chip">Adaptive shadow</span>
+            </div>
+          </div>
+
+          <div class="showcase" aria-label="Liquid glass CRM toolbar demo">
+            <div class="fake-crm">
+              <div class="row head"><span>Contact</span><span>Company</span><span>Stage</span><span>Value</span></div>
+              <div class="row"><span>Avery Stone</span><span>Northstar</span><span class="status">Qualified</span><span>$42k</span></div>
+              <div class="row"><span>Noah Kim</span><span>Acme Labs</span><span class="status warn">Proposal</span><span>$18k</span></div>
+              <div class="row"><span>Maya Chen</span><span>Orbit</span><span class="status">Won</span><span>$64k</span></div>
+              <div class="row"><span>Luca Grey</span><span>Fjord AI</span><span class="status warn">Review</span><span>$27k</span></div>
+            </div>
+            <div class="liquid">
+              <div class="toolbar-left">
+                <div class="glass-icon">⌘</div>
+                <div>
+                  <strong>Global CRM search</strong>
+                  <small>Look at the rim: it suggests zoomed/distorted background.</small>
+                </div>
+              </div>
+              <div class="toolbar-actions">
+                <span class="btn">Filter</span>
+                <span class="btn">Assign</span>
+                <span class="btn primary">+ Deal</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="compare">
+        <div class="card-header">
+          <div>
+            <div class="eyebrow"><span class="dot"></span> Comparison</div>
+            <h3>Blur-only glass versus lens-inspired glass</h3>
+            <p>Blur creates frost. Lensing creates the feeling that the material has thickness and that light is bending through the edge.</p>
+          </div>
+        </div>
+        <div class="content">
+          <div class="compare">
+            <div class="demo-card">
+              <span class="label">Blur only</span>
+              <div class="tiny-bars">
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+              </div>
+              <div class="demo-toolbar">
+                <strong>Frosted toolbar</strong>
+                <span class="btn">Action</span>
+              </div>
+            </div>
+            <div class="demo-card">
+              <span class="label">Lensed rim</span>
+              <div class="tiny-bars">
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+              </div>
+              <div class="demo-toolbar lensed">
+                <strong>Rim suggests refraction</strong>
+                <span class="btn primary">Action</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="controls" aria-label="Demo controls">
+            <div class="control">
+              <label for="blur">Backdrop blur</label>
+              <input id="blur" type="range" min="8" max="42" value="24" />
+            </div>
+            <div class="control">
+              <label for="opacity">Glass opacity</label>
+              <input id="opacity" type="range" min="20" max="78" value="46" />
+            </div>
+            <div class="control">
+              <label for="rim">Rim zoom</label>
+              <input id="rim" type="range" min="100" max="112" value="105" />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="anatomy">
+        <div class="card-header">
+          <div>
+            <div class="eyebrow"><span class="dot"></span> Anatomy</div>
+            <h3>The four optical zones</h3>
+            <p>A good Liquid Glass approximation should not distort everything evenly. The center stays calm; the edge does the optical work.</p>
+          </div>
+        </div>
+        <div class="content grid-2">
+          <div class="note">
+            <h4>1. Center frost</h4>
+            <p>The center mostly uses blur, tint, saturation and contrast. It should preserve legibility and avoid obvious warping.</p>
+          </div>
+          <div class="note">
+            <h4>2. Inner shoulder</h4>
+            <p>A mild magnification zone near the rim suggests depth without making the whole control swim.</p>
+          </div>
+          <div class="note">
+            <h4>3. Edge refraction</h4>
+            <p>The strongest displacement lives near the outer 8–24px. This is where the background appears pinched or bent.</p>
+          </div>
+          <div class="note">
+            <h4>4. Specular highlight</h4>
+            <p>A directional edge highlight and inner lowlight make the object feel like a physical lens rather than a drawn outline.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="implementation">
+        <div class="card-header">
+          <div>
+            <div class="eyebrow"><span class="dot"></span> Implementation</div>
+            <h3>Three levels of web implementation</h3>
+            <p>Choose based on fidelity, browser support, performance budget and how much arbitrary CRM content sits behind the surface.</p>
+          </div>
+        </div>
+        <div class="content grid-3">
+          <div class="note">
+            <h4>Level 1: CSS-only</h4>
+            <p>Use blur, saturation, translucent fill, inner highlights and shadows. Fast and robust, but no true spatial distortion.</p>
+          </div>
+          <div class="note">
+            <h4>Level 2: fake rim zoom</h4>
+            <p>Duplicate a controlled background inside the rim and scale it. Great for app backgrounds, less accurate over arbitrary DOM content.</p>
+          </div>
+          <div class="note">
+            <h4>Level 3: displacement</h4>
+            <p>Use SVG filters or a shader with a displacement map. The center is neutral; the rim shifts pixels along the edge normal.</p>
+          </div>
+        </div>
+        <div class="content" style="padding-top: 0;">
+          <div class="code-title">CSS approximation <button class="copy" data-copy="css">Copy</button></div>
+          <pre id="css"><code>.crm-glass {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border-radius: 26px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, .58),
+    rgba(255, 255, 255, .36)
+  );
+  backdrop-filter: blur(24px) saturate(155%) contrast(104%);
+  -webkit-backdrop-filter: blur(24px) saturate(155%) contrast(104%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .62),
+    inset 0 -1px 0 rgba(255, 255, 255, .16),
+    0 16px 44px rgba(16, 24, 40, .16);
+}
+
+/* Optical edge highlight */
+.crm-glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(130% 90% at 18% 0%,
+      rgba(255,255,255,.52), rgba(255,255,255,.12) 38%, transparent 60%),
+    linear-gradient(145deg,
+      rgba(255,255,255,.68), transparent 34%, rgba(255,255,255,.18) 72%);
+  padding: 1px;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}</code></pre>
+
+          <div class="code-title" style="margin-top: 18px;">SVG displacement skeleton <button class="copy" data-copy="svg">Copy</button></div>
+          <pre id="svg"><code>&lt;svg width="0" height="0" aria-hidden="true"&gt;
+  &lt;filter id="liquid-lens" x="-20%" y="-20%" width="140%" height="140%"&gt;
+    &lt;feImage href="/assets/lens-map-rounded-rect.png" result="lensMap" preserveAspectRatio="none" /&gt;
+    &lt;feGaussianBlur in="SourceGraphic" stdDeviation="12" result="blurred" /&gt;
+    &lt;feColorMatrix in="blurred" type="saturate" values="1.45" result="frosted" /&gt;
+    &lt;feDisplacementMap
+      in="frosted"
+      in2="lensMap"
+      scale="14"
+      xChannelSelector="R"
+      yChannelSelector="G" /&gt;
+  &lt;/filter&gt;
+&lt;/svg&gt;</code></pre>
+        </div>
+      </section>
+
+      <section class="card" id="crm">
+        <div class="card-header">
+          <div>
+            <div class="eyebrow"><span class="dot"></span> CRM application</div>
+            <h3>Use lensing on the control layer, not the data layer</h3>
+            <p>For dense CRM software, the content has to remain stable. Glass should clarify actions, navigation and temporary controls.</p>
+          </div>
+        </div>
+        <div class="content">
+          <div class="crm-blueprint">
+            <div class="blue-shell">
+              <aside class="mini-glass sidebar-demo">
+                <div class="eyebrow"><span class="dot"></span> Workspace</div>
+                <div class="nav-group">
+                  <div class="nav-item active">◎ Contacts</div>
+                  <div class="nav-item">◇ Companies</div>
+                  <div class="nav-item">△ Deals</div>
+                  <div class="nav-item">□ Tasks</div>
+                  <div class="nav-item">◌ Reports</div>
+                </div>
+              </aside>
+              <section class="content-demo">
+                <div class="mini-glass top-demo">
+                  <div><strong>Contacts</strong><br><small style="color: rgba(17,19,24,.56); font-weight: 650;">Stable table + floating controls</small></div>
+                  <div class="toolbar-actions"><span class="btn">Filter</span><span class="btn primary">+ Contact</span></div>
+                </div>
+                <div class="table-demo">
+                  <div class="table-row"><span>Name</span><span>Company</span><span>Stage</span><span>Owner</span></div>
+                  <div class="table-row"><span>Avery Stone</span><span>Northstar</span><span>Qualified</span><span>Alex</span></div>
+                  <div class="table-row"><span>Noah Kim</span><span>Acme Labs</span><span>Proposal</span><span>Maya</span></div>
+                  <div class="table-row"><span>Maya Chen</span><span>Orbit</span><span>Won</span><span>Sam</span></div>
+                  <div class="table-row"><span>Luca Grey</span><span>Fjord AI</span><span>Review</span><span>Nia</span></div>
+                  <div class="table-row"><span>June Patel</span><span>Atlas</span><span>Qualified</span><span>Alex</span></div>
+                </div>
+              </section>
+            </div>
+            <div class="popover">
+              <div class="pop-row"><span>Email selected</span><span>⌘E</span></div>
+              <div class="pop-row"><span>Assign owner</span><span>⌥A</span></div>
+              <div class="pop-row"><span>Create task</span><span>⌘T</span></div>
+            </div>
+          </div>
+
+          <div class="two-tone" style="margin-top: 18px;">
+            <div class="do">
+              <h4>Use lensing on</h4>
+              <ul>
+                <li>Global navigation and command search</li>
+                <li>Floating CRM action toolbars</li>
+                <li>Quick-create menus and popovers</li>
+                <li>Selected action groups and primary actions</li>
+              </ul>
+            </div>
+            <div class="dont">
+              <h4>Avoid lensing on</h4>
+              <ul>
+                <li>Data tables and table rows</li>
+                <li>Kanban/deal cards in steady state</li>
+                <li>Long forms, emails, notes and timelines</li>
+                <li>Charts and core dashboard content</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="checklist">
+        <div class="card-header">
+          <div>
+            <div class="eyebrow"><span class="dot"></span> Checklist</div>
+            <h3>What to check before shipping</h3>
+            <p>The effect should feel optical and useful, not decorative or distracting.</p>
+          </div>
+        </div>
+        <div class="content grid-2">
+          <div class="warn-box"><strong>Rim only.</strong> Keep distortion strongest near the outer 8–24px; the center should remain calm.</div>
+          <div class="warn-box"><strong>Dense data stays stable.</strong> Tables, forms and charts should not warp underneath every row.</div>
+          <div class="warn-box"><strong>Use adaptive strength.</strong> Big panels can appear thicker; tiny controls should be lighter.</div>
+          <div class="warn-box"><strong>Do not stack glass on glass.</strong> One material container can hold ordinary controls.</div>
+          <div class="warn-box"><strong>Test real CRM backgrounds.</strong> Try it over tables, charts, selected rows, empty states and error banners.</div>
+          <div class="warn-box"><strong>Provide fallbacks.</strong> Reduced transparency and high contrast should become solid, readable surfaces.</div>
+        </div>
+        <div class="content" style="padding-top: 0;">
+          <div class="pill-list">
+            <span class="pill">frost</span>
+            <span class="pill">rim displacement</span>
+            <span class="pill">directional highlight</span>
+            <span class="pill">adaptive shadow</span>
+            <span class="pill">source-anchored menus</span>
+            <span class="pill">reduced transparency fallback</span>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        Generated quick view for Liquid Glass lensing/refraction implementation notes. Values are practical web approximations, not Apple internal constants.
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    const root = document.documentElement;
+    const blur = document.getElementById('blur');
+    const opacity = document.getElementById('opacity');
+    const rim = document.getElementById('rim');
+
+    blur.addEventListener('input', () => {
+      root.style.setProperty('--glass-blur', blur.value + 'px');
+    });
+
+    opacity.addEventListener('input', () => {
+      root.style.setProperty('--glass-opacity', (opacity.value / 100).toFixed(2));
+    });
+
+    rim.addEventListener('input', () => {
+      root.style.setProperty('--rim-zoom', (rim.value / 100).toFixed(3));
+    });
+
+    document.querySelectorAll('[data-copy]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const target = document.getElementById(button.dataset.copy);
+        const text = target.innerText;
+        try {
+          await navigator.clipboard.writeText(text);
+          const original = button.textContent;
+          button.textContent = 'Copied';
+          setTimeout(() => button.textContent = original, 1100);
+        } catch (err) {
+          button.textContent = 'Select text';
+        }
+      });
+    });
+  </script>
+</body>
+</html>

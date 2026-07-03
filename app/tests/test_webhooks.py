@@ -292,3 +292,51 @@ def test_website_form_webhook_uses_linkedin_utm_as_source(test_context):
             )
         ).all()
         assert len(outbound_messages) >= 1
+
+
+def test_website_form_webhook_parses_zapier_key_value_blob(test_context):
+    payload = {
+        "": (
+            "source = linkedin\n\n"
+            "lead.id = urn:li:adFormResponse:4719df71-8cfa-49e5-8db6-85464ebea38a-6\n"
+            "lead.full_name = Peter TestLead\n"
+            "lead.first_name = Peter\n"
+            "lead.last_name = TestLead\n"
+            "lead.email = peterlead@email.com\n"
+            "lead.phone = 4381231212\n\n"
+            "form_answers.email = peterlead@email.com\n"
+            "form_answers.phone = 4381231212\n"
+            "form_answers.first_name = Peter\n"
+            "form_answers.last_name = TestLead\n"
+            "form_answers.besoin_principal = Inspection dimensionnelle / Conformité\n"
+            "form_answers.type_piece_equipement = Pièce plastique moulée / thermoformée\n"
+            "form_answers.echeance = Urgent : moins de 7 jours\n"
+            "form_answers.form_name = LeadGen\n"
+            "form_answers.linkedin_lead_id = 1022600223/4719df71-8cfa-49e5-8db6-85464ebea38a-6\n\n"
+            "tracking.utm_source = linkedin\n"
+            "tracking.utm_medium = lead_gen_form\n"
+            "tracking.utm_campaign = LeadGen\n"
+            "tracking.utm_content = LeadGen\n"
+            "tracking.ad_id = "
+        )
+    }
+
+    response = test_context.client.post(f"/webhooks/form/{test_context.client_key}", json=payload)
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    assert response.json()["source"] == "linkedin"
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.email == "peterlead@email.com", Lead.client_id == 1))
+        assert lead is not None
+        assert lead.source == LeadSource.LINKEDIN
+        assert lead.full_name == "Peter TestLead"
+        assert lead.phone == "+14381231212"
+        assert lead.external_lead_id == "urn:li:adFormResponse:4719df71-8cfa-49e5-8db6-85464ebea38a-6"
+        assert lead.form_answers["besoin_principal"] == "Inspection dimensionnelle / Conformité"
+        assert lead.form_answers["type_piece_equipement"] == "Pièce plastique moulée / thermoformée"
+        assert lead.form_answers["echeance"] == "Urgent : moins de 7 jours"
+        assert lead.form_answers["utm_source"] == "linkedin"
+        assert lead.crm_stage == "Contacted"
