@@ -60,6 +60,66 @@ def _merge_dicts(*values: Any) -> dict[str, Any]:
     return merged
 
 
+def _deep_merge_dicts(*values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            if isinstance(item, dict) and isinstance(merged.get(key), dict):
+                merged[key] = _deep_merge_dicts(merged[key], item)
+            else:
+                merged[key] = item
+    return merged
+
+
+def _assign_dotted_value(target: dict[str, Any], dotted_key: str, value: Any) -> None:
+    parts = [part.strip() for part in dotted_key.split(".") if part.strip()]
+    if not parts:
+        return
+    cursor = target
+    for part in parts[:-1]:
+        existing = cursor.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            cursor[part] = existing
+        cursor = existing
+    cursor[parts[-1]] = value
+
+
+def _expand_dotted_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    expanded: dict[str, Any] = {}
+    for raw_key, value in payload.items():
+        key = str(raw_key).strip()
+        if "." in key:
+            _assign_dotted_value(expanded, key, value)
+        else:
+            expanded[key] = value
+    return expanded
+
+
+def _parse_key_value_blob(blob: Any) -> dict[str, Any]:
+    if not isinstance(blob, str):
+        return {}
+
+    parsed: dict[str, Any] = {}
+    for raw_line in blob.splitlines():
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        raw_key, raw_value = line.split("=", maxsplit=1)
+        key = raw_key.strip()
+        value = raw_value.strip()
+        if not key:
+            continue
+        if "." in key:
+            _assign_dotted_value(parsed, key, value)
+        else:
+            parsed[key] = value
+    return parsed
+
+
 def _tracking_from_payload(payload: dict[str, Any], answers: dict[str, Any]) -> dict[str, Any]:
     tracking = _merge_dicts(payload.get("tracking"), payload.get("utm"), payload.get("utms"))
     for key, value in payload.items():
@@ -87,6 +147,10 @@ def _source_from_tracking(payload: dict[str, Any], tracking: dict[str, Any]) -> 
 
 
 def _coerce_website_form_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    payload = _deep_merge_dicts(
+        _parse_key_value_blob(payload.get("")),
+        _expand_dotted_payload(payload),
+    )
     lead_payload = payload.get("lead") if isinstance(payload.get("lead"), dict) else {}
     form_answers = _merge_dicts(
         payload.get("form_answers"),
