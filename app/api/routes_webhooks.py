@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -120,6 +121,16 @@ def _parse_key_value_blob(blob: Any) -> dict[str, Any]:
     return parsed
 
 
+def _parse_json_object_blob(blob: Any) -> dict[str, Any]:
+    if not isinstance(blob, str) or not blob.strip().startswith("{"):
+        return {}
+    try:
+        parsed = json.loads(blob)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _tracking_from_payload(payload: dict[str, Any], answers: dict[str, Any]) -> dict[str, Any]:
     tracking = _merge_dicts(payload.get("tracking"), payload.get("utm"), payload.get("utms"))
     for key, value in payload.items():
@@ -213,6 +224,7 @@ def _external_lead_id_from_payload(
 
 def _coerce_website_form_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     payload = _deep_merge_dicts(
+        _parse_json_object_blob(payload.get("")),
         _parse_key_value_blob(payload.get("")),
         _expand_dotted_payload(payload),
     )

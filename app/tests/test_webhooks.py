@@ -1,3 +1,5 @@
+import json
+
 from sqlalchemy import select
 
 from app.db.models import AuditLog, Lead, LeadSource, Message, MessageDirection
@@ -354,3 +356,53 @@ def test_website_form_webhook_parses_zapier_key_value_blob(test_context):
         assert "utm_source" not in lead.form_answers
         assert lead.raw_payload["tracking"]["utm_source"] == "linkedin"
         assert lead.crm_stage == "Contacted"
+
+
+def test_website_form_webhook_accepts_zapier_json_blob(test_context):
+    payload = {
+        "": json.dumps(
+            {
+                "source": "linkedin",
+                "source_page_url": "https://3dpreciscan.com/",
+                "lead": {
+                    "id": "urn:li:adFormResponse:4719df71-8cfa-49e5-8db6-85464ebea38a-6-json",
+                    "first_name": "Peter",
+                    "last_name": "TestLead",
+                    "full_name": "Peter TestLead",
+                    "email": "peterlead-json@email.com",
+                    "phone": "4387253890",
+                },
+                "form_answers": {
+                    "besoin_principal": "Inspection dimensionnelle / Conformité",
+                    "type_piece_equipement": "Pièce plastique moulée / thermoformée",
+                    "echeance": "Urgent : moins de 7 jours",
+                },
+                "tracking": {
+                    "utm_source": "linkedin",
+                    "utm_medium": "lead_gen_form",
+                    "utm_campaign": "C1",
+                    "ad_id": "",
+                    "form_name": "LeadGen",
+                },
+            }
+        )
+    }
+
+    response = test_context.client.post(f"/webhooks/form/{test_context.client_key}", json=payload)
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    assert response.json()["source"] == "linkedin"
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.email == "peterlead-json@email.com", Lead.client_id == 1))
+        assert lead is not None
+        assert lead.source == LeadSource.LINKEDIN
+        assert lead.full_name == "Peter TestLead"
+        assert lead.phone == "+14387253890"
+        assert lead.form_answers["besoin_principal"] == "Inspection dimensionnelle / Conformité"
+        assert "email" not in lead.form_answers
+        assert "phone_number" not in lead.form_answers
+        assert "utm_source" not in lead.form_answers
+        assert lead.raw_payload["tracking"]["utm_source"] == "linkedin"
