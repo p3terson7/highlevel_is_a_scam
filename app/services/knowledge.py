@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
-from html.parser import HTMLParser
 import ipaddress
 import re
+import socket
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 from sqlalchemy import delete, or_, select
@@ -19,6 +20,9 @@ from app.db.models import Client, KnowledgeChunk, KnowledgeSource
 _DEFAULT_TIMEOUT_SECONDS = 15
 _MAX_HTML_BYTES = 1_500_000
 _MAX_URLS_PER_INGEST = 12
+_MAX_REDIRECTS = 5
+_MAX_URL_LENGTH = 2048
+_REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 _CHUNK_TARGET_CHARS = 900
 _CHUNK_OVERLAP_CHARS = 0
 _BOILERPLATE_PATTERNS = (
@@ -92,8 +96,14 @@ class KnowledgeIngestionError(RuntimeError):
 
 
 class KnowledgeIngestionService:
-    def __init__(self, timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+        *,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self._timeout_seconds = timeout_seconds
+        self._transport = transport
 
     def ingest_urls(
         self,
@@ -178,20 +188,74 @@ class KnowledgeIngestionService:
         }
 
     def _fetch_url(self, url: str) -> FetchResult:
-        _assert_fetchable_public_url(url)
-        with httpx.Client(
-            timeout=self._timeout_seconds,
-            follow_redirects=True,
-            headers={"User-Agent": "LeadOpsKnowledgeBot/1.0"},
-        ) as client:
-            response = client.get(url)
-        if response.status_code >= 400:
-            raise KnowledgeIngestionError(f"Fetch failed with HTTP {response.status_code}")
-        content_type = response.headers.get("content-type", "")
-        if "text/html" not in content_type and "application/xhtml" not in content_type and content_type:
-            raise KnowledgeIngestionError(f"Unsupported content type: {content_type}")
-        raw = response.content[:_MAX_HTML_BYTES]
-        return FetchResult(url=str(response.url), status_code=response.status_code, html=raw.decode(response.encoding or "utf-8", errors="ignore"))
+        current_url = normalize_source_url(url)
+        client_kwargs: dict[str, Any] = {
+            "timeout": self._timeout_seconds,
+            "follow_redirects": False,
+            "headers": {"User-Agent": "LeadOpsKnowledgeBot/1.0"},
+            # Environment proxy settings can otherwise bypass the public-address
+            # checks and let an untrusted URL reach the proxy's private network.
+            "trust_env": False,
+        }
+        if self._transport is not None:
+            client_kwargs["transport"] = self._transport
+
+        with httpx.Client(**client_kwargs) as client:
+            for redirect_count in range(_MAX_REDIRECTS + 1):
+                addresses = _assert_fetchable_public_url(current_url)
+                request_url, request_headers, request_extensions = _pinned_request_target(
+                    current_url,
+                    addresses[0],
+                )
+                with client.stream(
+                    "GET",
+                    request_url,
+                    headers=request_headers,
+                    extensions=request_extensions,
+                ) as response:
+                    if response.status_code in _REDIRECT_STATUS_CODES:
+                        if redirect_count >= _MAX_REDIRECTS:
+                            raise KnowledgeIngestionError("Too many redirects while fetching website knowledge")
+                        location = response.headers.get("location", "").strip()
+                        if not location:
+                            raise KnowledgeIngestionError("Redirect response did not include a Location header")
+                        current_url = normalize_source_url(urljoin(current_url, location))
+                        continue
+
+                    if response.status_code >= 400:
+                        raise KnowledgeIngestionError(f"Fetch failed with HTTP {response.status_code}")
+
+                    content_type = response.headers.get("content-type", "")
+                    if (
+                        "text/html" not in content_type
+                        and "application/xhtml" not in content_type
+                        and content_type
+                    ):
+                        raise KnowledgeIngestionError(f"Unsupported content type: {content_type}")
+
+                    content_length = response.headers.get("content-length", "").strip()
+                    if content_length:
+                        try:
+                            if int(content_length) > _MAX_HTML_BYTES:
+                                raise KnowledgeIngestionError("Website content exceeds the ingestion size limit")
+                        except ValueError:
+                            pass
+
+                    chunks: list[bytes] = []
+                    total_bytes = 0
+                    for chunk in response.iter_bytes():
+                        total_bytes += len(chunk)
+                        if total_bytes > _MAX_HTML_BYTES:
+                            raise KnowledgeIngestionError("Website content exceeds the ingestion size limit")
+                        chunks.append(chunk)
+                    raw = b"".join(chunks)
+                    return FetchResult(
+                        url=current_url,
+                        status_code=response.status_code,
+                        html=raw.decode(response.encoding or "utf-8", errors="ignore"),
+                    )
+
+        raise KnowledgeIngestionError("Website fetch did not return a response")
 
 
 def extract_page_text(html: str, *, url: str) -> ExtractedPage:
@@ -290,7 +354,7 @@ def retrieve_knowledge_snippets(
     scored.sort(key=lambda item: (-item[0], item[1].chunk_index))
     return [
         {
-            "source_url": source.url,
+            "source_url": public_source_url(source.url),
             "source_title": source.title,
             "chunk_index": chunk.chunk_index,
             "content": chunk.content,
@@ -411,19 +475,150 @@ def normalize_source_url(raw_url: str) -> str:
     return urlunparse((scheme, netloc, path, "", parsed.query, ""))
 
 
-def _assert_fetchable_public_url(url: str) -> None:
+def public_source_url(raw_url: str) -> str:
+    """Return a citation/display URL without query credentials or fragments."""
+
+    text = str(raw_url or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path or "/",
+            "",
+            "",
+            "",
+        )
+    )
+
+
+def validate_ingestion_urls(urls: list[str]) -> list[str]:
+    """Normalize request URLs without doing DNS or network work in the API."""
+
+    normalized_urls = [normalized for _, normalized in _dedupe_urls(urls)][
+        :_MAX_URLS_PER_INGEST
+    ]
+    if not normalized_urls:
+        raise KnowledgeIngestionError("At least one URL is required")
+    for url in normalized_urls:
+        _validate_fetchable_url_shape(url)
+    return normalized_urls
+
+
+def _assert_fetchable_public_url(
+    url: str,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    host, port, literal_ip = _validate_fetchable_url_shape(url)
+
+    if literal_ip is not None:
+        return (literal_ip,)
+
+    try:
+        resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError, OverflowError) as exc:
+        raise KnowledgeIngestionError("Website host could not be resolved") from exc
+
+    addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    for record in resolved:
+        raw_address = str(record[4][0]).split("%", maxsplit=1)[0]
+        try:
+            addresses.add(ipaddress.ip_address(raw_address))
+        except ValueError as exc:
+            raise KnowledgeIngestionError("Website host resolved to an invalid address") from exc
+
+    if not addresses:
+        raise KnowledgeIngestionError("Website host did not resolve to an address")
+    for address in addresses:
+        _assert_public_ip(address)
+    # Prefer IPv4 where both families are available. Some production container
+    # networks advertise IPv6 DNS answers without having an IPv6 route.
+    return tuple(sorted(addresses, key=lambda address: (address.version, int(address))))
+
+
+def _validate_fetchable_url_shape(
+    url: str,
+) -> tuple[str, int, ipaddress.IPv4Address | ipaddress.IPv6Address | None]:
+    if len(url) > _MAX_URL_LENGTH:
+        raise KnowledgeIngestionError("URL exceeds the maximum supported length")
+
     parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise KnowledgeIngestionError("Only http and https URLs are supported")
+    if parsed.username is not None or parsed.password is not None:
+        raise KnowledgeIngestionError("URLs containing credentials are not supported")
+
     host = (parsed.hostname or "").strip().lower()
     if not host:
         raise KnowledgeIngestionError("URL host is required")
     if host in {"localhost"} or host.endswith(".localhost"):
         raise KnowledgeIngestionError("Localhost URLs are not supported for website knowledge")
+
     try:
-        ip = ipaddress.ip_address(host)
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError as exc:
+        raise KnowledgeIngestionError("URL port is invalid") from exc
+    expected_port = 443 if parsed.scheme.lower() == "https" else 80
+    if port != expected_port:
+        raise KnowledgeIngestionError(
+            "Website knowledge URLs must use the standard HTTPS or HTTP port"
+        )
+
+    try:
+        literal_ip = ipaddress.ip_address(host)
     except ValueError:
-        return
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-        raise KnowledgeIngestionError("Private network URLs are not supported for website knowledge")
+        literal_ip = None
+
+    if literal_ip is not None:
+        _assert_public_ip(literal_ip)
+    return host, port, literal_ip
+
+
+def _assert_public_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+    if not address.is_global:
+        raise KnowledgeIngestionError(
+            "Private or non-public network URLs are not supported for website knowledge"
+        )
+
+
+def _pinned_request_target(
+    url: str,
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> tuple[str, dict[str, str], dict[str, str]]:
+    """Build a request that connects to the address already validated above.
+
+    Keeping the original Host header and TLS SNI preserves virtual hosting while
+    avoiding a second DNS lookup that could otherwise be changed after validation.
+    """
+
+    parsed = urlparse(url)
+    original_host = (parsed.hostname or "").encode("idna").decode("ascii")
+    address_host = f"[{address}]" if address.version == 6 else str(address)
+    explicit_port = parsed.port
+    request_netloc = f"{address_host}:{explicit_port}" if explicit_port is not None else address_host
+
+    host_header = f"[{original_host}]" if ":" in original_host else original_host
+    if explicit_port is not None:
+        host_header = f"{host_header}:{explicit_port}"
+
+    request_url = urlunparse(
+        (
+            parsed.scheme,
+            request_netloc,
+            parsed.path or "/",
+            parsed.params,
+            parsed.query,
+            "",
+        )
+    )
+    extensions = {"sni_hostname": original_host} if parsed.scheme.lower() == "https" else {}
+    return request_url, {"Host": host_header}, extensions
 
 
 def summarize_excerpt(text: str, *, limit: int) -> str:
@@ -601,10 +796,11 @@ def _score_chunk(search_text: str, query_tokens: list[str]) -> float:
 
 
 def _source_payload(*, source: KnowledgeSource, chunks: list[KnowledgeChunk]) -> dict[str, Any]:
+    display_url = public_source_url(source.url)
     return {
         "id": source.id,
-        "url": source.url,
-        "normalized_url": source.normalized_url,
+        "url": display_url,
+        "normalized_url": public_source_url(source.normalized_url),
         "title": source.title,
         "status": source.status,
         "content_hash": source.content_hash,
@@ -627,8 +823,8 @@ def _source_payload(*, source: KnowledgeSource, chunks: list[KnowledgeChunk]) ->
 
 def _source_extraction_payload(*, source: KnowledgeSource, chunks: list[str]) -> dict[str, Any]:
     return {
-        "url": source.url,
-        "normalized_url": source.normalized_url,
+        "url": public_source_url(source.url),
+        "normalized_url": public_source_url(source.normalized_url),
         "title": source.title,
         "status": source.status,
         "text_excerpt": source.text_excerpt,

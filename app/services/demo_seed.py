@@ -146,7 +146,9 @@ DEMO_CLIENT_SPECS: list[DemoClientSpec] = [
 
 
 def can_seed_demo(settings: Settings) -> bool:
-    return settings.env.lower() == "dev" or settings.enable_demo_seed
+    # Demo portals use documented fixture credentials. Never expose them just
+    # because a deployment forgot to change ENV from its development default.
+    return bool(settings.enable_demo_seed)
 
 
 def demo_data_present(db: Session) -> bool:

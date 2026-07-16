@@ -1,66 +1,91 @@
 <?php
 
-include ('fonctions.php');
+error_reporting(E_ALL);
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
 
-if(isset($_POST['phone']) AND $_POST['phone'] == '')
-{
-	$devis = false;
-	$lang = nettoyage($_POST['lang']);
-	$subject = nettoyage($_POST['subject']);
-	$nom = nettoyage($_POST['sNom']);
-	if(isset($_POST['sEntreprise']))
-	{
-		$entreprise = nettoyage($_POST['sEntreprise']);
-		$devis = true;
-	}	
-	else
-		$entreprise = '';
-	$email = nettoyage($_POST['sCourriel']);
-	$tel = nettoyage($_POST['sTel']);
-	$msg = nettoyage($_POST['sMessage']);
-	$page = nettoyage($_POST['page']);
-	
-	
-	$to = 'fabien.lagier@3dpreciscan.com';
-	//$to = 'info@concepsim.com';
-	
-	$subject = '3DPreciscan - Courriel concernant: '.$subject;
-	
+require_once __DIR__ . '/fonctions.php';
 
-	$message= "<html></head>
-	<body style='background-color:#eaeaea; padding:10px;'>
-	<table width='100%'  border= '0' align='center' cellpadding='4' bgcolor='#FFFFFF' style='border:1px solid #d7d7d7; font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#333;'>
-	<tr>
-	 <td colspan='2'>
-		<table width='100%' border='0' cellspacing='0' cellpadding='0'>
-			<tr><td height='25' align='left' valign='middle' style='color:#747474; border:1px solid #c1c1c1; padding-left:8px; background-color:#e0dfdf;'><strong>Courriel provenant du formulaire du site Web</strong></td></tr> 
-		</table>
-	 </td>
-	</tr>
-		<tr><td width='30%'>Nom:-</td> <td width='65%'>$nom </td> </tr>
-		<tr><td width='30%'>Entreprise:-</td> <td width='65%'>$entreprise </td> </tr>
-		<tr><td>Courriel :-</td><td>$email</td></tr>
-		<tr><td>Telephone:-</td><td>$tel</td></tr>
-		<tr><td>Message :-</td><td>$msg</td></tr>
-		<tr><td>Langue :-</td><td>$lang</td></tr>
-		<tr><td>Page :-</td><td>$page</td></tr>
-		
-	</table></body></html>";
+crm_require_post();
 
-	$headers  = 'MIME-Version: 1.0' . "\r\n";
-	$headers .= 'Content-type: text/html; charset=utf-8' . "\r\n";
+$lang = crm_post_enum('lang', array('fr', 'en'), 'fr');
+if ($lang === false) $lang = 'fr';
+$devis = array_key_exists('sEntreprise', $_POST);
+$formPath = crm_form_return_path($devis ? ($lang === 'en' ? '/en/quote' : '/soumission') : ($lang === 'en' ? '/en/services' : '/services'));
 
-	// Additional headers
-	$headers .= 'From:<' . $to . '>' . "\r\n";
-	$headers .= 'Reply-To:<'.$email.'>' . "\r\n";
-	//$headers .= 'Cc:'.$cc.'' . "\r\n";
+if (!crm_request_shape_is_bounded(64 * 1024, 36)) {
+	error_log('send-email-services.php: request rejected by size or field-count limit.');
+	crm_redirect($formPath, 'validation');
+}
+crm_require_form_security_configuration();
+if (!crm_rate_limit_allow('services', 6, 600)) {
+	error_log('send-email-services.php: request rejected by rate limit.');
+	crm_redirect($formPath, 'rate');
+}
+if (crm_honeypot_triggered()) {
+	error_log('send-email-services.php: honeypot submission rejected.');
+	crm_redirect('/');
+}
+if (!crm_turnstile_submission_is_valid('services')) {
+	error_log('send-email-services.php: Turnstile submission rejected.');
+	crm_redirect($formPath, 'verification');
+}
 
-	// Mail it
-	$result = mail($to, $subject, $message, $headers);
-	crm_send_lead_webhook(array(
-		'source_page_url' => crm_source_page_url(),
-		'referrer' => crm_referrer_url(),
+$errors = array();
+$submissionId = crm_submission_id_from_post();
+$nom = crm_post_string('sNom', 160);
+$entreprise = $devis ? crm_post_string('sEntreprise', 160) : '';
+$email = crm_post_string('sCourriel', 254);
+$tel = crm_post_string('sTel', 32);
+$subjectInput = crm_post_string('subject', 160);
+$msg = crm_post_string('sMessage', 5000);
+$page = crm_post_string('page', 500);
+
+if ($submissionId === false) $errors[] = 'submission_id';
+if ($nom === false || $nom === '') $errors[] = 'name';
+if ($entreprise === false) $errors[] = 'company';
+if ($email === false || !crm_valid_email($email)) $errors[] = 'email';
+if ($tel === false || !crm_valid_phone($tel)) $errors[] = 'phone';
+if ($subjectInput === false || $subjectInput === '' || !crm_valid_single_line($subjectInput)) $errors[] = 'subject';
+if ($msg === false) $errors[] = 'message';
+if ($page === false) $errors[] = 'page';
+
+if (!empty($errors)) {
+	error_log('send-email-services.php: submission rejected by validation.');
+	crm_redirect($formPath, 'validation', is_string($submissionId) ? $submissionId : '');
+}
+
+$smsConsent = crm_sms_consent_payload($devis ? 'service_quote' : 'service_contact');
+$sourcePageUrl = crm_source_page_url();
+$referrerUrl = crm_referrer_url();
+$mailSubject = '3DPreciscan - Courriel concernant: ' . $subjectInput;
+$message = "<html><head><meta charset='UTF-8'></head>
+<body style='background-color:#eaeaea; padding:10px;'>
+<table width='100%' border='0' align='center' cellpadding='4' bgcolor='#FFFFFF' style='border:1px solid #d7d7d7; font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#333;'>
+<tr><td colspan='2'><strong>Courriel provenant du formulaire de service</strong></td></tr>
+<tr><td width='30%'>Identifiant :</td><td>" . crm_html($submissionId) . "</td></tr>
+<tr><td>Nom :</td><td>" . crm_html($nom) . "</td></tr>
+<tr><td>Entreprise :</td><td>" . crm_html($entreprise) . "</td></tr>
+<tr><td>Courriel :</td><td>" . crm_html($email) . "</td></tr>
+<tr><td>Téléphone :</td><td>" . crm_html($tel) . "</td></tr>
+<tr><td>Sujet :</td><td>" . crm_html($subjectInput) . "</td></tr>
+<tr><td>Message :</td><td>" . nl2br(crm_html($msg), false) . "</td></tr>
+<tr><td>Langue :</td><td>" . crm_html($lang) . "</td></tr>
+<tr><td>Page :</td><td>" . crm_html($page) . "</td></tr>
+</table></body></html>";
+
+$mailSent = false;
+$crmSent = false;
+try {
+	$mailSent = crm_send_html_mail('fabien.lagier@3dpreciscan.com', $mailSubject, $message, $email);
+	$crmSent = crm_send_lead_webhook(array(
+		'submission_id' => $submissionId,
+		'external_lead_id' => $submissionId,
+		'source_page_url' => $sourcePageUrl,
+		'referrer' => $referrerUrl,
+		'consent' => $smsConsent,
 		'lead' => array(
+			'id' => $submissionId,
 			'full_name' => $nom,
 			'phone' => $tel,
 			'email' => $email,
@@ -71,27 +96,21 @@ if(isset($_POST['phone']) AND $_POST['phone'] == '')
 			'company' => $entreprise,
 			'email' => $email,
 			'phone' => $tel,
-			'subject' => $subject,
+			'subject' => $subjectInput,
 			'message' => $msg,
 			'page' => $page,
 			'lang' => $lang,
-			'source_page_url' => crm_source_page_url(),
-			'referrer_url' => crm_referrer_url(),
+			'source_page_url' => $sourcePageUrl,
+			'referrer_url' => $referrerUrl,
 		),
 		'tracking' => crm_tracking_payload(),
 	));
-	if(!$devis)
-	{	
-		if($lang == "fr")
-			header('Location: /merci-services'); 
-		elseif($lang == "en")
-			header('Location: /en/thanks-services'); 
-	}	
-	else
-	{
-		if($lang == "fr")
-			header('Location: /merci-soumission'); 
-		elseif($lang == "en")
-			header('Location: /en/thanks-quote'); 
-	}	
-}	
+} catch (Throwable $exception) {
+	error_log('send-email-services.php: delivery raised an exception for submission=' . $submissionId . '.');
+}
+
+crm_log_delivery('send-email-services.php', $submissionId, $mailSent, $crmSent);
+if (!$mailSent && !$crmSent) crm_redirect($formPath, 'delivery', $submissionId);
+
+if ($devis) crm_redirect($lang === 'en' ? '/en/thanks-quote' : '/merci-soumission');
+crm_redirect($lang === 'en' ? '/en/thanks-services' : '/merci-services');

@@ -5,9 +5,9 @@ Production-minded FastAPI starter for a reusable multi-tenant Lead Conversion SM
 ## Quick How It Works (Current Repo)
 
 1. **Lead webhooks arrive per client key**
-   - Meta: `GET/POST /webhooks/meta/{client_key}` in `app/api/routes_webhooks.py` (`verify_meta_webhook`, `meta_webhook`)
-   - LinkedIn: `POST /webhooks/linkedin/{client_key}` in `app/api/routes_webhooks.py` (`linkedin_webhook`)
-   - Webhook payloads are saved to `audit_logs`, then background processing is enqueued with `enqueue_process_webhook(...)`.
+   - Zapier: `POST /webhooks/zapier/{client_key}` in `app/api/routes_webhooks.py` (`zapier_webhook`)
+   - Website forms: `POST /webhooks/form/{client_key}` in `app/api/routes_webhooks.py` (`website_form_webhook`)
+   - Audit logs retain authentication mode, size, lead counts, and a SHA-256 fingerprint; the submitted lead data is persisted on the lead instead of being duplicated in the audit log. Background processing is then enqueued with `enqueue_process_webhook(...)`.
 
 2. **Lead normalization + persistence + initial SMS**
    - Worker logic is in `app/workers/tasks.py` (`process_webhook_payload_task`, `send_initial_sms_task`).
@@ -19,6 +19,7 @@ Production-minded FastAPI starter for a reusable multi-tenant Lead Conversion SM
 3. **Inbound SMS from Twilio**
    - Endpoint: `POST /sms/inbound/{client_key}` in `app/api/routes_sms.py` (`inbound_sms`).
    - Twilio signature verification uses `verify_twilio_signature(...)` in `app/core/security.py`.
+   - Production callbacks fail closed unless that client has a Twilio auth token and the request has a valid Twilio signature.
    - STOP/HELP and rate-limits are handled in `app/services/compliance.py`.
    - Messages are saved in `messages`, decisions are saved in `audit_logs`, and state transitions in `conversation_states`.
 
@@ -29,7 +30,8 @@ Production-minded FastAPI starter for a reusable multi-tenant Lead Conversion SM
 
 5. **Provider/runtime config path**
    - Env defaults come from `app/core/config.py`.
-   - Runtime UI-saved overrides are persisted in `runtime_settings` table and used by webhook/SMS routes, workers, and provider builders.
+   - Global OpenAI overrides are persisted in `runtime_settings`.
+   - Twilio, Zapier, language, and public URL settings are tenant-scoped and persisted in each client's `provider_config`.
 
 ---
 
@@ -39,7 +41,7 @@ This path assumes:
 - repo already cloned
 - Docker installed
 
-### 1) Prepare env (optional but recommended)
+### 1) Prepare env
 
 ```bash
 cp .env.example .env
@@ -48,7 +50,11 @@ cp .env.example .env
 Minimum to set in `.env`:
 - `ADMIN_TOKEN`
 
-You can leave Twilio/OpenAI/Meta/LinkedIn vars blank and set them from the UI later.
+Generate a long random value (for example, run `openssl rand -hex 32`) and paste the result into `ADMIN_TOKEN`. The API intentionally refuses to start with a value shorter than 32 characters or a common placeholder such as the old `change-me` value.
+
+Production requires `SETTINGS_ENCRYPTION_KEYS` to contain a Fernet key that is independent of `ADMIN_TOKEN`; startup fails when it is missing. Generate one with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. During key rotation, list the new key first and retain old keys until all stored secrets have been rewritten.
+
+You can leave OpenAI blank and configure the global AI provider in the UI. Configure Twilio and optional Zapier settings on each client from `Clients > Edit`.
 
 ### 2) Start everything with one command
 
@@ -56,32 +62,30 @@ You can leave Twilio/OpenAI/Meta/LinkedIn vars blank and set them from the UI la
 ./run.sh
 ```
 
-This starts Postgres, Redis, runs Alembic migrations, then starts API + worker.
+This starts Postgres, Redis, runs Alembic migrations, then starts the API, the default workflow worker, and an isolated website-knowledge worker.
 Equivalent command:
 
 ```bash
 docker compose up --build
 ```
 
-In the default dev compose setup, demo clients and seeded conversations are also populated automatically.
+Non-Compose deployments must also run `rq worker knowledge` and use a private Redis deployment with persistence enabled. Remote website extraction is intentionally kept off both the API process and the default SMS/webhook queue. Compose enables Redis AOF persistence and stores it in the `redis_data` volume.
+
+Demo data is disabled by default. Set `ENABLE_DEMO_SEED=true` only for an intentional local demo environment.
 
 ### 3) Open admin UI
 
 - `http://localhost:8000/ui`
 - Enter `ADMIN_TOKEN` from `.env`
-- The first load should already contain seeded demo clients and conversations in dev
+- A new database starts empty unless you explicitly enabled or manually ran a demo seed
 
-### 4) Configure providers in UI (Runtime Provider Settings)
+### 4) Configure the global AI provider in UI
 
 Set and save:
-- Twilio: `Account SID`, `Auth Token`, `From Number`
-- `Public Base URL` for your tunnel or deployed host, for example `https://abc123.ngrok-free.app`
 - OpenAI: `API Key`, `Model`
 - `AI Mode`: `auto` or `heuristic`
-- Meta verify token
-- LinkedIn verify token
 
-These values are saved server-side (table: `runtime_settings`) and are not returned to browser after save.
+These values are saved server-side in `runtime_settings`. Secret values are encrypted at rest, write-only, and are not returned to the browser after save. `heuristic` is the AI off-switch: it prevents OpenAI provider selection even when an environment or stored API key exists.
 
 ### 5) Create and configure a client in UI
 
@@ -100,6 +104,11 @@ In **Clients > Edit**:
   - operating hours
   - handoff number
   - template overrides (JSON)
+  - Twilio `Account SID`, `Auth Token`, and `From Number`
+  - `Public Base URL` for your tunnel or deployed host, for example `https://abc123.ngrok-free.app`
+  - optional Zapier webhook settings
+
+These tenant-specific channel values are saved in the client's `provider_config`. Secret values are write-only in API and UI responses.
 
 In **Settings > AI Context / Business Playbook** (admin or client portal):
 - Update `AI context` and optional `FAQ context` for the selected client without editing code
@@ -108,9 +117,8 @@ In **Settings > AI Context / Business Playbook** (admin or client portal):
 ### 6) Copy webhook URLs from UI
 
 For selected client key `{client_key}`:
-- Meta verify URL: `https://<your-public-host>/webhooks/meta/{client_key}`
-- Meta events URL: `https://<your-public-host>/webhooks/meta/{client_key}`
-- LinkedIn URL: `https://<your-public-host>/webhooks/linkedin/{client_key}`
+- Zapier lead URL: `https://<your-public-host>/webhooks/zapier/{client_key}`
+- Website form URL: `https://<your-public-host>/webhooks/form/{client_key}`
 - Twilio inbound URL: `https://<your-public-host>/sms/inbound/{client_key}`
 
 For local testing with real providers, expose API using ngrok/cloud tunnel.
@@ -120,39 +128,38 @@ For local testing with real providers, expose API using ngrok/cloud tunnel.
 #### Twilio
 - Phone number webhook (incoming messages):
   - `POST https://<your-public-host>/sms/inbound/{client_key}`
+- In production, configure the client's Twilio auth token (or an explicit deployment fallback) and use Twilio-signed callbacks; unsigned callbacks are rejected.
+- Authenticated inbound callbacks are admitted through atomic Redis limits before a new lead, MMS job, AI turn, or reply can be created. Limits apply per tenant and per shared Twilio account. Redis outages fail closed outside local/test environments, while known-lead STOP/START consent changes remain available and suppress their reply.
 
-#### Meta Lead Ads
-- Verify callback:
-  - `GET https://<your-public-host>/webhooks/meta/{client_key}?hub.mode=subscribe&hub.verify_token=<META_VERIFY_TOKEN>&hub.challenge=<challenge>`
-- Event callback:
-  - `POST https://<your-public-host>/webhooks/meta/{client_key}`
-
-#### LinkedIn Lead Gen
-- Event callback:
-  - `POST https://<your-public-host>/webhooks/linkedin/{client_key}`
+#### Zapier and website forms
+- Send lead JSON to the client-specific Zapier or website-form URL shown in the UI.
+- CRM intake fails closed unless `crm_webhook_secret` is configured for the client (or as the `CRM_WEBHOOK_SECRET` deployment fallback). The old `zapier_webhook_secret` key remains an inbound-only compatibility alias so existing form relays can be migrated without downtime.
+- `ENV=dev` or `ENV=local` never makes intake unsigned by itself. Manual unsigned testing requires `ALLOW_UNSIGNED_CRM_WEBHOOKS=true` and a request whose direct network origin is a loopback address; never enable this on a shared or deployed environment.
+- Preferred authentication is `X-CRM-Webhook-Timestamp: <unix-seconds>` plus `X-CRM-Webhook-Signature: sha256=<hex>`, where the signature is HMAC-SHA256 over `<timestamp>.<exact raw request body>`. Signatures outside the five-minute replay window are rejected.
+- Existing server integrations may use one of the header-only compatibility forms: `X-CRM-Webhook-Secret`, `X-Zapier-Webhook-Secret`, or `X-Zapier-Token`. Query-string secrets are not accepted.
+- Requests are limited to 128 KiB, 10 normalized leads, bounded JSON depth/field sizes, and 60 authenticated requests per client endpoint per minute. Empty or non-actionable leads are rejected.
+- SMS consent is opt-in. Include explicit consent evidence (for example `{"consent":{"sms":true,"method":"explicit_checkbox","captured_at":"...","text":"..."}}`) to authorize an initial SMS; omitted consent is treated as not provided and does not withdraw permission already captured for an existing lead. Withdrawal must be explicit.
+- The bundled PHP landing forms require an explicit HTTPS `CRM_WEBHOOK_URL` and server-side `CRM_WEBHOOK_SECRET` matching the client secret for CRM relay. Configure `CRM_UPLOAD_TMP_DIR` outside the web root; `CRM_MAIL_FROM` sets the fixed envelope sender, and `CRM_TRUSTED_PROXY_IPS` controls which exact proxy IPs may supply client addresses.
+- Set `CRM_FORM_ENV=production` (or `CRM_FORM_PRODUCTION=true`) on the public PHP host. Production form posts fail with HTTP 503 unless both `TURNSTILE_SITE_KEY` and the server-only `TURNSTILE_SECRET_KEY` are configured, `CRM_RATE_LIMIT_REDIS_URL` is a valid `redis://` or `rediss://` URL, and the phpredis extension is installed (`rediss://` requires phpredis 5.3+ for an explicitly verified TLS stream context). `TURNSTILE_EXPECTED_HOSTNAMES` can contain an exact comma-separated hostname allowlist for an additional Siteverify response check.
+- When a Turnstile site key is configured, the contact and quote pages render Cloudflare's official widget and submit `cf-turnstile-response`. Every form handler validates the token through the fixed Siteverify endpoint before email or CRM delivery, checks the per-form action, uses the trustworthy client IP when available, follows no redirects, and fails closed on timeouts or invalid responses. Cloudflare documents that server validation is mandatory and tokens are single-use, expire after five minutes, and are limited to 2,048 characters: [Turnstile server-side validation](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/) and [widget embedding](https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/).
+- For local development, leave `CRM_FORM_ENV` blank (it inherits `APP_ENV`/`ENV`) or set it to `local`, and omit the Turnstile/Redis settings; the widget stays hidden and the locked file limiter uses `CRM_RATE_LIMIT_DIR` outside the web root. The file limiter is deliberately refused in production because it cannot coordinate multiple PHP workers or hosts. A managed WAF remains useful defense-in-depth.
+- Outbound booking delivery accepts only `https://hooks.zapier.com/hooks/catch/...`, uses a stable `event_id` and durable reservation, and retries only delivery failures known to be safe. Configure the Zapier workflow to deduplicate on `event_id`.
+- Outbound booking signing uses the distinct `zapier_booking_webhook_secret` client setting (or `ZAPIER_BOOKING_WEBHOOK_SECRET` deployment fallback). When configured, booking JSON includes `X-LeadOps-Timestamp`, `X-LeadOps-Event-Id`, and an HMAC `X-LeadOps-Signature` over the exact request body. Inbound CRM secrets are deliberately never reused for outbound signing.
+- Direct Meta and LinkedIn provider callbacks are retired; route those form submissions through Zapier or the website-form endpoint.
 
 ### 8) End-to-end test with current endpoints
 
-#### A) Simulate lead intake (Meta)
+#### A) Simulate lead intake (Zapier)
 
 ```bash
-curl -X POST http://localhost:8000/webhooks/meta/<client_key> \
+body='{"id":"zapier-lead-001","full_name":"Jane Prospect","phone_number":"+1 (555) 123-4567","email":"jane@example.com","city":"Austin","consent":{"sms":true,"method":"explicit_checkbox","captured_at":"2026-07-13T12:00:00Z","text":"I agree to receive text messages about this request."}}'
+timestamp="$(date +%s)"
+signature="$(printf '%s' "${timestamp}.${body}" | openssl dgst -sha256 -hmac '<client-webhook-secret>' -hex | awk '{print $2}')"
+curl -X POST http://localhost:8000/webhooks/zapier/<client_key> \
   -H "Content-Type: application/json" \
-  -d '{
-    "entry": [{
-      "changes": [{
-        "value": {
-          "leadgen_id": "meta-lead-001",
-          "field_data": [
-            {"name": "full_name", "values": ["Jane Prospect"]},
-            {"name": "phone_number", "values": ["+1 (555) 123-4567"]},
-            {"name": "email", "values": ["jane@example.com"]},
-            {"name": "city", "values": ["Austin"]}
-          ]
-        }
-      }]
-    }]
-  }'
+  -H "X-CRM-Webhook-Timestamp: ${timestamp}" \
+  -H "X-CRM-Webhook-Signature: sha256=${signature}" \
+  --data-binary "$body"
 ```
 
 Expected:
@@ -161,6 +168,8 @@ Expected:
 - events appear in UI (`Dashboard`, `Conversations`, `Logs`)
 
 #### B) Simulate inbound SMS
+
+Unsigned local callbacks are disabled by default. For this manual curl test only, use a client with no saved Twilio auth token, set `ALLOW_UNSIGNED_TWILIO_WEBHOOKS=true` in the local `.env`, and restart the API. Keep this flag `false` whenever the app is exposed publicly or connected to Twilio.
 
 ```bash
 curl -X POST http://localhost:8000/sms/inbound/<client_key> \
@@ -192,7 +201,13 @@ The UI is now a compact operator workspace with two roles:
 - Left sidebar with icon-first navigation: `Dashboard`, `Clients`, `Conversations`, `CRM`, `Leads`, `Calendar`, `Tasks`, `Logs`, `Settings`, `Test Lab`
 - Top bar with global search, current client selector, environment/runtime badges, refresh, and dark/light theme toggle
 - Dense panels, small controls, monospace metadata, and split panes optimized for desktop operations
-- If you were already on `/ui`, hard-refresh the page after updating because the app ships the UI as one inline HTML/JS template
+- The full React shell is the default UI. The tested legacy shell remains available as an emergency rollback while the migration is monitored.
+- Set `UI_LEGACY_SHELL_ENABLED=true` to force the legacy shell. `UI_REACT_ISLAND_ENABLED=true` is retained for targeted migration testing when `UI_REACT_APP_SHELL_ENABLED=false`; the full-shell flag wins if both React flags are enabled.
+- `UI_LEGACY_SHELL_ENABLED=true` is an emergency override and takes precedence over both React flags. If React is selected but the Vite manifest/build is missing, the UI fails closed with HTTP 503; it does not silently downgrade. Set the legacy override explicitly for emergency rollback.
+- Browser login establishes a signed `SameSite=Strict` session cookie that is `HttpOnly`. `UI_SECURE_COOKIES=auto` makes it `Secure` outside explicit local/test environments; production refuses an insecure override. Unsafe `/ui/api/*` and `/admin/*` browser requests also require the matching `leadops_csrf` cookie in `X-CSRF-Token`; the frontend supplies it automatically.
+- `/ui/api/login/client` is cookie-only and never returns a reusable bearer token. Non-browser server integrations that still require `X-Portal-Token` must temporarily set `ENABLE_LEGACY_PORTAL_TOKEN_LOGIN=true` and obtain it from `POST /ui/api/login/client/token`. That compatibility endpoint is disabled by default and should remain inaccessible to browser code.
+- Non-browser server integrations may continue using the explicit `X-Admin-Token` or gated `X-Portal-Token` bearer-style headers. Those headers are intended for controlled server clients and do not require the browser cookie/CSRF flow when no valid browser session cookie accompanies the request.
+- Rebuild the image after frontend changes so Docker and Compose serve the same hashed assets.
 
 `[Screenshot placeholder: Lead Ops Console shell with sidebar and top bar]`
 
@@ -279,11 +294,11 @@ The UI is now a compact operator workspace with two roles:
 `[Screenshot placeholder: Logs view with event cards and audit table]`
 
 ### Settings
-- Runtime provider settings in the left column (global fallback defaults)
+- Global OpenAI settings and selected-client setup status
 - Selected-client webhook URLs and demo-data controls in the right column
 - Selected-client `AI Context / Business Playbook` and internal calendar availability are editable here (admin and client portal)
 - Demo seed/reset stays in Settings to avoid another low-frequency page
-- Saved provider keys and tokens remain visible to the authenticated admin in this console
+- Saved secrets are write-only; the console shows configured/not-configured status without returning credential values
 
 `[Screenshot placeholder: Settings view with runtime config and demo controls]`
 
@@ -327,10 +342,12 @@ Seeded demo portal credentials:
 - `owner@demo-legal.demo`
 - shared password: `demo-portal-2026`
 
+These are intentionally known demo credentials. Never enable demo seeding in production or on an internet-accessible environment.
+
 ## Demo Seed Data
 
 Automatic dev behavior:
-- `docker compose up --build` runs migrations and then runs `python -m app.scripts.seed_demo`
+- `docker compose up --build` runs migrations and invokes the seed command, which is a no-op unless `ENABLE_DEMO_SEED=true`
 - If demo data is already present, the seed step skips re-creating it
 - Seeded data includes CRM-ready records:
   - mixed CRM stages
@@ -420,9 +437,8 @@ How stages relate to AI states:
 ## Live Phone Testing
 
 To test the conversation AI with your own phone:
-- Configure Twilio runtime settings in `/ui`
-- Set `Public Base URL` in `/ui` to your public tunnel or deployed host
 - Create or select a client
+- Configure that client's Twilio credentials and `Public Base URL` in `Clients > Edit`
 - In `Settings` or `Clients > Webhooks`, copy that client's Twilio inbound webhook URL and set it on your Twilio phone number
 - Open `Test Lab` and enter your personal phone number in `Live test contact`
 - Send the first outbound SMS
@@ -446,9 +462,9 @@ Important:
 ## UI Admin/Settings Coverage
 
 `/ui` now supports:
-- Runtime provider config save (Twilio/OpenAI/Meta/LinkedIn tokens/settings)
+- Global OpenAI runtime config and client-scoped Twilio/Zapier config
 - Client-scoped provider config per business owner (`Clients > Edit > Provider credentials`)
-- Runtime source visibility (`client overrides` vs `global fallback`) in client workspace cards and top badges
+- Client provider readiness and configured-status visibility in workspace cards and top badges
 - Client create + dense client workspace editing
 - Client portal credential management per client
 - Three-pane conversation inbox with thread view and quick actions
@@ -464,11 +480,10 @@ Important:
 - Demo seed + reset controls in dev
 - Recent event summary and audit log preview per client
 
-Security behavior (MVP):
-- Runtime settings are visible again to an authenticated admin session in `/ui`
-- Secret fields are re-populated after save for operator convenience
-- Secrets are not logged by these admin routes
-- Existing signature verification behavior remains in place
+Security behavior:
+- Provider secrets are write-only; authenticated API/UI responses expose only configured-status flags and safe display values
+- Provider secrets are not logged by these admin routes
+- Production Twilio callbacks require an effective auth token and a valid signature; client settings override the optional deployment fallback
 
 ---
 
@@ -481,22 +496,45 @@ Current variables used by the app:
 - `AUTO_CREATE_TABLES`
 - `DATABASE_URL`
 - `REDIS_URL`
+- `POSTGRES_PASSWORD` (Compose)
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `TWILIO_FROM_NUMBER`
+- `PUBLIC_BASE_URL`
+- `SMS_PROVIDER_MODE` (`auto`, `twilio`, or explicit `mock`)
+- `SETTINGS_ENCRYPTION_KEYS`
+- `ALLOW_UNSIGNED_TWILIO_WEBHOOKS`
+- `ALLOW_UNSIGNED_CRM_WEBHOOKS`
+- `CRM_WEBHOOK_SECRET`
+- `ZAPIER_BOOKING_WEBHOOK_SECRET`
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
 - `AI_PROVIDER_MODE`
-- `META_VERIFY_TOKEN`
-- `LINKEDIN_VERIFY_TOKEN`
 - `ADMIN_TOKEN`
 - `ENABLE_DEMO_SEED`
+- `UI_REACT_ISLAND_ENABLED`
+- `UI_REACT_APP_SHELL_ENABLED`
+- `UI_LEGACY_SHELL_ENABLED`
+- `UI_SECURE_COOKIES` (`auto` by default; secure outside local/test environments)
+- `ENABLE_LEGACY_PORTAL_TOKEN_LOGIN` (temporary server-client compatibility; disabled by default)
 - `RQ_EAGER`
+- `TWILIO_INBOUND_TENANT_LIMIT` (aggregate authenticated callbacks per tenant)
+- `TWILIO_INBOUND_ACCOUNT_LIMIT` (shared cap when multiple tenants use one Twilio account)
+- `TWILIO_INBOUND_WINDOW_SECONDS` (Redis-coordinated admission window; deployed outages fail closed)
 - `RATE_LIMIT_COUNT`
 - `RATE_LIMIT_WINDOW_MINUTES`
 - `AFTER_HOURS_FOLLOWUP_MINUTES`
+- `REQUEST_TIMEOUT_SECONDS`
+- `REQUEST_BODY_MAX_BYTES`
+- `MESSAGE_MEDIA_MAX_BYTES`
+- `MESSAGE_MEDIA_STORAGE_DIR`
+- `STACKLEADS_ZAPIER_BOOKING_WEBHOOK_URL` (optional local demo only)
+- `CRM_FORM_ENV` / `CRM_FORM_PRODUCTION` (PHP public-form deployment mode)
+- `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`, `TURNSTILE_EXPECTED_HOSTNAMES` (PHP bot verification)
+- `CRM_RATE_LIMIT_REDIS_URL`, `CRM_RATE_LIMIT_REDIS_PREFIX` (PHP distributed form limiter)
+- `CRM_RATE_LIMIT_DIR`, `CRM_UPLOAD_TMP_DIR`, `CRM_TRUSTED_PROXY_IPS`, `CRM_MAIL_FROM` (PHP form hardening)
 
-Note: UI runtime settings can override Twilio/OpenAI/Meta/LinkedIn values without editing `.env`.
+Note: global OpenAI UI overrides are stored in `runtime_settings`; per-client Twilio, Zapier, language, and public URL values are stored in `clients.provider_config`. Provider secrets and Calendly tokens are encrypted before persistence. Existing plaintext rows are upgraded on application startup.
 
 ---
 
@@ -504,8 +542,8 @@ Note: UI runtime settings can override Twilio/OpenAI/Meta/LinkedIn values withou
 
 ### 1) `403 Invalid Twilio signature`
 - Confirm Twilio webhook URL matches exactly the public URL receiving requests.
-- Ensure Twilio auth token in runtime settings matches Twilio console.
-- For local manual curl tests, keep Twilio auth token blank or use signed requests.
+- Ensure the selected client's Twilio auth token, or the deployment fallback when no client override exists, matches the Twilio console.
+- Production rejects callbacks when the effective Twilio auth token is missing or the signature is invalid. In local `dev`/`test`, unsigned manual curl requests require both a blank effective Twilio token and the explicit `ALLOW_UNSIGNED_TWILIO_WEBHOOKS=true` opt-in.
 - If you are using ngrok or another tunnel, set `Public Base URL` in `/ui` to that exact HTTPS origin.
 
 ### 1b) Twilio auto-replies with `Thanks for the message. Configure your number's SMS URL...`
@@ -514,30 +552,25 @@ Note: UI runtime settings can override Twilio/OpenAI/Meta/LinkedIn values withou
 - Do not use `localhost`; use your tunnel or deployed host.
 - After updating the number webhook, send a fresh inbound SMS and watch the app logs for `POST /sms/inbound/{client_key}`.
 
-### 2) Meta verify challenge fails (`403 Verification failed`)
-- Verify query params are present:
-  - `hub.mode=subscribe`
-  - `hub.verify_token=<configured token>`
-  - `hub.challenge=<value>`
-- Ensure Meta verify token in runtime settings (or env) matches what Meta sends.
-
-### 3) Webhook accepted but no SMS sent
-- Check worker is running (included in `docker compose up --build`)
+### 2) Webhook accepted but no SMS sent
+- Check the default worker is running (included in `docker compose up --build`)
+- For website knowledge ingestion, also check the dedicated `rq worker knowledge` process
 - Check Redis reachable from API/worker
 - Check client has phone in normalized payload
+- Check the lead has explicit SMS consent evidence; consent defaults to false
 - Check lead isn’t opted out and didn’t already receive initial SMS
 
-### 4) ngrok/public URL changed
-- Update URLs in Twilio/Meta/LinkedIn
+### 3) ngrok/public URL changed
+- Update URLs in Twilio, Zapier, and website-form integrations
 - Re-test with UI Test Lab
 
-### 5) DB migration / table errors
+### 4) DB migration / table errors
 - Ensure DB is up
 - Run:
   - `alembic upgrade head`
 - Confirm `runtime_settings` table exists (migration `20260226_0002`)
 
-### 6) AI responses not using OpenAI
+### 5) AI responses not using OpenAI
 - Check runtime status shows AI configured
 - Ensure valid OpenAI key
 - If not configured, app falls back to heuristic provider by design
@@ -547,8 +580,11 @@ Note: UI runtime settings can override Twilio/OpenAI/Meta/LinkedIn values withou
 ## Tests
 
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
+
+Production images install only `requirements.txt`; test, lint, and dependency-audit tooling stays in `requirements-dev.txt`.
 
 Current tests cover:
 - webhook intake -> lead creation -> initial outbound message

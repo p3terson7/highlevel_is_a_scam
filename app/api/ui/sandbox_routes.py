@@ -1,10 +1,52 @@
 from fastapi import APIRouter
+
+from app.services.sandbox_admission import admit_sandbox_action
+
 from .shared import *
 
 router = APIRouter()
 
 _SANDBOX_MODES = {"gpt_only", "gpt_zapier"}
 _ZAPIER_BOOKING_EVENTS = {"zapier_booking_webhook_sent", "zapier_booking_webhook_failed"}
+_SANDBOX_START_LIMIT = 10
+_SANDBOX_START_WINDOW = timedelta(minutes=10)
+_SANDBOX_MESSAGE_LIMIT = 30
+_SANDBOX_MESSAGE_WINDOW = timedelta(minutes=1)
+
+
+def _enforce_sandbox_admission(
+    *,
+    settings: Settings,
+    client_id: int,
+    limit: int,
+    window: timedelta,
+    action: str,
+) -> None:
+    """Reserve a tenant-scoped sandbox budget before invoking the LLM."""
+
+    window_seconds = max(1, int(window.total_seconds()))
+    admission = admit_sandbox_action(
+        settings=settings,
+        client_id=client_id,
+        action=action,
+        limit=limit,
+        window_seconds=window_seconds,
+    )
+    if admission.admitted:
+        return
+
+    if admission.reason == "coordination_unavailable":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"AI sandbox {action} is temporarily unavailable. Try again shortly.",
+            headers={"Retry-After": "30"},
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"AI sandbox {action} limit reached for this workspace. Try again shortly.",
+        headers={"Retry-After": str(window_seconds)},
+    )
 
 
 def _sandbox_booking_debug(message: Message | None) -> dict[str, Any] | None:
@@ -110,6 +152,14 @@ def ui_owner_start_ai_sandbox(
     normalized_phone = normalize_phone(provided_phone) if provided_phone else ""
     if provided_phone and not normalized_phone:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Phone number is invalid")
+
+    _enforce_sandbox_admission(
+        settings=settings,
+        client_id=client.id,
+        limit=_SANDBOX_START_LIMIT,
+        window=_SANDBOX_START_WINDOW,
+        action="start",
+    )
 
     effective_runtime = get_effective_runtime_map_for_client(
         settings=settings,
@@ -301,6 +351,14 @@ def ui_send_ai_sandbox_message(
     if not lead.client:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
 
+    _enforce_sandbox_admission(
+        settings=settings,
+        client_id=lead.client_id,
+        limit=_SANDBOX_MESSAGE_LIMIT,
+        window=_SANDBOX_MESSAGE_WINDOW,
+        action="message",
+    )
+
     now = datetime.now(timezone.utc)
     inbound_message = Message(
         lead_id=lead.id,
@@ -336,6 +394,10 @@ def ui_send_ai_sandbox_message(
             created_at=now,
         )
     )
+    # Persist the inbound turn before any provider-side effect reserves work
+    # in its independent outbox transaction (required for SQLite as well as a
+    # coherent crash-recovery boundary).
+    db.commit()
 
     effective_runtime = get_effective_runtime_map_for_client(
         settings=settings,

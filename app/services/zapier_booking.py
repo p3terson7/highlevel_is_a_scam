@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import re
+import time
 from datetime import datetime, timezone
 from html import escape
 from typing import Any
@@ -11,17 +15,27 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.db.models import AuditLog, CalendarBooking, Client, Lead
+from app.db.models import AuditLog, CalendarBooking, Client, Lead, OutboundRequest
 from app.services.i18n import client_language, normalize_language
 from app.services.lead_summary import format_answer_value
+from app.services.outbound_requests import (
+    complete_outbound_request,
+    fail_outbound_request,
+    reserve_outbound_request,
+)
+from app.services.secret_storage import reveal_secret
 
 ZAPIER_BOOKING_WEBHOOK_CONFIG_KEY = "zapier_booking_webhook_url"
+ZAPIER_BOOKING_WEBHOOK_SECRET_CONFIG_KEY = "zapier_booking_webhook_secret"
 
 _SENT_EVENT = "zapier_booking_webhook_sent"
 _FAILED_EVENT = "zapier_booking_webhook_failed"
 _DEFAULT_TIMEOUT_SECONDS = 8
+_MAX_DELIVERY_ATTEMPTS = 3
 _SCHEMA_VERSION = "2026-06-17"
+_ZAPIER_HOST = "hooks.zapier.com"
 
 logger = get_logger(__name__)
 
@@ -57,22 +71,68 @@ def notify_zapier_booking_webhook(
         trigger=trigger,
     )
     dedupe_key = str(payload.get("meeting", {}).get("dedupe_key") or "").strip()
-    if dedupe_key and _already_sent(db=db, client_id=client.id, lead_id=lead.id, dedupe_key=dedupe_key):
-        return {"status": "skipped", "reason": "already_sent", "dedupe_key": dedupe_key}
+    event_id = str(payload.get("event_id") or "").strip()
+    reservation = reserve_outbound_request(
+        db=db,
+        lead=lead,
+        idempotency_key=f"zapier-booking:{event_id}",
+        request_kind="zapier_booking_webhook",
+        fingerprint_data={"event_id": event_id, "dedupe_key": dedupe_key},
+        pending_response={"delivery_payload": payload, "attempt": 1},
+    )
+    if not reservation.should_send:
+        reason_by_status = {
+            "completed": "already_sent",
+            "pending": "delivery_in_progress",
+            "ambiguous": "delivery_result_unknown",
+            "failed": "delivery_failed",
+        }
+        return {
+            "status": "skipped" if reservation.status in {"completed", "pending"} else "failed",
+            "reason": reason_by_status.get(reservation.status, "already_reserved"),
+            "dedupe_key": dedupe_key,
+            "event_id": event_id,
+        }
 
     try:
-        response = _post_json(url=url, payload=payload, timeout_seconds=timeout_seconds)
-        if response.status_code >= 400:
+        signature_headers = _outbound_signature_headers(client=client, payload=payload)
+        if signature_headers:
+            response = _post_json(
+                url=url,
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+                headers=signature_headers,
+            )
+        else:
+            response = _post_json(url=url, payload=payload, timeout_seconds=timeout_seconds)
+        if not 200 <= response.status_code < 300:
             raise httpx.HTTPStatusError(
                 f"Zapier webhook returned HTTP {response.status_code}",
                 request=response.request,
                 response=response,
             )
     except Exception as exc:
+        ambiguous = _delivery_error_is_ambiguous(exc)
+        retryable = _delivery_error_is_safely_retryable(exc)
         logger.warning(
             "zapier_booking_webhook_failed",
             extra={"client_id": client.id, "lead_id": lead.id, "trigger": trigger, "error": str(exc)},
         )
+        pending_response = (
+            {"delivery_payload": payload, "attempt": 1}
+            if retryable
+            else {"event_id": event_id, "dedupe_key": dedupe_key, "attempt": 1}
+        )
+        fail_outbound_request(
+            db=db,
+            request_id=reservation.request_id,
+            detail=exc,
+            ambiguous=ambiguous,
+            response=pending_response,
+        )
+        retry_scheduled = False
+        if retryable:
+            retry_scheduled = _schedule_zapier_retry(reservation.request_id)
         _record_webhook_audit(
             db=db,
             client=client,
@@ -81,13 +141,32 @@ def notify_zapier_booking_webhook(
             decision={
                 "trigger": trigger,
                 "dedupe_key": dedupe_key,
-                "error": str(exc),
+                "event_id": event_id,
+                "error": str(exc)[:500],
                 "endpoint_host": _webhook_host(url),
-                "payload": payload,
+                "delivery_result_unknown": ambiguous,
+                "safe_to_retry": retryable,
+                "retry_scheduled": retry_scheduled,
             },
         )
-        return {"status": "failed", "reason": str(exc), "dedupe_key": dedupe_key}
+        return {
+            "status": "failed",
+            "reason": "delivery_result_unknown" if ambiguous else str(exc),
+            "dedupe_key": dedupe_key,
+            "event_id": event_id,
+            "retry_scheduled": retry_scheduled,
+        }
 
+    complete_outbound_request(
+        db=db,
+        request_id=reservation.request_id,
+        provider_reference=event_id,
+        response={
+            "event_id": event_id,
+            "dedupe_key": dedupe_key,
+            "status_code": response.status_code,
+        },
+    )
     _record_webhook_audit(
         db=db,
         client=client,
@@ -96,12 +175,17 @@ def notify_zapier_booking_webhook(
         decision={
             "trigger": trigger,
             "dedupe_key": dedupe_key,
+            "event_id": event_id,
             "status_code": response.status_code,
             "endpoint_host": _webhook_host(url),
-            "payload": payload,
         },
     )
-    return {"status": "sent", "status_code": response.status_code, "dedupe_key": dedupe_key}
+    return {
+        "status": "sent",
+        "status_code": response.status_code,
+        "dedupe_key": dedupe_key,
+        "event_id": event_id,
+    }
 
 
 def build_zapier_booking_payload(
@@ -127,7 +211,11 @@ def build_zapier_booking_payload(
         calendar_event=calendar_event,
         form=form,
     )
+    event_id = hashlib.sha256(
+        f"{client.id}:calendar_booking.created:{meeting.get('dedupe_key') or lead.id}".encode("utf-8")
+    ).hexdigest()
     return {
+        "event_id": event_id,
         "event_type": "calendar_booking.created",
         "schema_version": _SCHEMA_VERSION,
         "trigger": trigger,
@@ -147,7 +235,7 @@ def build_zapier_booking_payload(
 
 def _zapier_booking_webhook_url(client: Client) -> str:
     provider_config = client.provider_config if isinstance(client.provider_config, dict) else {}
-    return str(provider_config.get(ZAPIER_BOOKING_WEBHOOK_CONFIG_KEY) or "").strip()
+    return reveal_secret(provider_config.get(ZAPIER_BOOKING_WEBHOOK_CONFIG_KEY) or "")
 
 
 def _client_payload(client: Client) -> dict[str, Any]:
@@ -689,8 +777,8 @@ def _styled_card_html(
             f'max-width:{max_width};margin:0 auto;padding:28px 16px;">'
         ),
         (
-            f'<div style="background:#ffffff;border:1px solid #e5e5ea;border-radius:18px;'
-            f'overflow:hidden;">'
+            '<div style="background:#ffffff;border:1px solid #e5e5ea;border-radius:18px;'
+            'overflow:hidden;">'
         ),
         '<div style="padding:28px 28px 10px;">',
         (
@@ -891,23 +979,240 @@ def _record_webhook_audit(
     db.commit()
 
 
-def _already_sent(*, db: Session, client_id: int, lead_id: int, dedupe_key: str) -> bool:
-    recent = db.scalars(
-        select(AuditLog)
-        .where(
-            AuditLog.client_id == client_id,
-            AuditLog.lead_id == lead_id,
-            AuditLog.event_type == _SENT_EVENT,
+def retry_zapier_booking_webhook_delivery(
+    *,
+    db: Session,
+    request_id: int,
+    timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    record = db.scalar(
+        select(OutboundRequest)
+        .where(OutboundRequest.id == request_id)
+        .with_for_update()
+    )
+    if record is None or record.request_kind != "zapier_booking_webhook":
+        return {"status": "skipped", "reason": "delivery_not_found"}
+    if record.status == "completed":
+        return {"status": "skipped", "reason": "already_sent"}
+    if record.status != "failed":
+        return {"status": "skipped", "reason": f"delivery_{record.status}"}
+
+    lead = db.get(Lead, record.lead_id)
+    client = db.get(Client, record.client_id)
+    payload = dict((record.response_json or {}).get("delivery_payload") or {})
+    if lead is None or client is None or not payload:
+        record.status = "failed"
+        record.error_detail = "Delivery dependencies or payload are missing"
+        db.commit()
+        return {"status": "failed", "reason": "delivery_dependencies_missing"}
+
+    completed_attempts = int((record.response_json or {}).get("attempt") or 1)
+    if completed_attempts >= _MAX_DELIVERY_ATTEMPTS:
+        dead_letter_response = dict(record.response_json or {})
+        dead_letter_response.pop("delivery_payload", None)
+        record.status = "dead_letter"
+        record.response_json = {
+            **dead_letter_response,
+            "recovery_state": "dead_letter",
+            "dead_letter_reason": "attempt_cap_reached",
+            "dead_lettered_at": datetime.now(timezone.utc).isoformat(),
+        }
+        record.error_detail = "Zapier delivery retry attempt cap reached"
+        record.updated_at = datetime.now(timezone.utc)
+        _record_webhook_audit(
+            db=db,
+            client=client,
+            lead=lead,
+            event_type=_FAILED_EVENT,
+            decision={
+                "reason": "attempt_cap_reached",
+                "attempt": completed_attempts,
+                "max_attempts": _MAX_DELIVERY_ATTEMPTS,
+            },
         )
-        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-        .limit(25)
-    ).all()
-    return any(str((row.decision or {}).get("dedupe_key") or "") == dedupe_key for row in recent)
+        return {
+            "status": "failed",
+            "reason": "attempt_cap_reached",
+            "attempt": completed_attempts,
+        }
+
+    url = _zapier_booking_webhook_url(client)
+    if not _valid_webhook_url(url):
+        record.status = "failed"
+        record.error_detail = "Zapier webhook URL is missing or invalid"
+        db.commit()
+        return {"status": "failed", "reason": "invalid_url"}
+
+    attempt = completed_attempts + 1
+    record.status = "pending"
+    record.response_json = {"delivery_payload": payload, "attempt": attempt}
+    record.error_detail = ""
+    record.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    try:
+        signature_headers = _outbound_signature_headers(client=client, payload=payload)
+        if signature_headers:
+            response = _post_json(
+                url=url,
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+                headers=signature_headers,
+            )
+        else:
+            response = _post_json(url=url, payload=payload, timeout_seconds=timeout_seconds)
+        if not 200 <= response.status_code < 300:
+            raise httpx.HTTPStatusError(
+                f"Zapier webhook returned HTTP {response.status_code}",
+                request=response.request,
+                response=response,
+            )
+    except Exception as exc:
+        ambiguous = _delivery_error_is_ambiguous(exc)
+        retryable = _delivery_error_is_safely_retryable(exc)
+        fail_outbound_request(
+            db=db,
+            request_id=record.id,
+            detail=exc,
+            ambiguous=ambiguous,
+            response=(
+                {"delivery_payload": payload, "attempt": attempt}
+                if retryable
+                else {
+                    "event_id": str(payload.get("event_id") or ""),
+                    "dedupe_key": str((payload.get("meeting") or {}).get("dedupe_key") or ""),
+                    "attempt": attempt,
+                }
+            ),
+        )
+        _record_webhook_audit(
+            db=db,
+            client=client,
+            lead=lead,
+            event_type=_FAILED_EVENT,
+            decision={
+                "trigger": str(payload.get("trigger") or "retry"),
+                "dedupe_key": str((payload.get("meeting") or {}).get("dedupe_key") or ""),
+                "event_id": str(payload.get("event_id") or ""),
+                "error": str(exc)[:500],
+                "endpoint_host": _webhook_host(url),
+                "attempt": attempt,
+                "delivery_result_unknown": ambiguous,
+                "safe_to_retry": retryable,
+            },
+        )
+        if retryable:
+            raise
+        return {
+            "status": "failed",
+            "reason": "delivery_result_unknown" if ambiguous else "delivery_rejected",
+            "attempt": attempt,
+        }
+
+    event_id = str(payload.get("event_id") or "")
+    dedupe_key = str((payload.get("meeting") or {}).get("dedupe_key") or "")
+    complete_outbound_request(
+        db=db,
+        request_id=record.id,
+        provider_reference=event_id,
+        response={
+            "event_id": event_id,
+            "dedupe_key": dedupe_key,
+            "status_code": response.status_code,
+            "attempt": attempt,
+        },
+    )
+    _record_webhook_audit(
+        db=db,
+        client=client,
+        lead=lead,
+        event_type=_SENT_EVENT,
+        decision={
+            "trigger": str(payload.get("trigger") or "retry"),
+            "dedupe_key": dedupe_key,
+            "event_id": event_id,
+            "status_code": response.status_code,
+            "endpoint_host": _webhook_host(url),
+            "attempt": attempt,
+        },
+    )
+    return {"status": "sent", "event_id": event_id, "attempt": attempt}
 
 
-def _post_json(*, url: str, payload: dict[str, Any], timeout_seconds: int) -> httpx.Response:
-    with httpx.Client(timeout=timeout_seconds) as client:
-        return client.post(url, json=payload)
+def _post_json(
+    *,
+    url: str,
+    payload: dict[str, Any],
+    timeout_seconds: int,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    body = _canonical_json(payload)
+    request_headers = {"Content-Type": "application/json", **(headers or {})}
+    with httpx.Client(
+        timeout=timeout_seconds,
+        follow_redirects=False,
+        trust_env=False,
+    ) as client:
+        return client.post(url, content=body, headers=request_headers)
+
+
+def _canonical_json(payload: dict[str, Any]) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+
+
+def _outbound_signature_headers(*, client: Client, payload: dict[str, Any]) -> dict[str, str]:
+    provider_config = client.provider_config if isinstance(client.provider_config, dict) else {}
+    secret = reveal_secret(
+        provider_config.get(ZAPIER_BOOKING_WEBHOOK_SECRET_CONFIG_KEY)
+        or get_settings().zapier_booking_webhook_secret
+        or ""
+    )
+    if not secret:
+        return {}
+    timestamp = str(int(time.time()))
+    signed = timestamp.encode("ascii") + b"." + _canonical_json(payload)
+    signature = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+    return {
+        "X-LeadOps-Event-Id": str(payload.get("event_id") or ""),
+        "X-LeadOps-Timestamp": timestamp,
+        "X-LeadOps-Signature": f"sha256={signature}",
+    }
+
+
+def _delivery_error_is_ambiguous(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return False
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return status_code == 408 or status_code >= 500
+    return True
+
+
+def _delivery_error_is_safely_retryable(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {425, 429}
+    return False
+
+
+def _schedule_zapier_retry(request_id: int) -> bool:
+    try:
+        from app.workers.tasks import enqueue_zapier_booking_retry
+
+        return enqueue_zapier_booking_retry(request_id)
+    except Exception as exc:
+        logger.warning(
+            "zapier_booking_retry_not_scheduled",
+            extra={"request_id": request_id, "error": str(exc)},
+        )
+        return False
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -956,9 +1261,21 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def _valid_webhook_url(url: str) -> bool:
-    parsed = urlparse(url)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    try:
+        parsed = urlparse(str(url or "").strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == _ZAPIER_HOST
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+        and parsed.path.startswith("/hooks/catch/")
+        and not parsed.fragment
+    )
 
 
 def _webhook_host(url: str) -> str:
-    return urlparse(url).netloc
+    return str(urlparse(url).hostname or "").lower()

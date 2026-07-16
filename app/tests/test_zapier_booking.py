@@ -1,15 +1,65 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+from types import SimpleNamespace
+
 import httpx
 from sqlalchemy import select
 
-from app.db.models import AuditLog, Client, ConversationStateEnum, Lead, LeadSource
+from app.db.models import AuditLog, Client, ConversationStateEnum, Lead, LeadSource, OutboundRequest
 from app.db.session import get_session_factory
 from app.services import zapier_booking
 
 
 def _admin_headers() -> dict[str, str]:
-    return {"X-Admin-Token": "test-admin-token"}
+    return {"X-Admin-Token": "test-admin-token-32-characters-long!"}
+
+
+def test_outbound_booking_signing_uses_only_dedicated_secret(monkeypatch):
+    payload = {"event_id": "event-123", "meeting": {"dedupe_key": "booking-123"}}
+    monkeypatch.setattr(zapier_booking.time, "time", lambda: 1_700_000_000)
+    monkeypatch.setattr(
+        zapier_booking,
+        "get_settings",
+        lambda: SimpleNamespace(zapier_booking_webhook_secret=""),
+    )
+
+    client = SimpleNamespace(
+        provider_config={
+            "crm_webhook_secret": "inbound-secret",
+            "zapier_webhook_secret": "legacy-inbound-secret",
+            "zapier_booking_webhook_secret": "outbound-secret",
+        }
+    )
+    headers = zapier_booking._outbound_signature_headers(client=client, payload=payload)
+    signed = b"1700000000." + zapier_booking._canonical_json(payload)
+    expected = hmac.new(b"outbound-secret", signed, hashlib.sha256).hexdigest()
+
+    assert headers == {
+        "X-LeadOps-Event-Id": "event-123",
+        "X-LeadOps-Timestamp": "1700000000",
+        "X-LeadOps-Signature": f"sha256={expected}",
+    }
+
+    legacy_only = SimpleNamespace(provider_config={"zapier_webhook_secret": "legacy-secret"})
+    assert zapier_booking._outbound_signature_headers(client=legacy_only, payload=payload) == {}
+
+    monkeypatch.setattr(
+        zapier_booking,
+        "get_settings",
+        lambda: SimpleNamespace(zapier_booking_webhook_secret="deployment-outbound-secret"),
+    )
+    fallback_headers = zapier_booking._outbound_signature_headers(
+        client=legacy_only,
+        payload=payload,
+    )
+    fallback_expected = hmac.new(
+        b"deployment-outbound-secret",
+        signed,
+        hashlib.sha256,
+    ).hexdigest()
+    assert fallback_headers["X-LeadOps-Signature"] == f"sha256={fallback_expected}"
 
 
 def test_manual_calendar_booking_posts_configured_zapier_payload(test_context, monkeypatch):
@@ -122,11 +172,8 @@ def test_manual_calendar_booking_posts_configured_zapier_payload(test_context, m
         )
         assert sent is not None
         assert sent.decision["status_code"] == 200
-        assert sent.decision["payload"]["lead"]["email"] == "zapier.lead@example.com"
-        assert (
-            sent.decision["payload"]["zapier_mapping_hints"]["important"]
-            == payload["zapier_mapping_hints"]["important"]
-        )
+        assert sent.decision["event_id"] == payload["event_id"]
+        assert "payload" not in sent.decision
 
 
 def test_manual_calendar_booking_payload_respects_french_workspace_language(test_context, monkeypatch):
@@ -233,3 +280,86 @@ def test_zapier_booking_webhook_skips_clients_without_url(test_context, monkeypa
     assert result["status"] == "skipped"
     assert result["reason"] == "not_configured"
     assert calls == 0
+
+
+def test_zapier_booking_url_validation_rejects_ssrf_targets():
+    rejected = [
+        "http://hooks.zapier.com/hooks/catch/1/2/",
+        "https://127.0.0.1/hooks/catch/1/2/",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://hooks.zapier.com.evil.example/hooks/catch/1/2/",
+        "https://user:password@hooks.zapier.com/hooks/catch/1/2/",
+        "https://hooks.zapier.com:8443/hooks/catch/1/2/",
+        "https://hooks.zapier.com/other/path",
+    ]
+
+    assert zapier_booking._valid_webhook_url(
+        "https://hooks.zapier.com/hooks/catch/123/abc/"
+    )
+    assert all(not zapier_booking._valid_webhook_url(url) for url in rejected)
+
+
+def test_zapier_booking_delivery_is_durably_deduplicated(test_context, monkeypatch):
+    session_factory = get_session_factory()
+    calls = 0
+
+    def fake_post_json(*, url: str, payload: dict, timeout_seconds: int) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(zapier_booking, "_post_json", fake_post_json)
+    with session_factory() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.provider_config = {
+            "zapier_booking_webhook_url": "https://hooks.zapier.com/hooks/catch/test/dedupe/"
+        }
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.META,
+            full_name="Dedupe Lead",
+            phone="+15550009999",
+            email="dedupe@example.com",
+            city="",
+            form_answers={},
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.commit()
+
+        calendar_booking = {"provider": "internal", "booking": {"booking_id": 987}}
+        first = zapier_booking.notify_zapier_booking_webhook(
+            db=db,
+            client=client,
+            lead=lead,
+            calendar_booking=calendar_booking,
+            trigger="test",
+        )
+        second = zapier_booking.notify_zapier_booking_webhook(
+            db=db,
+            client=client,
+            lead=lead,
+            calendar_booking=calendar_booking,
+            trigger="test",
+        )
+        reservation = db.scalar(
+            select(OutboundRequest).where(
+                OutboundRequest.client_id == client.id,
+                OutboundRequest.request_kind == "zapier_booking_webhook",
+            )
+        )
+
+    assert first["status"] == "sent"
+    assert second == {
+        "status": "skipped",
+        "reason": "already_sent",
+        "dedupe_key": first["dedupe_key"],
+        "event_id": first["event_id"],
+    }
+    assert calls == 1
+    assert reservation is not None
+    assert reservation.status == "completed"
+    assert "delivery_payload" not in reservation.response_json

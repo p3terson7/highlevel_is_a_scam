@@ -1,6 +1,9 @@
-	<?php
-		include ("../includes/tophead.php");
-		$page = 'soumission';
+<?php
+	require_once __DIR__ . '/fonctions.php';
+	include ("../includes/tophead.php");
+	$page = 'soumission';
+	$formSubmissionId = crm_form_submission_id();
+	$formError = crm_form_error_message(isset($_GET['error']) && is_string($_GET['error']) ? $_GET['error'] : '', 'fr');
 		//sitemap
 	?>
 	
@@ -24,6 +27,7 @@
 	
 	<?php
 		include "../includes/head.php";
+		echo crm_turnstile_script_html();
 		//SEO
 		include "../includes/shemas/soumission-fr.php";
 		include('../includes/google.php');
@@ -62,6 +66,12 @@
 
         <div id="toast-container" style="position: fixed; top: 20px; right: 20px; z-index: 999999;"></div>
 
+		<?php if ($formError !== ''): ?>
+			<div role="alert" style="margin-bottom:20px; padding:14px 16px; border:1px solid #b42318; background:#fff4f2; color:#7a271a; border-radius:8px;">
+				<?php echo crm_html($formError); ?>
+			</div>
+		<?php endif; ?>
+
         <form action="/php/send-email-soumission.php" method="post" id="formulaireS" enctype="multipart/form-data" class="modern-quote-form" novalidate>
                     
             <div class="form-grid">
@@ -73,7 +83,7 @@
                         <label class="form-group__label">Secteur d'activité *</label>
                         <div class="radio-group" id="group-type-client">
                             <label class="radio-option">
-                                <input type="radio" class="type_client" name="type_client" value="Company">
+                                <input type="radio" class="type_client" name="type_client" value="Company" required>
                                 <span class="radio-custom"></span>
                                 Entreprise
                             </label>
@@ -87,18 +97,18 @@
 
                     <div class="form-group">
                         <label for="sNom" class="form-group__label">Votre nom (et nom de l'entreprise si applicable) *</label>
-                        <input type="text" name="sNom" id="sNom" required minlength="3" placeholder="John Doe / Acme Corp" class="form-control">
-                        <input type="text" name="phone" class="ws_check" autocomplete="off" style="display:none !important;">
+                        <input type="text" name="sNom" id="sNom" required minlength="3" maxlength="160" autocomplete="name" placeholder="John Doe / Acme Corp" class="form-control">
+                        <input type="text" name="phone" class="ws_check" autocomplete="off" tabindex="-1" aria-hidden="true" style="display:none !important;">
                     </div>
 
                     <div class="form-group">
                         <label for="sTel" class="form-group__label">Votre numéro de téléphone *</label>
-                        <input type="tel" name="sTel" id="sTel" required pattern="^[0-9-+s() ]{7,20}$" placeholder="819-313-1152" class="form-control">
+                        <input type="tel" name="sTel" id="sTel" required maxlength="32" pattern="[0-9+(). \-]{7,32}" autocomplete="tel" placeholder="819-313-1152" class="form-control">
                     </div>
 
                     <div class="form-group">
                         <label for="sCourriel" class="form-group__label">Votre adresse courriel *</label>
-                        <input type="email" name="sCourriel" id="sCourriel" required placeholder="exemple@domaine.com" class="form-control">
+                        <input type="email" name="sCourriel" id="sCourriel" required maxlength="254" autocomplete="email" placeholder="exemple@domaine.com" class="form-control">
                     </div>
                 </div>
 
@@ -108,37 +118,38 @@
                     <div class="form-group">
                         <label class="form-group__label">Dimensions de l'objet *</label>
                         <div class="dimensions-row">
-                            <input type="text" name="hauteur" id="dim-h" placeholder="Hauteur" required class="form-control">
-                            <input type="text" name="largeur" id="dim-w" placeholder="Largeur" required class="form-control">
-                            <input type="text" name="longueur" id="dim-l" placeholder="Longueur" required class="form-control">
-                            <input type="text" name="autres" id="dim-o" placeholder="Autres" class="form-control">
+                            <input type="text" name="hauteur" id="dim-h" placeholder="Hauteur" required maxlength="100" class="form-control">
+                            <input type="text" name="largeur" id="dim-w" placeholder="Largeur" required maxlength="100" class="form-control">
+                            <input type="text" name="longueur" id="dim-l" placeholder="Longueur" required maxlength="100" class="form-control">
+                            <input type="text" name="autres" id="dim-o" placeholder="Autres" maxlength="160" class="form-control">
                         </div>
                     </div>
 
                     <div class="form-group">
                         <label class="form-group__label">Joindre des fichiers (Images, STL...)</label>
                         <div class="file-upload-wrapper js">
-                            <input type="file" name="images[]" id="images" class="inputfile inputfile-1" multiple="multiple">
+                            <input type="file" name="images[]" id="images" class="inputfile inputfile-1" multiple="multiple" accept=".jpg,.jpeg,.png,.gif,.webp,.pdf,.stl,image/jpeg,image/png,image/gif,image/webp,application/pdf,model/stl">
                             <label for="images" class="file-upload-trigger">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="17" viewBox="0 0 20 17" fill="currentColor">
                                     <path d="M10 0l-5.2 4.9h3.3v5.1h3.8v-5.1h3.3l-5.2-4.9zm9.3 11.5l-3.2-2.1h-2l3.4 2.6h-3.5c-.1 0-.2.1-.2.1l-.8 2.3h-6l-.8-2.2c-.1-.1-.1-.2-.2-.2h-3.6l3.4-2.6h-2l-3.2 2.1c-.4.3-.7 1-.6 1.5l.6 3.1c.1.5.7.9 1.2.9h16.3c.6 0 1.1-.4 1.3-.9l.6-3.1c.1-.5-.2-1.2-.7-1.5z"/>
                                 </svg> 
                                 <span>Joindre des images + fichiers STL&hellip;</span>
                             </label>
+                            <p class="form-help">Jusqu’à 5 fichiers JPG, PNG, GIF, WebP, PDF ou STL; 8 Mo par fichier et 15 Mo au total.</p>
                             <ul class="images-preview-list images"></ul>
                         </div>
                     </div>
 
                     <div class="form-group">
                         <label for="sDelai" class="form-group__label">Délai de réalisation souhaité?</label>
-                        <input type="text" name="sDelai" id="sDelai" placeholder="ex. : 2 semaines" class="form-control">
+                        <input type="text" name="sDelai" id="sDelai" maxlength="160" placeholder="ex. : 2 semaines" class="form-control">
                     </div>
 
                     <div class="form-group">
                         <label class="form-group__label">La demande est-elle urgente? *</label>
                         <div class="radio-group" id="group-urgent">
                             <label class="radio-option">
-                                <input type="radio" name="urgent" value="yes">
+                                <input type="radio" name="urgent" value="yes" required>
                                 <span class="radio-custom"></span>
                                 Oui
                             </label>
@@ -216,8 +227,17 @@
 
                 <div class="form-group" style="margin-top: 30px;">
                     <label for="info" class="form-group__label">Informations additionnelles</label>
-                    <textarea name="info" id="info" rows="6" placeholder="Décrivez votre projet, les détails du matériau, les tolérances requises, etc..." class="form-control form-control--textarea"></textarea>
+                    <textarea name="info" id="info" rows="6" maxlength="5000" placeholder="Décrivez votre projet, les détails du matériau, les tolérances requises, etc..." class="form-control form-control--textarea"></textarea>
                 </div>
+
+                <div class="form-group" style="margin-top: 24px;">
+                    <label for="sms_consent" style="display: flex; align-items: flex-start; gap: 10px; line-height: 1.45; cursor: pointer;">
+                        <input type="checkbox" name="sms_consent" id="sms_consent" value="accepted" style="margin-top: 4px; flex: 0 0 auto;">
+                        <span>J’accepte de recevoir des messages texte de 3D PreciScan au numéro fourni au sujet de ma demande. La fréquence varie. Des frais de messagerie peuvent s’appliquer. Mon consentement n’est pas une condition de service. Répondez STOP pour vous désabonner.</span>
+                    </label>
+                </div>
+
+				<?php echo crm_turnstile_widget_html('quote'); ?>
 
                 <div class="form-submit-wrapper">
                     <input type="submit" value="Envoyer la demande" class="form-submit-btn" id="submit-btn">
@@ -225,6 +245,7 @@
             </div>
 
             <input type="text" name="lang" value="fr" hidden> 
+			<input type="hidden" name="submission_id" value="<?php echo crm_html($formSubmissionId); ?>">
             <input type="hidden" name="utm_source" id="utm_source">
             <input type="hidden" name="utm_medium" id="utm_medium">
             <input type="hidden" name="utm_campaign" id="utm_campaign">

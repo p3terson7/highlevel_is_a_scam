@@ -1,22 +1,44 @@
 from __future__ import annotations
 
 import json
+import socket
+from types import SimpleNamespace
 
+import httpx
+import pytest
 from sqlalchemy import select
 
-from app.db.models import Client, ConversationStateEnum, Lead, LeadSource
+from app.core.config import Settings
+from app.db.models import AuditLog, Client, ConversationStateEnum, Lead, LeadSource
 from app.db.session import get_session_factory
-from app.services.knowledge import FetchResult, KnowledgeIngestionService, chunk_text, extract_page_text
+from app.services.knowledge import (
+    FetchResult,
+    KnowledgeIngestionError,
+    KnowledgeIngestionService,
+    chunk_text,
+    extract_page_text,
+)
 from app.services.llm_agent import LLMAgent
+from app.workers import knowledge_tasks
+from app.workers.knowledge_tasks import (
+    KnowledgeIngestionBusy,
+    KnowledgeIngestionQueueUnavailable,
+    enqueue_knowledge_ingestion,
+    process_knowledge_ingestion_task,
+)
 
 
 def _admin_headers() -> dict[str, str]:
-    return {"X-Admin-Token": "test-admin-token"}
+    return {"X-Admin-Token": "test-admin-token-32-characters-long!"}
 
 
-def test_knowledge_ingestion_endpoint_returns_extraction_result(test_context, monkeypatch):
+def test_knowledge_ingestion_endpoint_queues_then_worker_extracts(test_context, monkeypatch):
+    fetch_calls: list[str] = []
+    queued: dict[str, object] = {}
+
     def fake_fetch(self, url: str) -> FetchResult:
         _ = self
+        fetch_calls.append(url)
         return FetchResult(
             url=url,
             status_code=200,
@@ -36,21 +58,61 @@ def test_knowledge_ingestion_endpoint_returns_extraction_result(test_context, mo
         )
 
     monkeypatch.setattr(KnowledgeIngestionService, "_fetch_url", fake_fetch)
+    monkeypatch.setattr(
+        "app.api.ui.client_routes.enqueue_knowledge_ingestion",
+        lambda **kwargs: queued.update(kwargs) or "knowledge-job-1",
+    )
 
     response = test_context.client.post(
         f"/ui/api/owner/{test_context.client_key}/knowledge/ingest",
         headers=_admin_headers(),
-        json={"urls": ["https://acme.example/services"], "replace": True},
+        json={
+            "urls": ["https://acme.example/services?token=private-crawl-token"],
+            "replace": True,
+        },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     payload = response.json()
-    assert payload["total_sources"] == 1
-    assert payload["total_chunks"] >= 1
-    assert payload["extraction"]["pages"][0]["status"] == "ok"
-    assert "battery storage" in payload["extraction"]["pages"][0]["text_excerpt"].lower()
-    assert "battery storage" in payload["extraction"]["business_profile_context"].lower()
-    assert "battery storage" in payload["business_profile_context"].lower()
+    assert payload["status"] == "queued"
+    assert payload["job_id"] == "knowledge-job-1"
+    assert payload["extraction"]["pages"][0]["status"] == "queued"
+    assert payload["extraction"]["pages"][0]["url"] == "https://acme.example/services"
+    assert "private-crawl-token" not in json.dumps(payload)
+    assert fetch_calls == []
+    assert queued["urls"] == [
+        "https://acme.example/services?token=private-crawl-token"
+    ]
+
+    monkeypatch.setattr(
+        knowledge_tasks,
+        "_claim_or_renew_knowledge_admission",
+        lambda **kwargs: True,
+    )
+    released: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        knowledge_tasks,
+        "_release_knowledge_admission",
+        lambda **kwargs: released.append(kwargs),
+    )
+    worker_result = process_knowledge_ingestion_task(
+        int(queued["client_id"]),
+        list(queued["urls"]),
+        bool(queued["replace"]),
+        str(queued["actor_role"]),
+        "admission-token",
+    )
+
+    assert worker_result["status"] == "ok"
+    assert fetch_calls == [
+        "https://acme.example/services?token=private-crawl-token"
+    ]
+    assert released == [
+        {
+            "client_id": queued["client_id"],
+            "admission_token": "admission-token",
+        }
+    ]
 
     refreshed = test_context.client.get(
         f"/ui/api/owner/{test_context.client_key}/knowledge",
@@ -59,9 +121,147 @@ def test_knowledge_ingestion_endpoint_returns_extraction_result(test_context, mo
     assert refreshed.status_code == 200
     refreshed_payload = refreshed.json()
     source = refreshed_payload["sources"][0]
+    assert source["url"] == "https://acme.example/services"
+    assert source["normalized_url"] == "https://acme.example/services"
+    assert "private-crawl-token" not in json.dumps(refreshed_payload)
     assert source["title"] == "Acme Solar Services"
     assert source["chunks"]
     assert "battery storage" in refreshed_payload["business_profile_context"].lower()
+    with get_session_factory()() as db:
+        audit = db.scalar(
+            select(AuditLog).where(AuditLog.event_type == "knowledge_urls_ingested")
+        )
+        assert audit is not None
+        assert audit.decision["url_hosts"] == ["acme.example"]
+        assert "urls" not in audit.decision
+
+
+def test_knowledge_ingestion_admission_is_bounded_per_tenant(monkeypatch):
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+
+        def set(self, key, value, *, nx, ex):
+            _ = ex
+            if nx and key in self.values:
+                return False
+            self.values[str(key)] = str(value)
+            return True
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple, dict]] = []
+
+        def enqueue(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return SimpleNamespace(id=f"knowledge-job-{len(self.calls)}")
+
+    redis = FakeRedis()
+    queue = FakeQueue()
+    monkeypatch.setattr(knowledge_tasks, "get_settings", lambda: Settings(rq_eager=False))
+    monkeypatch.setattr(knowledge_tasks, "get_redis_connection", lambda: redis)
+    monkeypatch.setattr(knowledge_tasks, "get_knowledge_queue", lambda: queue)
+
+    first_job = enqueue_knowledge_ingestion(
+        client_id=10,
+        urls=["https://docs.example/services"],
+        replace=True,
+        actor_role="client",
+    )
+    with pytest.raises(KnowledgeIngestionBusy):
+        enqueue_knowledge_ingestion(
+            client_id=10,
+            urls=["https://docs.example/pricing"],
+            replace=True,
+            actor_role="client",
+        )
+    second_tenant_job = enqueue_knowledge_ingestion(
+        client_id=11,
+        urls=["https://docs.example/services"],
+        replace=True,
+        actor_role="client",
+    )
+
+    assert first_job == "knowledge-job-1"
+    assert second_tenant_job == "knowledge-job-2"
+    assert len(queue.calls) == 2
+
+
+def test_knowledge_queue_failure_releases_tenant_admission(monkeypatch):
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+
+        def set(self, key, value, *, nx, ex):
+            _ = ex
+            if nx and key in self.values:
+                return False
+            self.values[str(key)] = str(value)
+            return True
+
+        def eval(self, script, key_count, key, token, *args):
+            _ = script, key_count, args
+            if self.values.get(str(key)) == str(token):
+                self.values.pop(str(key), None)
+                return 1
+            return 0
+
+    class FailingQueue:
+        def enqueue(self, *args, **kwargs):
+            _ = args, kwargs
+            raise RuntimeError("queue unavailable")
+
+    redis = FakeRedis()
+    monkeypatch.setattr(knowledge_tasks, "get_settings", lambda: Settings(rq_eager=False))
+    monkeypatch.setattr(knowledge_tasks, "get_redis_connection", lambda: redis)
+    monkeypatch.setattr(knowledge_tasks, "get_knowledge_queue", lambda: FailingQueue())
+
+    with pytest.raises(KnowledgeIngestionQueueUnavailable):
+        enqueue_knowledge_ingestion(
+            client_id=12,
+            urls=["https://docs.example/services"],
+            replace=True,
+            actor_role="admin",
+        )
+
+    assert redis.values == {}
+
+
+def test_knowledge_ingestion_never_falls_back_inline_in_eager_mode(monkeypatch):
+    monkeypatch.setattr(knowledge_tasks, "get_settings", lambda: Settings(rq_eager=True))
+
+    def unexpected_redis():
+        raise AssertionError("Eager knowledge ingestion must not reach Redis or run inline")
+
+    monkeypatch.setattr(knowledge_tasks, "get_redis_connection", unexpected_redis)
+
+    with pytest.raises(KnowledgeIngestionQueueUnavailable, match="dedicated background worker"):
+        enqueue_knowledge_ingestion(
+            client_id=13,
+            urls=["https://docs.example/services"],
+            replace=True,
+            actor_role="admin",
+        )
+
+
+def test_knowledge_endpoint_reports_tenant_admission_conflict(test_context, monkeypatch):
+    def busy(**kwargs):
+        _ = kwargs
+        raise KnowledgeIngestionBusy("Knowledge ingestion already running")
+
+    monkeypatch.setattr(
+        "app.api.ui.client_routes.enqueue_knowledge_ingestion",
+        busy,
+    )
+
+    response = test_context.client.post(
+        f"/ui/api/owner/{test_context.client_key}/knowledge/ingest",
+        headers=_admin_headers(),
+        json={"urls": ["https://acme.example/services"], "replace": True},
+    )
+
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "30"
 
 
 def test_agent_receives_retrieved_website_knowledge_context(test_context, monkeypatch):
@@ -87,6 +287,8 @@ def test_agent_receives_retrieved_website_knowledge_context(test_context, monkey
         name = "knowledge-aware"
 
         def generate_json(self, system_prompt: str, user_prompt: str):
+            assert "private-rag-token" not in system_prompt
+            assert "private-rag-token" not in user_prompt
             assert "knowledge_context" in system_prompt
             payload = json.loads(user_prompt)
             assert "commercial bim" in payload["knowledge_context"].lower()
@@ -109,7 +311,7 @@ def test_agent_receives_retrieved_website_knowledge_context(test_context, monkey
         KnowledgeIngestionService().ingest_urls(
             db=db,
             client_id=client.id,
-            urls=["https://docs.example/services"],
+            urls=["https://docs.example/services?token=private-rag-token"],
             replace=True,
         )
         lead = Lead(
@@ -268,3 +470,88 @@ def test_chunk_text_does_not_repeat_previous_chunk_tail():
     for previous, current in zip(chunks, chunks[1:]):
         previous_tail = previous[-35:].strip()
         assert previous_tail not in current
+
+
+def test_knowledge_fetch_rejects_hostname_resolving_to_private_address(monkeypatch):
+    def private_dns(host: str, port: int, *, type: int):
+        _ = host
+        return [(socket.AF_INET, type, socket.IPPROTO_TCP, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr("app.services.knowledge.socket.getaddrinfo", private_dns)
+    transport = httpx.MockTransport(
+        lambda request: pytest.fail(f"private target should not be requested: {request.url}")
+    )
+
+    with pytest.raises(KnowledgeIngestionError, match="non-public"):
+        KnowledgeIngestionService(transport=transport)._fetch_url("https://public-looking.example")
+
+
+def test_knowledge_fetch_revalidates_and_blocks_private_redirect_target(monkeypatch):
+    dns_queries: list[str] = []
+
+    def controlled_dns(host: str, port: int, *, type: int):
+        dns_queries.append(host)
+        address = "93.184.216.34" if host == "public.example" else "10.20.30.40"
+        return [(socket.AF_INET, type, socket.IPPROTO_TCP, "", (address, port))]
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "http://internal.example/admin"})
+
+    monkeypatch.setattr("app.services.knowledge.socket.getaddrinfo", controlled_dns)
+
+    with pytest.raises(KnowledgeIngestionError, match="non-public"):
+        KnowledgeIngestionService(transport=httpx.MockTransport(handler))._fetch_url(
+            "https://public.example/start"
+        )
+
+    assert dns_queries == ["public.example", "internal.example"]
+    assert len(requests) == 1
+    assert requests[0].url.host == "93.184.216.34"
+    assert requests[0].headers["host"] == "public.example"
+
+
+def test_knowledge_fetch_preserves_host_while_using_validated_address(monkeypatch):
+    def public_dns(host: str, port: int, *, type: int):
+        assert host == "public.example"
+        return [(socket.AF_INET, type, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "93.184.216.34"
+        assert request.headers["host"] == "public.example"
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            content=b"<html><body><main>Public website content</main></body></html>",
+        )
+
+    monkeypatch.setattr("app.services.knowledge.socket.getaddrinfo", public_dns)
+
+    result = KnowledgeIngestionService(transport=httpx.MockTransport(handler))._fetch_url(
+        "https://public.example/services"
+    )
+
+    assert result.status_code == 200
+    assert result.url == "https://public.example/services"
+    assert "Public website content" in result.html
+
+
+def test_knowledge_fetch_rejects_urls_with_embedded_credentials():
+    with pytest.raises(KnowledgeIngestionError, match="credentials"):
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        KnowledgeIngestionService(transport=transport)._fetch_url(
+            "https://user:password@93.184.216.34/private"
+        )
+
+
+def test_knowledge_fetch_rejects_nonstandard_public_ports():
+    transport = httpx.MockTransport(
+        lambda request: pytest.fail(f"nonstandard port should not be requested: {request.url}")
+    )
+
+    with pytest.raises(KnowledgeIngestionError, match="standard HTTPS or HTTP port"):
+        KnowledgeIngestionService(transport=transport)._fetch_url(
+            "https://93.184.216.34:8443/services"
+        )

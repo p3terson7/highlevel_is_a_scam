@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Kept out of the production image; CI uses this for high-signal static checks.
+httpx2==2.5.0
+pip-audit==2.10.1
+pytest==9.0.3
+ruff==0.12.5

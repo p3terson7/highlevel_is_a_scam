@@ -4,3 +4,6 @@ __pycache__/
 .env
 .venv/
 postgres_data/
+frontend/dist/
+frontend/node_modules/
+react_shell_preview.db

@@ -1,10 +1,76 @@
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.api import routes_sms
+from app.core.config import Settings
 from app.core.deps import get_booking_service, get_llm_agent
-from app.db.models import AuditLog, CalendarBooking, Client, ConversationStateEnum, Lead, LeadSource, Message, MessageAttachment, MessageDirection
+from app.db.models import (
+    AuditLog,
+    CalendarBooking,
+    Client,
+    ConversationStateEnum,
+    InboundWebhookEvent,
+    Lead,
+    LeadSource,
+    Message,
+    MessageAttachment,
+    MessageDirection,
+    OutboundRequest,
+)
 from app.db.session import get_session_factory
 from app.services.booking import BookingService
 from app.services.llm_agent import AgentResponse, LLMAgent
+from app.services.sms_delivery import with_initial_delivery_status
+from app.workers.tasks import process_inbound_media_event_task, recover_webhook_inbox_events
+
+
+def test_inbound_media_queue_failure_requests_provider_retry(monkeypatch):
+    monkeypatch.setattr(
+        routes_sms,
+        "enqueue_process_inbound_media_event",
+        lambda event_id: False,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes_sms._enqueue_inbound_media_or_raise(
+            event_id=42,
+            settings=Settings(rq_eager=False),
+        )
+
+    assert exc_info.value.status_code == 503
+
+
+def test_webhook_recovery_routes_pending_mms_to_media_worker(test_context, monkeypatch):
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 000-4499",
+            "Body": "",
+            "MessageSid": "SM-IN-MEDIA-RECOVERY-001",
+            "NumMedia": "1",
+            "MediaUrl0": "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME",
+            "MediaContentType0": "image/jpeg",
+        },
+    )
+    assert response.status_code == 200
+
+    media_event_ids: list[int] = []
+    monkeypatch.setattr(
+        "app.workers.tasks.enqueue_process_inbound_media_event",
+        lambda event_id: media_event_ids.append(event_id) or object(),
+    )
+
+    def unexpected_generic_enqueue(event_id):
+        raise AssertionError(f"MMS event {event_id} was sent to the generic webhook worker")
+
+    monkeypatch.setattr(
+        "app.workers.tasks.enqueue_process_webhook_event",
+        unexpected_generic_enqueue,
+    )
+
+    assert recover_webhook_inbox_events() == 1
+    assert len(media_event_ids) == 1
 
 
 def test_sms_inbound_booking_turn_sends_slots_via_agent_tool_flow(test_context):
@@ -125,6 +191,221 @@ def test_sms_inbound_duplicate_messagesid_is_idempotent(test_context):
         assert len(inbound_messages) == 1
 
 
+def test_stop_confirmation_is_sent_at_most_once_per_lead(test_context):
+    sent_before = len(test_context.fake_sms.sent)
+
+    first = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550003333", "Body": "STOP", "MessageSid": "SM-STOP-001"},
+    )
+    second = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550003333", "Body": "STOP", "MessageSid": "SM-STOP-002"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(test_context.fake_sms.sent) == sent_before + 1
+
+    with get_session_factory()() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15550003333"))
+        assert lead is not None and lead.opted_out is True
+        audits = db.scalars(
+            select(AuditLog)
+            .where(AuditLog.lead_id == lead.id, AuditLog.event_type == "compliance_stop")
+            .order_by(AuditLog.id)
+        ).all()
+        assert [audit.decision["reply_status"] for audit in audits] == ["sent", "suppressed"]
+        assert audits[-1].decision["suppression_reason"] == "already_opted_out"
+
+
+def test_start_resubscribes_an_opted_out_lead(test_context):
+    sent_before = len(test_context.fake_sms.sent)
+    stop = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550003334", "Body": "STOP", "MessageSid": "SM-STOP-START-001"},
+    )
+    start = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550003334", "Body": "START", "MessageSid": "SM-STOP-START-002"},
+    )
+
+    assert stop.status_code == 200
+    assert start.status_code == 200
+    assert len(test_context.fake_sms.sent) == sent_before + 2
+
+    with get_session_factory()() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15550003334"))
+        assert lead is not None
+        assert lead.opted_out is False
+        assert lead.consented is True
+        assert lead.conversation_state == ConversationStateEnum.NEW
+        assert lead.crm_stage == "New Lead"
+        assert lead.raw_payload["consent_evidence"]["method"] == "sms_start_keyword"
+        audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.lead_id == lead.id,
+                AuditLog.event_type == "compliance_start",
+            )
+        )
+        assert audit is not None
+        assert audit.decision["reply_status"] == "sent"
+
+
+def test_help_remains_available_after_opt_out(test_context):
+    sent_before = len(test_context.fake_sms.sent)
+    test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550003335", "Body": "STOP", "MessageSid": "SM-STOP-HELP-001"},
+    )
+    help_response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550003335", "Body": "HELP", "MessageSid": "SM-STOP-HELP-002"},
+    )
+
+    assert help_response.status_code == 200
+    assert len(test_context.fake_sms.sent) == sent_before + 2
+    with get_session_factory()() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15550003335"))
+        assert lead is not None
+        assert lead.opted_out is True
+        assert lead.consented is False
+        help_audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.lead_id == lead.id,
+                AuditLog.event_type == "compliance_help",
+            )
+        )
+        assert help_audit is not None
+        assert help_audit.decision["reply_status"] == "sent"
+
+
+def test_repeated_stop_does_not_erase_booked_state_restored_by_start(test_context):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = Lead(
+            client_id=1,
+            external_lead_id="booked-opt-out-001",
+            source=LeadSource.MANUAL,
+            full_name="Booked Opt Out",
+            phone="+15550003336",
+            email="booked-optout@example.com",
+            city="Toronto",
+            form_answers={},
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKED,
+            crm_stage="Meeting Booked",
+        )
+        db.add(lead)
+        db.commit()
+
+    for sid in ("SM-BOOKED-STOP-001", "SM-BOOKED-STOP-002"):
+        test_context.client.post(
+            f"/sms/inbound/{test_context.client_key}",
+            data={"From": "+15550003336", "Body": "STOP", "MessageSid": sid},
+        )
+    test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550003336", "Body": "START", "MessageSid": "SM-BOOKED-START-001"},
+    )
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.external_lead_id == "booked-opt-out-001"))
+        assert lead is not None
+        assert lead.opted_out is False
+        assert lead.consented is True
+        assert lead.conversation_state == ConversationStateEnum.BOOKED
+        assert lead.crm_stage == "Meeting Booked"
+
+
+def test_help_reply_is_bounded_to_one_per_rate_window(test_context):
+    sent_before = len(test_context.fake_sms.sent)
+
+    first = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550004444", "Body": "HELP", "MessageSid": "SM-HELP-001"},
+    )
+    second = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550004444", "Body": "HELP", "MessageSid": "SM-HELP-002"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(test_context.fake_sms.sent) == sent_before + 1
+
+    with get_session_factory()() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15550004444"))
+        assert lead is not None
+        audits = db.scalars(
+            select(AuditLog)
+            .where(AuditLog.lead_id == lead.id, AuditLog.event_type == "compliance_help")
+            .order_by(AuditLog.id)
+        ).all()
+        assert [audit.decision["reply_status"] for audit in audits] == ["sent", "suppressed"]
+        assert audits[-1].decision["suppression_reason"] == "rate_limited"
+
+
+def test_admission_limit_runs_before_media_download_and_reply(test_context, monkeypatch):
+    media_job_queued = False
+
+    def unexpected_enqueue(event_id):
+        nonlocal media_job_queued
+        _ = event_id
+        media_job_queued = True
+
+    monkeypatch.setattr("app.api.routes_sms.is_rate_limited", lambda **kwargs: True)
+    monkeypatch.setattr(
+        "app.api.routes_sms.enqueue_process_inbound_media_event",
+        unexpected_enqueue,
+    )
+    sent_before = len(test_context.fake_sms.sent)
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+15550005555",
+            "Body": "HELP",
+            "MessageSid": "SM-LIMITED-001",
+            "NumMedia": "1",
+            "MediaUrl0": "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME",
+            "MediaContentType0": "image/jpeg",
+        },
+    )
+
+    assert response.status_code == 200
+    assert media_job_queued is False
+    assert len(test_context.fake_sms.sent) == sent_before
+    with get_session_factory()() as db:
+        audit = db.scalar(select(AuditLog).where(AuditLog.event_type == "rate_limited"))
+        assert audit is not None
+        assert audit.decision["admission_stage"] == "before_media_and_reply"
+
+
+def test_rate_limited_stop_still_opts_out_without_sending_confirmation(test_context, monkeypatch):
+    monkeypatch.setattr("app.api.routes_sms.is_rate_limited", lambda **kwargs: True)
+    sent_before = len(test_context.fake_sms.sent)
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={"From": "+15550006666", "Body": "STOP", "MessageSid": "SM-LIMITED-STOP-001"},
+    )
+
+    assert response.status_code == 200
+    assert len(test_context.fake_sms.sent) == sent_before
+    with get_session_factory()() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15550006666"))
+        assert lead is not None and lead.opted_out is True
+        audit = db.scalar(
+            select(AuditLog).where(AuditLog.lead_id == lead.id, AuditLog.event_type == "compliance_stop")
+        )
+        assert audit is not None
+        assert audit.decision["reply_status"] == "suppressed"
+        assert audit.decision["suppression_reason"] == "rate_limited"
+
+
 def test_sms_inbound_paused_agent_logs_message_without_reply(test_context):
     SessionLocal = get_session_factory()
     with SessionLocal() as db:
@@ -205,7 +486,12 @@ def test_sms_status_callback_marks_outbound_delivery_warning(test_context):
                 direction=MessageDirection.OUTBOUND,
                 body="Hi, can we help?",
                 provider_message_sid="SM-DELIVERY-001",
-                raw_payload=test_context.fake_sms.with_delivery_status({"source": "test"}, "SM-DELIVERY-001"),
+                raw_payload=with_initial_delivery_status(
+                    {"source": "test"},
+                    provider_sid="SM-DELIVERY-001",
+                    provider="twilio",
+                    callback_url="http://testserver/sms/status-callback",
+                ),
             )
         )
         db.commit()
@@ -225,23 +511,51 @@ def test_sms_status_callback_marks_outbound_delivery_warning(test_context):
 
     assert response.status_code == 200
 
+    duplicate = test_context.client.post(
+        "/sms/status-callback",
+        data={
+            "MessageSid": "SM-DELIVERY-001",
+            "MessageStatus": "undelivered",
+            "ErrorCode": "30005",
+            "ErrorMessage": "Unknown destination handset",
+            "To": "+15550008888",
+            "From": "+15550000000",
+        },
+    )
+    assert duplicate.status_code == 200
+
+    stale = test_context.client.post(
+        "/sms/status-callback",
+        data={
+            "MessageSid": "SM-DELIVERY-001",
+            "MessageStatus": "queued",
+            "To": "+15550008888",
+            "From": "+15550000000",
+        },
+    )
+    assert stale.status_code == 200
+
     with SessionLocal() as db:
         message = db.scalar(select(Message).where(Message.provider_message_sid == "SM-DELIVERY-001"))
         assert message is not None
         delivery = message.raw_payload["delivery"]
         assert delivery["status"] == "undelivered"
         assert delivery["severity"] == "warning"
+        assert delivery["error_code"] == "30005"
+        assert delivery["error_message"] == "Unknown destination handset"
         assert delivery["label_fr"] == "SMS non livré"
         assert "téléphone injoignable" in delivery["description_fr"]
         lead = db.get(Lead, lead_id)
         assert lead is not None
         assert lead.raw_payload["sms_contactability"]["status"] == "sms_failed"
-        audit = db.scalar(select(AuditLog).where(AuditLog.lead_id == lead_id, AuditLog.event_type == "sms_delivery_failed"))
-        assert audit is not None
+        audits = db.scalars(
+            select(AuditLog).where(AuditLog.lead_id == lead_id, AuditLog.event_type == "sms_delivery_failed")
+        ).all()
+        assert len(audits) == 1
 
     thread = test_context.client.get(
         f"/ui/api/conversations/{lead_id}/thread",
-        headers={"X-Admin-Token": "test-admin-token"},
+        headers={"X-Admin-Token": "test-admin-token-32-characters-long!"},
     )
     assert thread.status_code == 200
     outbound = next(item for item in thread.json()["messages"] if item["provider_message_sid"] == "SM-DELIVERY-001")
@@ -277,51 +591,185 @@ def test_sms_inbound_explicit_human_request_handoffs_without_llm(test_context):
 
 
 def test_sms_inbound_media_only_is_stored_and_handed_off(test_context, monkeypatch):
+    download_calls: list[str] = []
+    queued_event_ids: list[int] = []
+
     async def fake_download_twilio_media(**kwargs):
         assert kwargs["media_url"] == "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME"
         assert kwargs["content_type"] == "image/jpeg"
-        return b"inbound-image"
+        download_calls.append(kwargs["media_url"])
+        return b"\xff\xd8\xffinbound-image"
 
-    monkeypatch.setattr("app.api.routes_sms.download_twilio_media", fake_download_twilio_media)
+    monkeypatch.setattr("app.workers.tasks.download_twilio_media", fake_download_twilio_media)
+    monkeypatch.setattr(
+        "app.api.routes_sms.enqueue_process_inbound_media_event",
+        lambda event_id: queued_event_ids.append(event_id) or False,
+    )
+    monkeypatch.setattr("app.workers.tasks._acquire_lead_workflow_lock", lambda **kwargs: None)
+    monkeypatch.setattr("app.workers.tasks.build_sms_service", lambda *args, **kwargs: test_context.fake_sms)
+    monkeypatch.setattr("app.workers.tasks.build_llm_agent", lambda *args, **kwargs: test_context.fake_llm)
+    monkeypatch.setattr("app.workers.tasks.build_booking_service", lambda *args, **kwargs: test_context.fake_booking)
 
+    payload = {
+        "From": "+1 (555) 000-4455",
+        "Body": "",
+        "MessageSid": "SM-IN-MEDIA-001",
+        "NumMedia": "1",
+        "MediaUrl0": "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME",
+        "MediaContentType0": "image/jpeg",
+    }
     response = test_context.client.post(
         f"/sms/inbound/{test_context.client_key}",
-        data={
-            "From": "+1 (555) 000-4455",
-            "Body": "",
-            "MessageSid": "SM-IN-MEDIA-001",
-            "NumMedia": "1",
-            "MediaUrl0": "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME",
-            "MediaContentType0": "image/jpeg",
-        },
+        data=payload,
+    )
+    duplicate = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data=payload,
     )
 
     assert response.status_code == 200
+    assert duplicate.status_code == 200
+    assert download_calls == []
+    assert len(queued_event_ids) == 2
+    assert queued_event_ids[0] == queued_event_ids[1]
     assert test_context.fake_llm.calls == 0
-    assert len(test_context.fake_sms.sent) == 1
-    assert "attachment" in test_context.fake_sms.sent[-1]["body"].lower()
+    assert test_context.fake_sms.sent == []
 
     SessionLocal = get_session_factory()
     with SessionLocal() as db:
         lead = db.scalar(select(Lead).where(Lead.phone == "+15550004455"))
         assert lead is not None
         lead_id = lead.id
+        message = db.scalar(
+            select(Message).where(
+                Message.lead_id == lead.id,
+                Message.direction == MessageDirection.INBOUND,
+            )
+        )
+        assert message is not None
+        assert message.raw_payload["media_ingestion"]["status"] == "pending"
+        assert db.scalar(
+            select(MessageAttachment).where(MessageAttachment.message_id == message.id)
+        ) is None
+        events = db.scalars(
+            select(InboundWebhookEvent).where(
+                InboundWebhookEvent.client_id == lead.client_id,
+                InboundWebhookEvent.endpoint == "sms_inbound_media",
+            )
+        ).all()
+        assert len(events) == 1
+        assert events[0].status == "pending"
+        event_id = events[0].id
+
+    result = process_inbound_media_event_task(event_id)
+    duplicate_result = process_inbound_media_event_task(event_id)
+
+    assert result["status"] == "ok"
+    assert duplicate_result["reason"] == "already_processed"
+    assert len(download_calls) == 1
+    assert test_context.fake_llm.calls == 0
+    assert len(test_context.fake_sms.sent) == 1
+    assert "attachment" in test_context.fake_sms.sent[-1]["body"].lower()
+
+    with SessionLocal() as db:
+        lead = db.get(Lead, lead_id)
+        assert lead is not None
         assert lead.conversation_state == ConversationStateEnum.HANDOFF
         assert lead.raw_payload["handoff"]["reason"] == "unsupported_media"
-        message = db.scalar(select(Message).where(Message.lead_id == lead.id, Message.direction == MessageDirection.INBOUND))
+        message = db.scalar(
+            select(Message).where(
+                Message.lead_id == lead.id,
+                Message.direction == MessageDirection.INBOUND,
+            )
+        )
         assert message is not None
         assert message.raw_payload["attachments"][0]["media_kind"] == "image"
-        attachment = db.scalar(select(MessageAttachment).where(MessageAttachment.message_id == message.id))
+        attachment = db.scalar(
+            select(MessageAttachment).where(MessageAttachment.message_id == message.id)
+        )
         assert attachment is not None
         assert attachment.content_type == "image/jpeg"
+        assert db.scalar(
+            select(InboundWebhookEvent).where(InboundWebhookEvent.id == event_id)
+        ).status == "completed"
 
     thread = test_context.client.get(
         f"/ui/api/conversations/{lead_id}/thread",
-        headers={"X-Admin-Token": "test-admin-token"},
+        headers={"X-Admin-Token": "test-admin-token-32-characters-long!"},
     )
     assert thread.status_code == 200
     thread_payload = thread.json()
     assert thread_payload["messages"][0]["attachments"][0]["media_kind"] == "image"
+
+
+def test_inbound_media_worker_enforces_aggregate_byte_cap(test_context, monkeypatch):
+    async def fake_download_twilio_media(**kwargs):
+        _ = kwargs
+        return b"\xff\xd8\xffabc"
+
+    monkeypatch.setattr("app.workers.tasks.download_twilio_media", fake_download_twilio_media)
+    monkeypatch.setattr("app.workers.tasks._MAX_INBOUND_MEDIA_AGGREGATE_BYTES", 8)
+    monkeypatch.setattr("app.workers.tasks._acquire_lead_workflow_lock", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "app.workers.tasks.build_sms_service",
+        lambda *args, **kwargs: test_context.fake_sms,
+    )
+    monkeypatch.setattr(
+        "app.workers.tasks.build_llm_agent",
+        lambda *args, **kwargs: test_context.fake_llm,
+    )
+    monkeypatch.setattr(
+        "app.workers.tasks.build_booking_service",
+        lambda *args, **kwargs: test_context.fake_booking,
+    )
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 000-4466",
+            "Body": "",
+            "MessageSid": "SM-IN-MEDIA-CAP-001",
+            "NumMedia": "2",
+            "MediaUrl0": "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME0",
+            "MediaContentType0": "image/jpeg",
+            "MediaUrl1": "https://api.twilio.com/2010-04-01/Accounts/AC/Messages/MM/Media/ME1",
+            "MediaContentType1": "image/jpeg",
+        },
+    )
+
+    assert response.status_code == 200
+    with get_session_factory()() as db:
+        event = db.scalar(
+            select(InboundWebhookEvent).where(
+                InboundWebhookEvent.endpoint == "sms_inbound_media"
+            )
+        )
+        assert event is not None
+        event_id = event.id
+
+    result = process_inbound_media_event_task(event_id)
+
+    assert result["status"] == "partial"
+    assert result["saved"] == 1
+    assert result["failed"] == 1
+    with get_session_factory()() as db:
+        event = db.get(InboundWebhookEvent, event_id)
+        assert event is not None
+        message = db.get(Message, result["message_id"])
+        assert message is not None
+        attachments = db.scalars(
+            select(MessageAttachment).where(MessageAttachment.message_id == message.id)
+        ).all()
+        assert len(attachments) == 1
+        assert message.raw_payload["media_ingestion"]["status"] == "partial"
+        failure = db.scalar(
+            select(AuditLog).where(
+                AuditLog.lead_id == message.lead_id,
+                AuditLog.event_type == "inbound_media_download_failed",
+            )
+        )
+        assert failure is not None
+        assert "aggregate byte limit" in failure.decision["error"]
 
 
 def test_sms_inbound_selection_books_slot_without_backend_short_circuit_loop(test_context):
@@ -383,6 +831,129 @@ def test_sms_inbound_selection_books_slot_without_backend_short_circuit_loop(tes
         assert lead is not None
         assert lead.conversation_state.value == "BOOKED"
         assert lead.crm_stage == "Meeting Booked"
+
+
+def test_confirmed_booking_state_survives_confirmation_sms_failure(test_context, monkeypatch):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="booking-confirmation-failure",
+            source=LeadSource.META,
+            full_name="Booked Without SMS",
+            phone="+15554443334",
+            email="booking-failure@example.com",
+            raw_payload={"pending_step": "slot_selection_pending"},
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.flush()
+        db.add(
+            Message(
+                client_id=client.id,
+                lead_id=lead.id,
+                direction=MessageDirection.OUTBOUND,
+                body="1) Mon Mar 09 at 10:00 AM",
+                provider_message_sid="SM-OFFER-CONFIRMATION-FAILURE",
+                raw_payload={
+                    "booking_offer": {
+                        "provider": "calendly",
+                        "slots": [
+                            {
+                                "index": 1,
+                                "start_time": "2026-03-09T15:00:00Z",
+                                "display_time": "Mon Mar 09 at 10:00 AM",
+                            }
+                        ],
+                    }
+                },
+            )
+        )
+        db.commit()
+
+    def fail_sms(*args, **kwargs):
+        raise RuntimeError("simulated provider timeout")
+
+    monkeypatch.setattr(test_context.fake_sms, "send_message", fail_sms)
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 444-3334",
+            "Body": "1",
+            "MessageSid": "SM-IN-CONFIRMATION-FAILURE",
+        },
+    )
+
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15554443334"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.BOOKED
+        assert lead.crm_stage == "Meeting Booked"
+        assert isinstance(lead.raw_payload.get("calendar_booking"), dict)
+        event_types = set(
+            db.scalars(select(AuditLog.event_type).where(AuditLog.lead_id == lead.id)).all()
+        )
+        assert "calendar_booking_created" in event_types
+        assert "booking_confirmation_sms_failed" in event_types
+
+
+def test_calendly_booking_reservation_reuses_completed_provider_result(test_context, monkeypatch):
+    SessionLocal = get_session_factory()
+    service = BookingService()
+    provider_calls = 0
+
+    def fake_request(**kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        return {
+            "resource": {
+                "event": "https://api.calendly.com/scheduled_events/durable-1",
+                "uri": "https://api.calendly.com/scheduled_events/durable-1/invitees/1",
+            }
+        }
+
+    monkeypatch.setattr(service, "_request", fake_request)
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.booking_mode = "calendly"
+        client.booking_config = {
+            "calendly_personal_access_token": "test-token",
+            "calendly_event_type_uri": "https://api.calendly.com/event_types/test",
+        }
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="calendly-durable-reservation",
+            source=LeadSource.META,
+            full_name="Durable Calendly",
+            phone="+15554443335",
+            email="durable-calendly@example.com",
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.commit()
+        slot = {"start_time": "2026-03-09T15:00:00Z"}
+
+        first = service._book_calendly_slot(client=client, lead=lead, slot=slot, db=db)
+        second = service._book_calendly_slot(client=client, lead=lead, slot=slot, db=db)
+
+        assert first == second
+        assert provider_calls == 1
+        reservations = db.scalars(
+            select(OutboundRequest).where(
+                OutboundRequest.lead_id == lead.id,
+                OutboundRequest.request_kind == "calendly_booking_create",
+            )
+        ).all()
+        assert len(reservations) == 1
+        assert reservations[0].status == "completed"
 
 
 def test_sms_inbound_booked_lead_reschedule_requires_confirmation_before_cancel(test_context):

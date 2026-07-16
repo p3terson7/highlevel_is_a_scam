@@ -16,7 +16,7 @@ from app.services.preciscan_demo_seed import (
 
 
 def _admin_headers() -> dict[str, str]:
-    return {"X-Admin-Token": "test-admin-token"}
+    return {"X-Admin-Token": "test-admin-token-32-characters-long!"}
 
 
 def test_preciscan_demo_seed_creates_french_industrial_leads(test_context):

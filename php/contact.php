@@ -1,6 +1,9 @@
 <?php
+	require_once __DIR__ . '/fonctions.php';
 	include ("../includes/tophead.php");
 	$page = 'contact';
+	$formSubmissionId = crm_form_submission_id();
+	$formError = crm_form_error_message(isset($_GET['error']) && is_string($_GET['error']) ? $_GET['error'] : '', 'fr');
 	//sitemap
 ?>
 
@@ -25,6 +28,7 @@
 
 	<?php
 		include "../includes/head.php";
+		echo crm_turnstile_script_html();
 	?>
 	
 	<script defer src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB1xmzhC6iWC9M-npa404Vh3sUXTIC8l1o&callback=initMap&libraries=&v=weekly&channel=2" async></script>
@@ -314,10 +318,16 @@ include('../includes/header.php');
 			<div class="contactFormulaire clearfix">
 
 				<div class="contactFormulaireContenu  clearfix">
+					<?php if ($formError !== ''): ?>
+						<div role="alert" style="margin-bottom:16px; padding:12px 14px; border:1px solid #b42318; background:#fff4f2; color:#7a271a; border-radius:4px;">
+							<?php echo crm_html($formError); ?>
+						</div>
+					<?php endif; ?>
 
 					<form action="/php/send-email.php" method="post" id="formulaireS">
-						<input type="text" name="phone" class="ws_check" autocomplete="off">
+						<input type="text" name="phone" class="ws_check" autocomplete="off" tabindex="-1" aria-hidden="true">
 						<input type="text" name="lang" value="fr" hidden>
+						<input type="hidden" name="submission_id" value="<?php echo crm_html($formSubmissionId); ?>">
 						<input type="hidden" name="utm_source" id="utm_source">
 						<input type="hidden" name="utm_medium" id="utm_medium">
 						<input type="hidden" name="utm_campaign" id="utm_campaign">
@@ -329,19 +339,26 @@ include('../includes/header.php');
 						<input type="hidden" name="referrer_url" id="referrer_url">
 
 						<label for="sNom" class="marginLabel"> Votre Nom (requis)</label>
-						<input type="text" name="sNom" id="sNom" required>
+						<input type="text" name="sNom" id="sNom" required minlength="2" maxlength="160" autocomplete="name">
 
 						<label for="sCourriel" class="marginLabel"> Votre courriel (requis)</label>
-						<input type="text" name="sCourriel" id="sCourriel" required>
+						<input type="email" name="sCourriel" id="sCourriel" required maxlength="254" autocomplete="email">
 
 						<label for="sTel" class="marginLabel"> Votre téléphone (requis)</label>
-						<input type="text" name="sTel" id="sTel" required>
+						<input type="tel" name="sTel" id="sTel" required maxlength="32" pattern="[0-9+(). \-]{7,32}" autocomplete="tel">
 
 						<label for="sEntreprise" class="marginLabel"> Sujet</label>
-						<input type="text" name="subject" id="sEntreprise" required>
+						<input type="text" name="subject" id="sEntreprise" required maxlength="160">
 
 						<label for="sMessage" class="marginLabel">Votre Message</label>
-						<textarea name="sMessage" id="sMessage" cols="30" rows="10"></textarea>
+						<textarea name="sMessage" id="sMessage" cols="30" rows="10" maxlength="5000"></textarea>
+
+						<label for="sms_consent" style="display:flex; align-items:flex-start; gap:8px; margin-top:16px; line-height:1.45; cursor:pointer;">
+							<input type="checkbox" name="sms_consent" id="sms_consent" value="accepted" style="width:auto; margin-top:4px; flex:0 0 auto;">
+							<span>J’accepte de recevoir des messages texte de 3D PreciScan au numéro fourni au sujet de ma demande. La fréquence varie. Des frais de messagerie peuvent s’appliquer. Mon consentement n’est pas une condition de service. Répondez STOP pour vous désabonner.</span>
+						</label>
+
+						<?php echo crm_turnstile_widget_html('contact'); ?>
 
 						<div class="soumissionFormulaireBtn">
 							<input type="submit">

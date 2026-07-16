@@ -5,13 +5,16 @@ router = APIRouter()
 
 @router.get("/ui/api/dashboard")
 def ui_dashboard(
+    client_key: str | None = Query(default=None),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
     admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
     portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
 ) -> dict[str, Any]:
     actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
-    scoped_client = actor.client if actor.role == "client" else None
+    scoped_client = actor.client
+    if actor.role == "admin" and client_key:
+        scoped_client = _load_client_by_key(db, client_key)
     runtime = _runtime_summary(settings, db, client=scoped_client)
     clients = [scoped_client] if scoped_client else db.scalars(select(Client).order_by(Client.business_name.asc())).all()
 
@@ -74,11 +77,15 @@ def ui_dashboard(
             },
         ]
     else:
-        clients_with_sms = sum(
-            1
-            for client in clients
-            if all(client_runtime_overrides(client).get(key) for key in ("twilio_account_sid", "twilio_auth_token", "twilio_from_number"))
-        )
+        global_runtime = _effective_runtime(settings, db)
+        clients_with_sms = 0
+        for client in clients:
+            effective_client_runtime = {**global_runtime, **client_runtime_overrides(client)}
+            if all(
+                effective_client_runtime.get(key)
+                for key in ("twilio_account_sid", "twilio_auth_token", "twilio_from_number")
+            ):
+                clients_with_sms += 1
         onboarding = [
             {
                 "label": "Configure client SMS",
@@ -133,8 +140,9 @@ def ui_dashboard(
     stage_counts: Counter[str] = Counter()
     for stage, count in _dashboard_counter_rows(db, Lead.crm_stage, lead_conditions).items():
         stage_counts[normalize_crm_stage(stage)] += count
-    task_summary, upcoming_tasks = _dashboard_open_tasks(db, actor, today=today, limit=5)
-    meeting_summary, upcoming_meetings = _dashboard_upcoming_meetings(db, actor, now=now, limit=5)
+    dashboard_actor = UIActor(role="client", client=scoped_client) if scoped_client is not None else actor
+    task_summary, upcoming_tasks = _dashboard_open_tasks(db, dashboard_actor, today=today, limit=5)
+    meeting_summary, upcoming_meetings = _dashboard_upcoming_meetings(db, dashboard_actor, now=now, limit=5)
 
     lead_trend: list[dict[str, Any]] = []
     current_week_start = today - timedelta(days=today.weekday())
@@ -158,7 +166,7 @@ def ui_dashboard(
 
     top_clients: list[dict[str, Any]] = []
     if actor.role == "admin":
-        client_rows = db.execute(
+        top_clients_stmt = (
             select(
                 Client.id,
                 Client.client_key,
@@ -172,7 +180,10 @@ def ui_dashboard(
             )
             .outerjoin(Lead, Lead.client_id == Client.id)
             .group_by(Client.id, Client.client_key, Client.business_name, Client.is_active, Client.updated_at)
-        ).all()
+        )
+        if scoped_client is not None:
+            top_clients_stmt = top_clients_stmt.where(Client.id == scoped_client.id)
+        client_rows = db.execute(top_clients_stmt).all()
         for row in client_rows:
             last_activity = row.last_lead_activity or row.updated_at
             top_clients.append(

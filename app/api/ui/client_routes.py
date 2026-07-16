@@ -1,8 +1,21 @@
 from fastapi import APIRouter
-from .shared import *
+
+from app.services.knowledge import (
+    KnowledgeIngestionError,
+    public_source_url,
+    validate_ingestion_urls,
+)
 from app.services.zapier_booking import notify_zapier_booking_webhook
+from app.workers.knowledge_tasks import (
+    KnowledgeIngestionBusy,
+    KnowledgeIngestionQueueUnavailable,
+    enqueue_knowledge_ingestion,
+)
+
+from .shared import *
 
 router = APIRouter()
+
 
 @router.get("/ui/api/clients")
 def ui_clients(
@@ -156,8 +169,16 @@ def ui_create_manual_meeting(
             email=(payload.new_lead.email or "").strip(),
             city=(payload.new_lead.city or "").strip(),
             form_answers={},
-            raw_payload={"source": "ui_manual_meeting_inline_lead", "created_by": actor.role},
-            consented=True,
+            raw_payload={
+                "source": "ui_manual_meeting_inline_lead",
+                "created_by": actor.role,
+                "consent_evidence": {
+                    "granted": False,
+                    "status": "not_provided",
+                    "source_fields": [],
+                },
+            },
+            consented=False,
             opted_out=False,
             conversation_state=ConversationStateEnum.NEW,
             crm_stage="Meeting Booked",
@@ -567,7 +588,10 @@ def ui_owner_knowledge(
     }
 
 
-@router.post("/ui/api/owner/{client_key}/knowledge/ingest")
+@router.post(
+    "/ui/api/owner/{client_key}/knowledge/ingest",
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def ui_owner_ingest_knowledge(
     client_key: str,
     payload: OwnerKnowledgeIngestRequest,
@@ -584,43 +608,57 @@ def ui_owner_ingest_knowledge(
     else:
         client = _load_client_by_key(db, client_key)
 
-    if not payload.urls:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one URL is required")
-
-    service = KnowledgeIngestionService()
     try:
-        extraction = service.ingest_urls(
-            db=db,
-            client_id=client.id,
-            urls=payload.urls,
-            replace=payload.replace,
-        )
-    except SQLAlchemyError as exc:
-        db.rollback()
+        normalized_urls = validate_ingestion_urls(payload.urls)
+    except KnowledgeIngestionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    current_knowledge = knowledge_payload(db, client_id=client.id)
+    if current_knowledge.get("status") == "unavailable":
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Website knowledge tables are not available yet. Run alembic upgrade head, then retry ingestion.",
-        ) from exc
-    db.add(
-        AuditLog(
-            client_id=client.id,
-            lead_id=None,
-            event_type="knowledge_urls_ingested",
-            decision={
-                "urls": payload.urls,
-                "replace": payload.replace,
-                "total_pages": extraction["total_pages"],
-                "total_chunks": extraction["total_chunks"],
-                "actor_role": actor.role,
-            },
+            detail=str(current_knowledge.get("error") or "Website knowledge tables are unavailable"),
         )
-    )
-    db.commit()
+
+    try:
+        job_id = enqueue_knowledge_ingestion(
+            client_id=client.id,
+            urls=normalized_urls,
+            replace=payload.replace,
+            actor_role=actor.role,
+        )
+    except KnowledgeIngestionBusy as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+            headers={"Retry-After": "30"},
+        ) from exc
+    except KnowledgeIngestionQueueUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
     return {
-        "status": "ok",
+        **current_knowledge,
+        "status": "queued",
         "client_key": client.client_key,
-        "extraction": extraction,
-        **knowledge_payload(db, client_id=client.id),
+        "job_id": job_id,
+        "extraction": {
+            "pages": [
+                {
+                    "url": public_source_url(url),
+                    "status": "queued",
+                    "title": "",
+                }
+                for url in normalized_urls
+            ],
+            "total_pages": len(normalized_urls),
+            "total_chunks": 0,
+        },
     }
 
 

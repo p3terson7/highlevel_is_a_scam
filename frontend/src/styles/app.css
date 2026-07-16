@@ -1,0 +1,683 @@
+.scaffold-shell {
+  color: #e6edf3;
+  background: #060910;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.scaffold-card {
+  width: min(560px, 100%);
+  padding: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.scaffold-eyebrow {
+  margin: 0 0 8px;
+  color: #40c8ff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.scaffold-card h1 {
+  margin: 0;
+  font-size: clamp(32px, 7vw, 52px);
+  line-height: 1;
+  letter-spacing: -0.06em;
+}
+
+.scaffold-card p:last-child {
+  margin: 14px 0 0;
+  color: #b6c2cf;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.react-dashboard-root,
+.react-island-root {
+  display: block;
+  min-width: 0;
+}
+
+#react-root[data-react-app-shell="true"] {
+  position: relative;
+  z-index: 1;
+  display: block;
+  min-height: 100vh;
+}
+
+.react-workflow-page,
+.react-dashboard-page {
+  width: 100%;
+}
+
+.react-workflow-page {
+  min-height: 0;
+}
+
+.react-pipeline-page,
+.react-calendar-page,
+.react-tasks-page {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.react-records-page,
+.react-inbox-page,
+.react-admin-page {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.react-admin-page {
+  width: 100%;
+}
+
+.react-inbox-page {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-5, 12px);
+}
+
+.react-inbox-command {
+  flex: 0 0 auto;
+}
+
+.react-inbox-filters {
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.react-inbox-filters .toolbar-left {
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.react-inbox-filters input[type="search"] {
+  min-width: min(260px, 100%);
+}
+
+.react-compact-field {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.react-inbox-shell {
+  min-height: min(760px, calc(100vh - 132px));
+}
+
+.react-inbox-shell .thread-pane,
+.react-inbox-shell .details-pane,
+.react-inbox-shell .inbox-pane {
+  min-width: 0;
+}
+
+.react-inbox-shell .details-pane .lead-tags-row {
+  align-items: flex-start;
+}
+
+.react-inbox-shell .details-pane .lead-tag-control {
+  min-width: min(170px, 100%);
+}
+
+.react-pane-resizer {
+  position: relative;
+  touch-action: none;
+}
+
+.react-pane-resizer:focus-visible {
+  z-index: 2;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  background: linear-gradient(180deg, transparent, var(--accent), transparent);
+}
+
+.react-meeting-form {
+  margin-top: 12px;
+}
+
+.react-segmented-fieldset {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md, 12px);
+}
+
+.react-segmented-fieldset legend {
+  padding: 0 6px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.react-dialog-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(2, 6, 12, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.react-contact-dialog {
+  display: flex;
+  width: min(680px, 100%);
+  max-height: min(780px, calc(100vh - 40px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line-2, var(--line));
+  border-radius: var(--radius-xl, 20px);
+  background: var(--surface, #111827);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.48);
+  color: var(--text);
+}
+
+.react-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.react-dialog-header h2 {
+  margin: 0 0 4px;
+}
+
+.react-dialog-body {
+  overflow: auto;
+  padding: 18px;
+}
+
+.react-dialog-status {
+  padding: 0 18px 18px;
+}
+
+.react-contact-dialog .drawer-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.react-contact-dialog textarea {
+  min-height: 92px;
+}
+
+.react-inbox-page .composer-media-preview {
+  margin-top: 8px;
+}
+
+.react-inbox-page .composer-media-card {
+  justify-content: space-between;
+}
+
+.react-settings-page,
+.react-logs-page,
+.react-test-lab-page {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.react-clients-page {
+  min-height: 0;
+}
+
+.react-clients-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.react-admin-page .tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.react-admin-page .tab-btn {
+  background: transparent;
+}
+
+.react-admin-page .tab-btn.active {
+  background: var(--chip);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.react-admin-page .tab-panel {
+  display: none;
+}
+
+.react-admin-page .tab-panel.active {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.react-admin-page .client-wizard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4, 12px);
+  padding: var(--space-5, 14px);
+  border: 1px solid var(--surface-secondary-border, rgba(255, 255, 255, 0.14));
+  border-radius: var(--radius-lg, 18px);
+  background: var(--surface-secondary-bg, rgba(15, 23, 42, 0.42));
+}
+
+.react-admin-page .client-wizard-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5, 14px);
+}
+
+.react-admin-page .client-wizard-title {
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.react-admin-page .client-wizard-nav {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 6px);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.react-admin-page .client-wizard-steps {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-2, 6px);
+}
+
+.react-admin-page .client-wizard-step {
+  min-height: 34px;
+  padding: 7px var(--space-3, 10px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md, 12px);
+  background: var(--button-ghost-bg, transparent);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+}
+
+.react-admin-page .client-wizard-step.active {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.react-admin-page .client-wizard-review {
+  padding: var(--space-5, 14px);
+  border: 1px solid var(--surface-secondary-border, rgba(255, 255, 255, 0.14));
+  border-radius: var(--radius-lg, 18px);
+  background: var(--surface-secondary-bg, rgba(15, 23, 42, 0.42));
+}
+
+.react-admin-page .client-wizard-review-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4, 12px);
+}
+
+.react-admin-page .client-wizard-review-card {
+  min-width: 0;
+  padding: var(--space-4, 12px);
+  border: 1px solid var(--info-card-border, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-md, 12px);
+  background: var(--info-card-bg, rgba(255, 255, 255, 0.06));
+}
+
+.react-admin-page .client-wizard-review-title {
+  margin-bottom: 8px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.react-admin-page .client-wizard-review-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.react-admin-page .client-wizard-review-row:first-of-type {
+  border-top: 0;
+}
+
+.react-admin-page .client-wizard-review-row strong {
+  color: var(--text);
+  font-weight: 700;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.react-admin-page .react-field-label {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.react-admin-page .settings-ai-context-grid textarea {
+  min-height: 180px;
+}
+
+.react-admin-page .test-lab-answer-row label,
+.react-admin-page .settings-calendar-day label {
+  margin: 0;
+}
+
+.react-admin-page button.client-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+.react-admin-page .records-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  align-items: center;
+}
+
+.react-admin-page .records-toolbar input,
+.react-admin-page .records-toolbar select {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.settings-readiness-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.react-table-surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 10px;
+}
+
+.react-agenda-card {
+  min-height: 520px;
+}
+
+.react-workflow-page button.crm-card,
+.react-workflow-page button.lead-list-card,
+.react-workflow-page button.inbox-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+.react-workflow-page .lead-list-card {
+  display: block;
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+}
+
+.react-records-page .records-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  align-items: center;
+}
+
+.react-records-page .records-toolbar input,
+.react-records-page .records-toolbar select {
+  min-width: 0;
+}
+
+.react-records-page .records-toolbar input {
+  flex: 1 1 auto;
+}
+
+.react-records-page .lead-section-head,
+.react-records-page .lead-task-form {
+  display: flex;
+  gap: 8px;
+}
+
+.react-records-page .lead-section-head {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.react-records-page .lead-inline-disclosure summary {
+  cursor: pointer;
+}
+
+.react-records-page .lead-task-form {
+  margin-top: 8px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.react-records-page .lead-task-form input {
+  min-width: 160px;
+}
+
+.react-records-page .lead-task-form textarea {
+  min-width: min(320px, 100%);
+  flex: 1 1 260px;
+}
+
+.react-tasks-page .toolbar-left input {
+  min-width: min(320px, 100%);
+}
+
+.react-tasks-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.react-tasks-page .task-group-row td {
+  padding: 8px 12px;
+}
+
+.react-tasks-page .task-group-row .meta-text {
+  margin-left: 8px;
+}
+
+.react-tasks-page .task-row.overdue td {
+  background: color-mix(in srgb, var(--danger-soft, rgba(255, 91, 91, 0.18)) 26%, transparent);
+}
+
+.react-tasks-page .task-row.today td {
+  background: color-mix(in srgb, var(--warn-soft, rgba(255, 193, 7, 0.16)) 24%, transparent);
+}
+
+.react-tasks-page .task-row.done {
+  opacity: 0.78;
+}
+
+.react-workflow-page .message-bubble {
+  max-width: min(760px, 82%);
+}
+
+.react-workflow-page .message-bubble.outbound {
+  margin-left: auto;
+}
+
+.react-workflow-page .message-bubble.inbound {
+  margin-right: auto;
+}
+
+.react-workflow-page .summary-fact {
+  min-width: 0;
+}
+
+.react-auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--text, #e6edf3);
+}
+
+.react-auth-card {
+  width: min(560px, 100%);
+  padding: 28px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  border-radius: 22px;
+  background: var(--surface, rgba(15, 23, 42, 0.72));
+}
+
+.react-auth-card h1 {
+  margin: 0;
+}
+
+.react-app-frame {
+  min-height: 100vh;
+}
+
+.react-shell-chrome {
+  position: relative;
+  z-index: 1;
+}
+
+/* The shared shell stylesheet constrains this element twice: once through the
+   grid column and again with `max-width: calc(100% - 240px)`. At common laptop
+   widths that makes the flex children overflow to the left under the brand,
+   leaving the first navigation buttons visible but not clickable. Let the
+   React shell use the full grid column and only center when the items fit. */
+.react-shell-chrome .chrome-nav {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  justify-self: stretch;
+  justify-content: safe center;
+}
+
+.react-owned-shell {
+  min-height: calc(100vh - var(--chrome-height));
+}
+
+.react-sidebar .nav-item,
+.react-shell-chrome .nav-item {
+  cursor: pointer;
+}
+
+.react-search-wrap input {
+  min-width: 0;
+}
+
+.react-workspace {
+  position: relative;
+  min-height: 0;
+}
+
+.react-shell-page {
+  display: flex;
+  min-height: 0;
+  width: 100%;
+  flex: 1 1 auto;
+}
+
+.react-shell-page > * {
+  width: 100%;
+}
+
+.react-page-loading {
+  position: absolute;
+  inset: 12px auto auto 12px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.react-shell-notice {
+  display: block;
+  margin-bottom: 12px;
+}
+
+@media (max-width: 920px) {
+  .react-shell-chrome {
+    gap: 10px;
+  }
+
+  .react-owned-shell {
+    min-height: calc(100vh - var(--chrome-height));
+  }
+
+  .react-sidebar {
+    display: none;
+  }
+
+  .settings-readiness-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1120px) {
+  .react-inbox-shell {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .react-inbox-shell .react-pane-resizer {
+    display: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .react-inbox-shell {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-inbox-shell .react-pane-resizer {
+    display: none;
+  }
+
+  .react-dialog-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .react-contact-dialog {
+    width: 100%;
+    max-height: 92vh;
+    border-radius: 20px 20px 0 0;
+  }
+
+  .react-contact-dialog .drawer-action-grid {
+    grid-template-columns: 1fr;
+  }
+}

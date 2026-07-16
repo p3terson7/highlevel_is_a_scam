@@ -158,7 +158,8 @@
             <div id="globalNotice" class="notice" role="status" aria-live="polite"></div>
 
             <section id="view-dashboard" class="view">
-              <div class="dashboard-shell">
+              <!-- react-dashboard-root -->
+              <div id="legacyDashboardShell" class="dashboard-shell">
                 <div class="dashboard-hero liquid-glass-test liquid-glass-hero">
                   <div class="dashboard-hero-grid">
                     <div class="dashboard-hero-main">
@@ -259,6 +260,7 @@
             </section>
 
             <section id="view-clients" class="view">
+              <!-- react-clients-root -->
               <div class="surface">
                 <div class="surface-header">
                   <div class="surface-title">
@@ -447,7 +449,7 @@
                       </div>
                       <div class="detail-card stack" data-client-wizard-section="channels">
                         <div class="title">Provider credentials (client scoped)</div>
-                        <div class="surface-subtitle">Each business gets isolated Twilio, Zapier, Meta, and LinkedIn credentials. OpenAI is centralized globally.</div>
+                        <div class="surface-subtitle">Each business gets isolated Twilio, CRM intake, and Zapier booking credentials. OpenAI is centralized globally.</div>
                         <div class="meta-text">Leave any field blank to keep the current saved value.</div>
                         <div class="form-grid-3">
                           <div>
@@ -465,26 +467,12 @@
                         </div>
                         <div class="form-grid-3">
                           <div>
-                            <label for="clientProviderMetaVerify">Meta verify token</label>
-                            <input id="clientProviderMetaVerify" class="mono" type="password" autocomplete="off" placeholder="meta-verify-token" />
-                          </div>
-                          <div>
-                            <label for="clientProviderMetaAccess">Meta access token</label>
-                            <input id="clientProviderMetaAccess" class="mono" type="password" autocomplete="off" placeholder="EAAB..." />
-                          </div>
-                          <div>
-                            <label for="clientProviderMetaVersion">Meta API version</label>
-                            <input id="clientProviderMetaVersion" class="mono" placeholder="v22.0" />
-                          </div>
-                        </div>
-                        <div class="form-grid-3">
-                          <div>
-                            <label for="clientProviderLinkedinVerify">LinkedIn verify token</label>
-                            <input id="clientProviderLinkedinVerify" class="mono" type="password" autocomplete="off" placeholder="linkedin-verify-token" />
-                          </div>
-                          <div>
-                            <label for="clientProviderZapierSecret">Zapier webhook secret</label>
+                            <label for="clientProviderZapierSecret">CRM intake webhook secret</label>
                             <input id="clientProviderZapierSecret" class="mono" type="password" autocomplete="off" placeholder="shared secret" />
+                          </div>
+                          <div>
+                            <label for="clientProviderZapierBookingSecret">Zapier booking signing secret</label>
+                            <input id="clientProviderZapierBookingSecret" class="mono" type="password" autocomplete="off" placeholder="signing secret" />
                           </div>
                           <div>
                             <label for="clientProviderZapierBookingWebhookUrl">Zapier booking webhook URL</label>
@@ -494,6 +482,17 @@
                             <label for="clientProviderPublicBaseUrl">Public base URL</label>
                             <input id="clientProviderPublicBaseUrl" class="mono" placeholder="https://abc123.ngrok-free.dev" />
                           </div>
+                        </div>
+                        <div class="stack compact-stack">
+                          <label class="checkbox-inline">
+                            <input id="clientClearTwilioCredentials" type="checkbox" />
+                            Remove this client's saved Twilio credentials on save
+                          </label>
+                          <label class="checkbox-inline">
+                            <input id="clientClearZapierCredentials" type="checkbox" />
+                            Remove this client's saved CRM/Zapier webhook credentials on save
+                          </label>
+                          <div class="meta-text">A configured deployment-level Twilio fallback can still apply after client credentials are removed.</div>
                         </div>
                       </div>
                       <div class="form-grid-2" data-client-wizard-section="channels">
@@ -568,6 +567,7 @@
             </section>
 
             <section id="view-conversations" class="view">
+              <!-- react-inbox-root -->
               <div class="surface">
                 <div class="surface-header">
                   <div class="surface-title">
@@ -672,6 +672,7 @@
                         </label>
                         <div id="threadComposerHint" class="meta-text"></div>
                         <div id="threadManualStatus" class="meta-text"></div>
+                        <button id="threadNewOutboundAttemptButton" class="small warn hidden" type="button">Start a new outbound attempt</button>
                       </div>
                     </div>
                   </div>
@@ -757,6 +758,7 @@
             </section>
 
             <section id="view-crm" class="view">
+              <!-- react-pipeline-root -->
               <div class="surface">
                 <div class="surface-header">
                   <div class="surface-title">
@@ -840,6 +842,7 @@
             </section>
 
             <section id="view-leads" class="view">
+              <!-- react-records-root -->
               <div class="surface">
                 <div class="surface-header">
                   <div class="surface-title">
@@ -986,6 +989,7 @@
             </section>
 
             <section id="view-calendar" class="view">
+              <!-- react-calendar-root -->
               <div class="surface">
                 <div class="surface-header">
                   <div class="surface-title">
@@ -1157,6 +1161,7 @@
             </section>
 
             <section id="view-tasks" class="view">
+              <!-- react-tasks-root -->
               <div class="surface">
                 <div class="surface-header">
                   <div class="surface-title">
@@ -1199,6 +1204,7 @@
             </section>
 
             <section id="view-logs" class="view">
+              <!-- react-logs-root -->
               <div class="surface">
                 <div class="surface-header">
                   <div class="surface-title">
@@ -1235,6 +1241,7 @@
             </section>
 
             <section id="view-settings" class="view">
+              <!-- react-settings-root -->
               <div class="surface">
                 <div class="surface-header">
                   <div class="surface-title">
@@ -1259,8 +1266,6 @@
                       <label for="settingsOpenAiKey">OpenAI key</label>
                       <div class="secret-field">
                         <input id="settingsOpenAiKey" class="mono" type="password" autocomplete="off" placeholder="sk-..." />
-                        <button id="settingsOpenAiRevealButton" class="small ghost" type="button">Reveal</button>
-                        <button id="settingsOpenAiCopyButton" class="small ghost" type="button" data-action="copy">Copy</button>
                       </div>
                       <div id="settingsOpenAiKeyStatus" class="meta-text secret-field-status"></div>
                     </div>
@@ -1522,6 +1527,7 @@
             </section>
 
             <section id="view-test-lab" class="view">
+              <!-- react-test-lab-root -->
               <div class="surface">
                 <div class="surface-header">
                   <div class="surface-title">
@@ -1703,5 +1709,6 @@
     <script src="/ui/assets/ui-views.js"></script>
     <script src="/ui/assets/ui-actions.js"></script>
     <script src="/ui/assets/ui-bootstrap.js"></script>
+    <!-- react-island-assets -->
   </body>
 </html>

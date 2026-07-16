@@ -63,11 +63,16 @@
 
       function wireEvents() {
         document.getElementById("loginButton").addEventListener("click", authenticate);
-        document.getElementById("clearSessionButton").addEventListener("click", () => {
-          clearSavedSession();
-          document.getElementById("loginToken").value = "";
-          document.getElementById("clientLoginPassword").value = "";
-          setText("loginStatus", "Saved session cleared.");
+        document.getElementById("clearSessionButton").addEventListener("click", async () => {
+          try {
+            await apiJson("/ui/api/logout", { method: "POST" });
+            clearSavedSession();
+            document.getElementById("loginToken").value = "";
+            document.getElementById("clientLoginPassword").value = "";
+            setText("loginStatus", "Saved session cleared.");
+          } catch (error) {
+            setText("loginStatus", `Sign out failed. Your session may still be active; please retry. ${error.message}`);
+          }
         });
         document.getElementById("loginToken").addEventListener("keydown", (event) => {
           if (event.key === "Enter") authenticate();
@@ -75,10 +80,15 @@
         document.getElementById("clientLoginPassword").addEventListener("keydown", (event) => {
           if (event.key === "Enter") authenticate();
         });
-        document.getElementById("logoutButton").addEventListener("click", () => {
-          clearSavedSession();
-          state.session = null;
-          lockUi("Saved session cleared.");
+        document.getElementById("logoutButton").addEventListener("click", async () => {
+          try {
+            await apiJson("/ui/api/logout", { method: "POST" });
+            clearSavedSession();
+            state.session = null;
+            lockUi("Saved session cleared.");
+          } catch (error) {
+            showNotice(`Sign out failed. Your session is still active; please retry. ${error.message}`, "err");
+          }
         });
         document.getElementById("sidebarToggle").addEventListener("click", toggleSidebar);
         document.getElementById("themeToggle").addEventListener("click", toggleTheme);
@@ -107,9 +117,24 @@
           await loadClientDetail(state.selectedClientKey);
         });
         document.getElementById("saveClientButton").addEventListener("click", saveClient);
+        document.getElementById("clientClearTwilioCredentials").addEventListener("change", (event) => {
+          ["clientProviderTwilioSid", "clientProviderTwilioToken", "clientProviderTwilioFrom"].forEach((id) => {
+            const input = document.getElementById(id);
+            input.disabled = event.currentTarget.checked;
+            if (event.currentTarget.checked) input.value = "";
+          });
+        });
+        document.getElementById("clientClearZapierCredentials").addEventListener("change", (event) => {
+          ["clientProviderZapierSecret", "clientProviderZapierBookingSecret", "clientProviderZapierBookingWebhookUrl"].forEach((id) => {
+            const input = document.getElementById(id);
+            input.disabled = event.currentTarget.checked;
+            if (event.currentTarget.checked) input.value = "";
+          });
+        });
         document.getElementById("clientPreviewSlotsButton").addEventListener("click", previewBookingSlots);
         document.getElementById("resetClientFormButton").addEventListener("click", resetClientForm);
         document.getElementById("threadSendManualButton").addEventListener("click", sendManualMessage);
+        document.getElementById("threadNewOutboundAttemptButton").addEventListener("click", () => startNewOutboundAttempt("thread"));
         document.getElementById("threadMediaInput").addEventListener("change", updateThreadMediaPreview);
         document.getElementById("threadClearMediaButton").addEventListener("click", clearThreadMediaSelection);
         document.getElementById("threadAddNoteButton").addEventListener("click", addNote);
@@ -162,11 +187,6 @@
         document.getElementById("crmLeadNoteAddButton").addEventListener("click", addCrmNote);
         document.getElementById("crmTaskCreateButton").addEventListener("click", createCrmTask);
         document.getElementById("saveRuntimeButton").addEventListener("click", saveRuntimeSettings);
-        document.getElementById("settingsOpenAiRevealButton").addEventListener("click", toggleOpenAiKeyVisibility);
-        document.getElementById("settingsOpenAiKey").addEventListener("input", (event) => {
-          const copyButton = document.getElementById("settingsOpenAiCopyButton");
-          if (copyButton) copyButton.disabled = !event.target.value.trim();
-        });
         document.getElementById("saveAiContextButton").addEventListener("click", saveAiContextSettings);
         document.getElementById("ingestKnowledgeButton").addEventListener("click", ingestKnowledgeUrls);
         document.getElementById("refreshKnowledgeButton").addEventListener("click", refreshKnowledgeSettings);
@@ -342,6 +362,10 @@
             await sendContactDrawerMessage();
             return;
           }
+          if (action === "contact-drawer-new-outbound-attempt") {
+            startNewOutboundAttempt("drawer");
+            return;
+          }
           if (action === "contact-drawer-agent-control") {
             await setContactDrawerAgentControl(target.dataset.paused === "true");
             return;
@@ -421,9 +445,7 @@
             return;
           }
           if (action === "copy") {
-            const copyValue = target.id === "settingsOpenAiCopyButton"
-              ? document.getElementById("settingsOpenAiKey")?.value.trim()
-              : target.dataset.copy;
+            const copyValue = target.dataset.copy;
             if (!copyValue) {
               showNotice("Nothing to copy.", "warn");
               return;
@@ -449,25 +471,13 @@
       startLivePolling();
       applyPaneSizes();
 
-      const savedAdminToken = adminToken();
-      const savedPortalToken = portalToken();
+      adminToken();
+      portalToken();
       const savedPortalEmail = localStorage.getItem("lead-ui-portal-email") || "";
       document.getElementById("clientLoginEmail").value = savedPortalEmail;
-      if (state.authMode === "client" && savedPortalToken) {
-        bootstrap()
-          .then(() => {
-            document.getElementById("loginOverlay").classList.add("hidden");
-            setText("loginStatus", "");
-          })
-          .catch((error) => {
-            clearPortalToken();
-            lockUi(`Login failed: ${error.message}`);
-          });
-      } else if (savedAdminToken) {
-        document.getElementById("loginToken").value = savedAdminToken;
-        state.authMode = "admin";
-        applyLoginMode();
-        authenticate();
-      } else {
-        lockUi();
-      }
+      bootstrap()
+        .then(() => {
+          document.getElementById("loginOverlay").classList.add("hidden");
+          setText("loginStatus", "");
+        })
+        .catch(() => lockUi());

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -12,6 +13,7 @@ from app.core.config import Settings
 
 _PBKDF2_ITERATIONS = 390_000
 _PORTAL_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7
+_MAX_PORTAL_TOKEN_LENGTH = 4096
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,7 @@ class PortalTokenPayload:
     client_id: int
     client_key: str
     email: str
+    auth_version: str
     exp: int
 
 
@@ -28,7 +31,11 @@ def _b64encode(raw: bytes) -> str:
 
 def _b64decode(raw: str) -> bytes:
     padding = "=" * (-len(raw) % 4)
-    return base64.urlsafe_b64decode(f"{raw}{padding}".encode("utf-8"))
+    return base64.b64decode(
+        f"{raw}{padding}".encode("utf-8"),
+        altchars=b"-_",
+        validate=True,
+    )
 
 
 def _secret_key(settings: Settings) -> bytes:
@@ -55,7 +62,8 @@ def verify_portal_password(password: str, stored_hash: str) -> bool:
     try:
         scheme, iterations_raw, salt, expected_raw = stored_hash.split("$", maxsplit=3)
         iterations = int(iterations_raw)
-    except ValueError:
+        expected = _b64decode(expected_raw)
+    except (ValueError, TypeError, binascii.Error):
         return False
 
     if scheme != "pbkdf2_sha256":
@@ -67,15 +75,27 @@ def verify_portal_password(password: str, stored_hash: str) -> bool:
         salt.encode("utf-8"),
         iterations,
     )
-    expected = _b64decode(expected_raw)
     return hmac.compare_digest(candidate, expected)
 
 
-def issue_portal_token(*, settings: Settings, client_id: int, client_key: str, email: str) -> str:
+def portal_auth_version(password_hash: str) -> str:
+    value = str(password_hash or "").strip()
+    return hashlib.sha256(f"portal-session::{value}".encode("utf-8")).hexdigest()[:24] if value else ""
+
+
+def issue_portal_token(
+    *,
+    settings: Settings,
+    client_id: int,
+    client_key: str,
+    email: str,
+    auth_version: str = "",
+) -> str:
     payload = {
         "client_id": client_id,
         "client_key": client_key,
         "email": email.strip().lower(),
+        "auth_version": str(auth_version or "").strip(),
         "exp": int(time.time()) + _PORTAL_SESSION_TTL_SECONDS,
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -85,9 +105,13 @@ def issue_portal_token(*, settings: Settings, client_id: int, client_key: str, e
 
 
 def verify_portal_token(settings: Settings, token: str) -> PortalTokenPayload | None:
+    if not isinstance(token, str) or not token or len(token) > _MAX_PORTAL_TOKEN_LENGTH:
+        return None
+
     try:
         payload_raw, signature_raw = token.split(".", maxsplit=1)
-    except ValueError:
+        supplied_signature = _b64decode(signature_raw)
+    except (ValueError, TypeError, binascii.Error):
         return None
 
     expected_signature = hmac.new(
@@ -95,19 +119,21 @@ def verify_portal_token(settings: Settings, token: str) -> PortalTokenPayload | 
         payload_raw.encode("utf-8"),
         hashlib.sha256,
     ).digest()
-    if not hmac.compare_digest(expected_signature, _b64decode(signature_raw)):
+    if not hmac.compare_digest(expected_signature, supplied_signature):
         return None
 
     try:
         payload = json.loads(_b64decode(payload_raw).decode("utf-8"))
-    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        if not isinstance(payload, dict):
+            return None
+        exp = int(payload.get("exp", 0))
+        client_id = int(payload.get("client_id", 0))
+    except (ValueError, TypeError, OverflowError, binascii.Error, UnicodeDecodeError):
         return None
 
-    exp = int(payload.get("exp", 0))
     if exp <= int(time.time()):
         return None
 
-    client_id = int(payload.get("client_id", 0))
     client_key = str(payload.get("client_key", "")).strip()
     email = str(payload.get("email", "")).strip().lower()
     if not client_id or not client_key or not email:
@@ -117,5 +143,6 @@ def verify_portal_token(settings: Settings, token: str) -> PortalTokenPayload | 
         client_id=client_id,
         client_key=client_key,
         email=email,
+        auth_version=str(payload.get("auth_version") or "").strip(),
         exp=exp,
     )
