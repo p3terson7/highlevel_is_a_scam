@@ -99,7 +99,7 @@ async def _bounded_twilio_form(request: Request) -> dict[str, str]:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Content-Length")
         if declared_length > _MAX_TWILIO_FORM_BYTES:
             raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail="Twilio webhook payload is too large",
             )
 
@@ -109,7 +109,7 @@ async def _bounded_twilio_form(request: Request) -> dict[str, str]:
         size += len(chunk)
         if size > _MAX_TWILIO_FORM_BYTES:
             raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail="Twilio webhook payload is too large",
             )
         chunks.append(chunk)

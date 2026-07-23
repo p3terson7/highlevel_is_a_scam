@@ -110,3 +110,25 @@ def test_sms_provider_mode_is_validated_and_explicit_mock_warns(caplog):
         )
     assert "sms_mock_mode_explicitly_enabled" in caplog.text
     assert "will not be delivered" in caplog.records[-1].warning
+
+
+def test_automated_sms_delay_defaults_to_twenty_seconds_and_is_bounded():
+    assert Settings(_env_file=None).automated_sms_delay_seconds == 20
+
+    for invalid_delay in (-1, 301):
+        with pytest.raises(RuntimeError, match="AUTOMATED_SMS_DELAY_SECONDS"):
+            validate_security_settings(
+                Settings(
+                    _env_file=None,
+                    admin_token="a-secure-random-admin-token-over-32-chars",
+                    automated_sms_delay_seconds=invalid_delay,
+                )
+            )
+
+    validate_security_settings(
+        Settings(
+            _env_file=None,
+            admin_token="a-secure-random-admin-token-over-32-chars",
+            automated_sms_delay_seconds=0,
+        )
+    )

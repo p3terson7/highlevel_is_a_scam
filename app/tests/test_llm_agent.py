@@ -1,7 +1,12 @@
 import json
 
+import pytest
+
+import app.services.agent_v3 as agent_v3_module
 from app.db.models import Client, ConversationStateEnum, Lead, LeadSource, Message, MessageDirection
-from app.services.llm_agent import LLMAgent, AgentResponse
+from app.services.booking import BookingProviderError
+from app.services.knowledge import KnowledgeContextResult, KnowledgeRetrievalQuery
+from app.services.llm_agent import LLMAgent
 
 
 class FailingProvider:
@@ -59,7 +64,6 @@ class BookingToolProvider:
         payload = json.loads(user_prompt)
         if self.calls == 1:
             assert payload["booking_ready"] is True
-            assert payload["latest_inbound_message"] == "Within 2 weeks. I'm the owner and email works best."
             return {
                 "reply_text": "",
                 "next_state": "BOOKING_SENT",
@@ -247,6 +251,88 @@ class FactualAnswerWithCtaProvider:
         }
 
 
+class FrenchFactualRequestWithInvalidBookingProvider:
+    name = "french-factual-request-with-invalid-booking"
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        _ = system_prompt
+        payload = json.loads(user_prompt)
+        assert payload["response_language"] == "fr"
+        assert payload["lead_question_detected"] is True
+        return {
+            "reply_text": (
+                "Le projet Engine Block portait sur la numérisation d'un bloc moteur "
+                "pour inspection dimensionnelle; voulez-vous que je vous propose des "
+                "disponibilités pour un rendez-vous avec un expert?"
+            ),
+            "next_state": "BOOKING_SENT",
+            "conversation_act": "answer_then_soft_cta",
+            "lead_intent": "asks about the Engine Block project",
+            "confidence": 0.95,
+            "reasoning_summary": "Answer from website context before any next step.",
+            "uses_knowledge_context": True,
+            "collected_fields": payload["qualification_memory"],
+            "next_question_key": None,
+            "action": "offer_booking",
+            "tool_call": {"name": "find_slots", "args": {}},
+        }
+
+
+class VagueQualifiedSecondTurnProvider:
+    name = "vague-qualified-second-turn"
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        _ = system_prompt
+        payload = json.loads(user_prompt)
+        assert payload["response_language"] == "fr"
+        assert payload["outbound_turn_count"] == 1
+        assert payload["booking_ready"] is True
+        assert payload["scoping_call_offer_due"] is True
+        assert payload["lead_question_detected"] is False
+        assert payload["qualification_memory"]["decision_makers"] == "non ce n'est que moi."
+        return {
+            "reply_text": (
+                "Parfait, merci. Comme c'est vous qui gérez la suite, je peux vous "
+                "aider à avancer rapidement sur le scan 3D et la rétro-ingénierie."
+            ),
+            "next_state": "QUALIFYING",
+            "conversation_act": "nurture",
+            "lead_intent": "decisionnaire_unique",
+            "confidence": 0.96,
+            "reasoning_summary": "The lead is the sole decision-maker.",
+            "uses_knowledge_context": False,
+            "collected_fields": payload["qualification_memory"],
+            "next_question_key": None,
+            "action": "none",
+            "tool_call": {"name": "none", "args": {}},
+        }
+
+
+class GroundedAnswerWithInvalidSlotToolProvider:
+    name = "grounded-answer-with-invalid-slot-tool"
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        _ = system_prompt
+        payload = json.loads(user_prompt)
+        assert payload["lead_question_detected"] is False
+        return {
+            "reply_text": (
+                "Le projet Engine Block portait sur la numérisation d'un bloc moteur "
+                "pour inspection dimensionnelle. Voulez-vous réserver un rendez-vous avec un expert?"
+            ),
+            "next_state": "BOOKING_SENT",
+            "conversation_act": "offer_slots",
+            "lead_intent": "engine block project details",
+            "confidence": 0.8,
+            "reasoning_summary": "Factual answer with an unsupported booking action.",
+            "uses_knowledge_context": True,
+            "collected_fields": payload["qualification_memory"],
+            "next_question_key": None,
+            "action": "none",
+            "tool_call": {"name": "find_slots", "args": {}},
+        }
+
+
 class MediumIntentProvider:
     name = "medium-intent"
 
@@ -293,6 +379,9 @@ class PricingQuestionProvider:
         return {
             "reply_text": "Pricing depends on scope, timing, requirements, and the level of support needed. With the details you shared, the team would need to confirm the exact fit before giving a reliable estimate.",
             "next_state": "QUALIFYING",
+            # Simulate an overconfident model trace. The policy bridge replaces
+            # this draft, so final diagnostics must not retain the claim.
+            "uses_knowledge_context": True,
             "collected_fields": payload["qualification_memory"],
             "next_question_key": None,
             "action": "none",
@@ -435,6 +524,24 @@ class FakeBookingService:
                 "raw_payload": {"booking_offer": {"provider": "internal", "slots": [slot.__dict__ for slot in slots]}},
             },
         )()
+
+
+class LongOfferBookingService(FakeBookingService):
+    def find_slots(self, **kwargs):
+        offer = super().find_slots(**kwargs)
+        offer.reply_text = (
+            "I can book a consultation call directly. "
+            + "I found availability across several useful windows this week. " * 5
+            + "1) Tue Apr 07 at 10:00 AM 2) Tue Apr 07 at 12:00 PM. "
+            + "Reply with 1 or 2 to book the call. If none of those work, just send me a time that's better for you."
+        )
+        return offer
+
+
+class UnavailableBookingService:
+    def find_slots(self, **kwargs):
+        _ = kwargs
+        raise BookingProviderError("Automated booking is not configured for this client.")
 
 
 class ExactTimeFallbackBookingService(FakeBookingService):
@@ -595,12 +702,178 @@ def test_service_question_is_answered_then_flow_continues():
     assert response.reply_text.count("?") == 1
 
 
-def test_booking_ready_turn_uses_tool_and_returns_slots_reply():
-    agent = LLMAgent(provider=BookingToolProvider())
+def test_next_reply_uses_stored_business_profile_without_database_session():
+    class StoredBusinessProfileProvider:
+        name = "stored-business-profile"
+
+        def generate_json(self, system_prompt: str, user_prompt: str):
+            _ = system_prompt
+            payload = json.loads(user_prompt)
+            assert payload["business_profile_context"] == (
+                "Current website profile: industrial metrology and dimensional inspection."
+            )
+            assert "obsolete legacy profile" not in payload["business_profile_context"]
+            return {
+                "reply_text": "Yes, we support industrial metrology and dimensional inspection.",
+                "next_state": "QUALIFYING",
+                "collected_fields": payload["qualification_memory"],
+                "next_question_key": None,
+                "action": "none",
+                "tool_call": {"name": "none", "args": {}},
+            }
+
+    client = _client()
+    client.knowledge_profile_context = (
+        "Current website profile: industrial metrology and dimensional inspection."
+    )
+    client.provider_config = {
+        "business_profile_context": "Obsolete legacy profile: residential surveys only."
+    }
+
+    response = LLMAgent(provider=StoredBusinessProfileProvider()).next_reply(
+        client=client,
+        lead=_lead(),
+        inbound_text="Do you offer industrial metrology?",
+        history=[],
+    )
+
+    assert "industrial metrology" in response.reply_text.lower()
+
+
+@pytest.mark.parametrize(
+    "follow_up",
+    [
+        "Et combien de temps?",
+        "Pouvez-vous m’en dire plus à ce sujet?",
+        "La même chose, mais avec quels livrables?",
+    ],
+)
+def test_french_follow_up_retrieval_keeps_prior_subject_without_contact_fields(
+    monkeypatch,
+    follow_up: str,
+):
+    captured_query: dict[str, KnowledgeRetrievalQuery] = {}
+
+    def fake_build_knowledge_context_result(
+        db,
+        *,
+        client_id: int,
+        query: KnowledgeRetrievalQuery,
+        limit: int = 4,
+    ) -> KnowledgeContextResult:
+        _ = db, client_id, limit
+        captured_query["value"] = query
+        combined = " ".join((query.current, *query.history, *query.form)).casefold()
+        if "métrologie industrielle" in combined:
+            return KnowledgeContextResult(
+                text="Source: Délais de métrologie\nLe délai habituel est de cinq jours ouvrables."
+            )
+        return KnowledgeContextResult(text="")
+
+    class ContextualRetrievalProvider:
+        name = "contextual-retrieval"
+
+        def generate_json(self, system_prompt: str, user_prompt: str):
+            _ = system_prompt
+            payload = json.loads(user_prompt)
+            assert "cinq jours ouvrables" in payload["knowledge_context"].casefold()
+            return {
+                "reply_text": "Le délai habituel est de cinq jours ouvrables.",
+                "next_state": "QUALIFYING",
+                "collected_fields": payload["qualification_memory"],
+                "next_question_key": None,
+                "action": "none",
+                "tool_call": {"name": "none", "args": {}},
+            }
+
+    monkeypatch.setattr(
+        agent_v3_module,
+        "build_knowledge_context_result",
+        fake_build_knowledge_context_result,
+    )
+    history = [
+        Message(
+            direction=MessageDirection.INBOUND,
+            body="Nous avons besoin de métrologie industrielle pour une pièce en acier.",
+        ),
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Oui, la métrologie industrielle convient pour valider les dimensions.",
+        ),
+        Message(direction=MessageDirection.INBOUND, body="OK"),
+        # Production history can already contain the current persisted inbound
+        # message; it must not consume a second context slot.
+        Message(direction=MessageDirection.INBOUND, body=follow_up),
+    ]
+    lead = _lead(
+        form_answers={
+            "Services requis": ["Scan 3D"],
+            "Informations additionnelles": {
+                "matériau": "acier",
+                "email": "nested-private@example.com",
+            },
+            "Votre adresse courriel": "private@example.com",
+            "Votre numéro de téléphone": "819-313-1152",
+            "Votre nom": "Martin Gagnon / Fonderie Laurentide",
+        }
+    )
+
+    LLMAgent(provider=ContextualRetrievalProvider()).next_reply(
+        client=_client(),
+        lead=lead,
+        inbound_text=follow_up,
+        history=history,
+    )
+
+    query = captured_query["value"]
+    combined_query = "\n".join((query.current, *query.history, *query.form))
+    assert query.current == follow_up
+    assert combined_query.count(follow_up) == 1
+    assert "métrologie industrielle" in combined_query.casefold()
+    assert "scan 3d" in combined_query.casefold()
+    assert "acier" in combined_query.casefold()
+    assert "private@example.com" not in combined_query
+    assert "nested-private@example.com" not in combined_query
+    assert "819-313-1152" not in combined_query
+    assert "Martin Gagnon" not in combined_query
+    assert len(combined_query) <= 2_400
+
+
+def test_retrieval_query_prioritizes_project_and_service_facts_over_dimensions():
+    query = agent_v3_module._build_knowledge_retrieval_query(
+        inbound_text="Oui",
+        history=[],
+        form_answers={
+            "Secteur d'activité": "Entreprise",
+            "Dimensions de l'objet — Hauteur": "45 mm",
+            "Dimensions de l'objet — Largeur": "280 mm",
+            "Dimensions de l'objet — Longueur": "280 mm",
+            "Dimensions de l'objet — Autres": "18 kg",
+            "Joindre des fichiers": "Deux photos",
+            "Délai de réalisation souhaité": "5 jours",
+            "La demande est-elle urgente?": "Oui",
+            "Sélectionner les services requis": "Scan 3D et rétro-ingénierie",
+            "Informations additionnelles": "Roue dentée brisée sans plan CAD",
+        },
+    )
+
+    form_context = " ".join(query.form).casefold()
+    assert "scan 3d" in form_context
+    assert "roue dentée brisée" in form_context
+    assert "urgente" in form_context
+
+
+def test_qualification_alone_offers_scoping_call_without_showing_slots():
+    provider = BookingToolProvider()
+    agent = LLMAgent(provider=provider)
     lead = _lead()
     history = [
         Message(direction=MessageDirection.INBOUND, body="We need CAD as-builts for one office."),
-        Message(direction=MessageDirection.INBOUND, body="It is around 18,000 sqft."),
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Is there a deadline, and are you the decision-maker?",
+            raw_payload={"agent": {"next_question_key": "urgency_driver"}},
+        ),
     ]
 
     response = agent.run_turn(
@@ -612,10 +885,258 @@ def test_booking_ready_turn_uses_tool_and_returns_slots_reply():
         db=None,
     )
 
+    text = response.reply_text.lower()
+    assert provider.calls == 1
+    assert response.next_state == ConversationStateEnum.QUALIFYING
+    assert response.action == "offer_booking"
+    assert response.tool_call.name == "none"
+    assert "booking_offer" not in response.runtime_payload
+    assert "scoping call" in text
+    assert "expert" in text
+    assert "10:00 am" not in text
+    assert response.runtime_payload["scoping_call_offer_forced"] is True
+
+
+def test_booking_tool_reply_keeps_complete_selection_instructions_beyond_320_characters():
+    agent = LLMAgent(provider=BookingToolProvider())
+
+    response = agent.run_turn(
+        client=_client(),
+        lead=_lead(),
+        inbound_text="Please book a call. Within 2 weeks. I'm the owner and email works best.",
+        history=[Message(direction=MessageDirection.INBOUND, body="We need CAD as-builts for one office.")],
+        booking_service=LongOfferBookingService(),
+        db=None,
+    )
+
+    assert len(response.reply_text) > 320
+    assert "Reply with 1 or 2 to book the call" in response.reply_text
+    assert response.reply_text.endswith("just send me a time that's better for you.")
+
+
+def test_accepting_prior_scoping_call_offer_fetches_live_slots():
+    provider = BookingToolProvider()
+    agent = LLMAgent(provider=provider)
+    lead = _lead(
+        raw_payload={
+            "qualification_memory": {
+                "service_needed": "CAD as-builts",
+                "timeline": "Within 2 weeks",
+                "decision_makers": "Owner",
+                "urgency_driver": "Within 2 weeks",
+            }
+        }
+    )
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Would you like me to help book a scoping call with an expert at Survey North?",
+            raw_payload={
+                "agent": {
+                    "action": "offer_booking",
+                    "conversation_act": "answer_then_soft_cta",
+                }
+            },
+        )
+    ]
+
+    response = agent.run_turn(
+        client=_client(),
+        lead=lead,
+        inbound_text="Yes, go ahead.",
+        history=history,
+        booking_service=FakeBookingService(),
+        db=None,
+    )
+
+    assert provider.calls == 2
     assert response.next_state == ConversationStateEnum.BOOKING_SENT
     assert response.action == "none"
     assert response.runtime_payload["booking_offer"]["slots"]
     assert "10:00 AM" in response.reply_text
+
+
+def test_accepted_scoping_call_handoffs_when_calendar_is_unavailable():
+    provider = BookingToolProvider()
+    lead = _lead(
+        raw_payload={
+            "qualification_memory": {
+                "service_needed": "CAD as-builts",
+                "timeline": "Within 2 weeks",
+                "decision_makers": "Owner",
+                "urgency_driver": "Within 2 weeks",
+            }
+        }
+    )
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Would you like me to help book a scoping call with an expert at Survey North?",
+            raw_payload={"agent": {"action": "offer_booking"}},
+        )
+    ]
+
+    response = LLMAgent(provider=provider).run_turn(
+        client=_client(),
+        lead=lead,
+        inbound_text="Yes, go ahead.",
+        history=history,
+        booking_service=UnavailableBookingService(),
+        db=None,
+    )
+
+    text = response.reply_text.lower()
+    assert provider.calls == 1
+    assert response.next_state == ConversationStateEnum.HANDOFF
+    assert response.action == "handoff_to_human"
+    assert response.conversation_act == "handoff"
+    assert response.tool_call.name == "none"
+    assert "calendar" in text
+    assert "team" in text
+    assert "10:00 am" not in text
+    assert response.runtime_payload["pending_step"] == "human_scheduling_followup"
+    assert response.runtime_payload["cta_state"]["meeting_accepted"] is True
+    assert response.provider_error == "booking_provider_unavailable"
+
+
+def test_second_outbound_replaces_vague_nurture_with_explicit_scoping_call():
+    client = _client()
+    client.business_name = "3D PreciScan"
+    client.provider_config = {"language": "fr"}
+    lead = _lead(
+        form_answers={
+            "services_requis": "Scan 3D et rétro-ingénierie",
+            "delai_souhaite": "Dans les 5 jours ouvrables",
+            "demande_urgente": "Oui, arrêt partiel de production",
+            "informations_additionnelles": "Roue dentée brisée à recréer en STEP.",
+        },
+        raw_payload={
+            "lead_language": "fr",
+            "qualification_memory": {
+                "service_needed": "Scan 3D et rétro-ingénierie",
+                "timeline": "Dans les 5 jours ouvrables",
+                "urgency_driver": "Arrêt partiel de production",
+            },
+        },
+    )
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Êtes-vous la personne qui coordonne la suite, ou quelqu'un d'autre doit-il être inclus?",
+            raw_payload={"agent": {"next_question_key": "decision_makers"}},
+        )
+    ]
+
+    response = LLMAgent(provider=VagueQualifiedSecondTurnProvider()).next_reply(
+        client=client,
+        lead=lead,
+        inbound_text="non ce n'est que moi.",
+        history=history,
+    )
+
+    text = response.reply_text.casefold()
+    assert response.next_state == ConversationStateEnum.QUALIFYING
+    assert response.action == "offer_booking"
+    assert response.conversation_act == "answer_then_soft_cta"
+    assert response.tool_call.name == "none"
+    assert "appel de cadrage" in text
+    assert "expert" in text
+    assert "3d preciscan" in text
+    assert "avancer rapidement" not in text
+    assert "10 h" not in text
+    assert response.reply_text.count("?") == 1
+    assert response.runtime_payload["scoping_call_offer_forced"] is True
+
+
+def test_contextual_decision_answer_only_uses_immediately_previous_outbound_question():
+    agent = agent_v3_module.LLMAgentV3(provider=FailingProvider())
+    lead = _lead(
+        raw_payload={
+            "qualification_memory": {
+                "service_needed": "Scan 3D",
+                "urgency_driver": "Cette semaine",
+            }
+        }
+    )
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Qui valide la suite?",
+            raw_payload={"agent": {"next_question_key": "decision_makers"}},
+        ),
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Quelle date devez-vous respecter?",
+            raw_payload={"agent": {"next_question_key": "urgency_driver"}},
+        ),
+    ]
+
+    context = agent._build_context(
+        client=_client(),
+        lead=lead,
+        inbound_text="my plant manager",
+        history=history,
+    )
+
+    assert context["qualification_memory"].get("decision_makers") is None
+
+
+def test_unknown_reply_does_not_fill_decision_maker_memory():
+    agent = agent_v3_module.LLMAgentV3(provider=FailingProvider())
+    lead = _lead(
+        raw_payload={
+            "qualification_memory": {
+                "service_needed": "Scan 3D",
+                "urgency_driver": "Cette semaine",
+            }
+        }
+    )
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Êtes-vous la personne qui valide la suite?",
+            raw_payload={"agent": {"next_question_key": "decision_makers"}},
+        )
+    ]
+
+    context = agent._build_context(
+        client=_client(),
+        lead=lead,
+        inbound_text="Je ne sais pas, c'est à confirmer.",
+        history=history,
+    )
+
+    assert context["qualification_memory"].get("decision_makers") is None
+
+
+def test_pricing_question_after_decision_prompt_is_not_stored_as_decision_answer():
+    agent = agent_v3_module.LLMAgentV3(provider=FailingProvider())
+    lead = _lead(
+        raw_payload={
+            "qualification_memory": {
+                "service_needed": "Scan 3D",
+                "urgency_driver": "Cette semaine",
+            }
+        }
+    )
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Êtes-vous la personne qui valide la suite?",
+            raw_payload={"agent": {"next_question_key": "decision_makers"}},
+        )
+    ]
+
+    context = agent._build_context(
+        client=_client(),
+        lead=lead,
+        inbound_text="Ça coûte combien",
+        history=history,
+    )
+
+    assert context["pricing_question"] is True
+    assert context["lead_question_detected"] is True
+    assert context["qualification_memory"].get("decision_makers") is None
 
 
 def test_call_interest_without_tool_is_validated_into_live_slot_offer():
@@ -838,8 +1359,170 @@ def test_factual_answer_strips_generic_meeting_cta():
     assert response.tool_call.name == "none"
     assert response.runtime_payload["meeting_cta_stripped"] is True
     assert "handful of active projects" in text
-    assert "strategy call" not in text
-    assert "line up" not in text
+    assert "line up a strategy call" not in text
+
+
+@pytest.mark.parametrize(
+    "inbound_text",
+    [
+        "Parlez-moi de votre projet sur le Engine Block",
+        "Parlez moi de votre projet sur le Engine Block?",
+        "Expliquez-moi votre projet sur le Engine Block",
+        "Expliquez moi votre projet sur le Engine Block?",
+        "Dites-moi ce que vous avez fait sur le Engine Block",
+        "Dites moi ce que vous avez fait sur le Engine Block?",
+        "Avez vous des exemples de projet",
+    ],
+)
+def test_french_factual_requests_are_answer_first_and_keep_grounded_copy(inbound_text: str):
+    agent = LLMAgent(provider=FrenchFactualRequestWithInvalidBookingProvider())
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Bonjour, je peux vous aider avec votre question.",
+        )
+    ]
+    lead = _lead(
+        form_answers={
+            "service_interest": "Scan 3D et rétro-ingénierie",
+            "timeline": "Cette semaine",
+            "decision_maker_role": "Je décide",
+        },
+        raw_payload={
+            "qualification_memory": {
+                "decision_makers": "Je décide",
+                "urgency_driver": "Cette semaine",
+            }
+        },
+    )
+
+    response = agent.next_reply(
+        client=_client(),
+        lead=lead,
+        inbound_text=inbound_text,
+        history=history,
+    )
+
+    text = response.reply_text.casefold()
+    assert "engine block" in text
+    assert "numérisation" in text
+    assert "inspection dimensionnelle" in text
+    assert "appel de cadrage" in text
+    assert "expert" in text
+    assert "disponibilités" not in text
+    assert response.action == "offer_booking"
+    assert response.next_state == ConversationStateEnum.QUALIFYING
+    assert response.tool_call.name == "none"
+    assert response.runtime_payload["booking_blocked_reason"] == "answer_first_question"
+    assert response.runtime_payload["reply_guardrail_reason"] == "answer_first_meeting_cta_stripped"
+    assert response.runtime_payload["scoping_call_offer_forced"] is True
+    assert response.runtime_payload["uses_knowledge_context"] is True
+    assert response.reply_text.count("?") == 1
+
+
+def test_second_outbound_question_redirects_before_optional_qualification_is_complete():
+    client = _client()
+    client.business_name = "3D PreciScan"
+    client.provider_config = {"language": "fr"}
+    lead = _lead(
+        form_answers={
+            "services_requis": "Scan 3D et rétro-ingénierie",
+            "delai_souhaite": "Dans les 5 jours ouvrables",
+            "demande_urgente": "Oui, arrêt partiel de production",
+        },
+        raw_payload={
+            "lead_language": "fr",
+            "qualification_memory": {
+                "service_needed": "Scan 3D et rétro-ingénierie",
+                "timeline": "Dans les 5 jours ouvrables",
+                "urgency_driver": "Arrêt partiel de production",
+            },
+        },
+    )
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Êtes-vous la personne qui coordonne la suite?",
+            raw_payload={"agent": {"next_question_key": "decision_makers"}},
+        )
+    ]
+
+    response = LLMAgent(provider=FrenchFactualRequestWithInvalidBookingProvider()).next_reply(
+        client=client,
+        lead=lead,
+        inbound_text="Avez vous des exemples de projet",
+        history=history,
+    )
+
+    text = response.reply_text.casefold()
+    assert response.collected_fields.decision_makers is None
+    assert "engine block" in text
+    assert "appel de cadrage" in text
+    assert "expert" in text
+    assert response.action == "offer_booking"
+    assert response.next_state == ConversationStateEnum.QUALIFYING
+    assert response.tool_call.name == "none"
+    assert response.runtime_payload["scoping_call_offer_forced"] is True
+    assert response.reply_text.count("?") == 1
+
+
+def test_second_outbound_identity_question_answers_then_offers_scoping_call():
+    lead = _lead(
+        form_answers={"service_interest": "CAD as-builts for an occupied office"},
+        raw_payload={
+            "qualification_memory": {
+                "service_needed": "CAD as-builts",
+                "timeline": "Within 2 weeks",
+                "urgency_driver": "Within 2 weeks",
+            }
+        }
+    )
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body="Are you the decision-maker?",
+            raw_payload={"agent": {"next_question_key": "decision_makers"}},
+        )
+    ]
+
+    response = LLMAgent(provider=FailingProvider()).next_reply(
+        client=_client(),
+        lead=lead,
+        inbound_text="Are you a human?",
+        history=history,
+    )
+
+    text = response.reply_text.lower()
+    assert "i'm hermes" in text
+    assert "assistant for survey north" in text
+    assert "scoping call" in text
+    assert "expert" in text
+    assert response.action == "offer_booking"
+    assert response.conversation_act == "answer_then_soft_cta"
+    assert response.tool_call.name == "none"
+    assert response.runtime_payload["scoping_call_offer_forced"] is True
+    assert response.reply_text.count("?") == 1
+
+
+def test_blocked_invalid_slot_tool_preserves_non_cta_factual_answer():
+    response = LLMAgent(provider=GroundedAnswerWithInvalidSlotToolProvider()).next_reply(
+        client=_client(),
+        lead=_lead(
+            form_answers={"service_interest": "Scan 3D du Engine Block"},
+            raw_payload={"lead_language": "fr"},
+        ),
+        inbound_text="Engine Block project details",
+        history=[],
+    )
+
+    text = response.reply_text.casefold()
+    assert "engine block" in text
+    assert "numérisation" in text
+    assert "inspection dimensionnelle" in text
+    assert "rendez-vous" not in text
+    assert response.tool_call.name == "none"
+    assert response.runtime_payload["action_blocked_reason"] == "no_current_user_scheduling_intent"
+    assert response.runtime_payload["reply_guardrail_reason"] == "invalid_meeting_action_cta_stripped"
 
 
 def test_high_intent_form_answers_are_used_as_known_context():
@@ -892,8 +1575,7 @@ def test_initial_outreach_strips_generic_meeting_cta_but_keeps_question():
     assert response.tool_call.name == "none"
     assert response.runtime_payload["meeting_cta_stripped"] is True
     assert "deadline or key date" in text
-    assert "strategy call" not in text
-    assert "line up" not in text
+    assert "line up a strategy call" not in text
     assert response.reply_text.count("?") == 1
 
 
@@ -960,6 +1642,10 @@ def test_pricing_question_is_suppressed_without_ai_pricing_context():
     assert "set that up" in text
     assert "$" not in response.reply_text
     assert response.tool_call.name == "none"
+    assert response.runtime_payload["uses_knowledge_context"] is False
+    assert "disallowed_pricing_replaced" in response.runtime_payload[
+        "guardrail_events"
+    ]
 
 
 def test_pricing_question_blocks_pushy_booking_tool_on_second_message():
@@ -991,14 +1677,15 @@ def test_pricing_question_blocks_pushy_booking_tool_on_second_message():
 
     text = response.reply_text.lower()
     assert response.next_state == ConversationStateEnum.QUALIFYING
-    assert response.action == "none"
+    assert response.action == "offer_booking"
     assert response.tool_call.name == "none"
     assert response.runtime_payload["booking_blocked_reason"] == "answer_first_question"
     assert "pricing details" in text
     assert "depends on" in text
-    assert "consultation call" in text
-    assert "set that up" in text
-    assert response.runtime_payload["soft_cta_type"] == "consultation_call"
+    assert "scoping call" in text
+    assert "expert" in text
+    assert response.runtime_payload["soft_cta_type"] == "scoping_call"
+    assert response.runtime_payload["scoping_call_offer_forced"] is True
     assert "10:00 am" not in text
 
 

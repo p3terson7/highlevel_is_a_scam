@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "id": "repeated_cta_is_suppressed",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["cta-restraint", "support-first", "pricing", "regression"],
+  "risk": "high",
+  "tenant": {
+    "business_name": "Beacon Workflow Studio",
+    "tone": "consultative and concise",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Which workflow needs support?",
+      "When do you need it running?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "Monthly support includes monitoring, two workflow adjustments, and email support. Exact pricing depends on workflow count and complexity.",
+    "ai_context": "Answer questions directly. Do not repeat a meeting invitation when the lead ignored the previous one."
+  },
+  "lead": {
+    "full_name": "Casey Fixture",
+    "email": "casey.fixture@example.test",
+    "phone": "+14165550107",
+    "city": "Burlington",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "service_interest": "Workflow automation support",
+      "decision_role": "Operations lead"
+    },
+    "raw_payload": {}
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "The exact package depends on scope. Would you like me to help arrange a consultation call?",
+      "raw_payload": {
+        "agent": {
+          "action": "offer_booking"
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "What does the monthly support actually include?",
+      "replay_outputs": [
+        {
+          "reply_text": "Monthly support includes monitoring, two workflow adjustments, and email support. Exact pricing depends on workflow count and complexity. Would you like me to set up a consultation call?",
+          "next_state": "QUALIFYING",
+          "conversation_act": "answer_then_soft_cta",
+          "lead_intent": "support_scope_question",
+          "confidence": 0.98,
+          "reasoning_summary": "The lead wants details about the monthly support package after not responding to a prior CTA.",
+          "uses_knowledge_context": true,
+          "collected_fields": {
+            "service_needed": "Workflow automation support",
+            "timeline": null,
+            "locations": "Burlington",
+            "decision_makers": "Operations lead",
+            "urgency_driver": null,
+            "booking_intent_locked": false
+          },
+          "next_question_key": null,
+          "action": "offer_booking",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "QUALIFYING",
+        "expected_action": "none",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["answer_question", "nurture"],
+        "expected_next_states": ["QUALIFYING"],
+        "must_include": ["monitoring", "two workflow adjustments", "email support"],
+        "must_not_include": ["consultation call", "book a call", "set up a call"],
+        "required_facts": [
+          "Monthly support includes monitoring.",
+          "Monthly support includes two workflow adjustments and email support."
+        ],
+        "forbidden_claims": [
+          "The package has a confirmed fixed price.",
+          "The lead accepted a consultation."
+        ],
+        "forbidden_terms": ["consultation call", "book a call", "set up a call"],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 320,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Answer the package question without repeating the prior CTA.",
+          "Do not convert a support question into a scheduling turn."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}

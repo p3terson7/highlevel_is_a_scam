@@ -524,7 +524,7 @@ async def ui_send_manual_media_message(
     max_bytes = max(int(settings.message_media_max_bytes or 0), 1)
     content = await media.read(max_bytes + 1)
     if len(content) > max_bytes:
-        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Attachment is too large")
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Attachment is too large")
     now = datetime.now(timezone.utc)
     reservation = _reserve_outbound_request(
         db=db,

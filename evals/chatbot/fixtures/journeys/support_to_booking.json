@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "id": "support_to_booking",
+  "owner": "conversation-platform",
+  "kind": "journey",
+  "tags": ["multi-turn", "support-first", "booking", "topic-transition"],
+  "risk": "high",
+  "tenant": {
+    "business_name": "Maple CRM Works",
+    "tone": "friendly, knowledgeable, concise",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Which CRM workflow needs improvement?",
+      "When would you like the workflow live?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "Standard onboarding takes five business days. The service includes HubSpot and Salesforce integration, field mapping, and one team training session.",
+    "ai_context": "Resolve the lead's support question first. Move to scheduling only after explicit interest, and use connected-calendar availability."
+  },
+  "lead": {
+    "full_name": "Sam Journey",
+    "email": "sam.journey@example.test",
+    "phone": "+14165550110",
+    "city": "Toronto",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "service_interest": "Salesforce integration",
+      "decision_role": "Operations owner",
+      "timeline": "Within three weeks"
+    },
+    "raw_payload": {}
+  },
+  "initial_history": [],
+  "turns": [
+    {
+      "inbound": "Does onboarding include field mapping and training, or are those separate?",
+      "replay_outputs": [
+        {
+          "reply_text": "Both are included: onboarding covers field mapping and one team training session. Standard onboarding takes five business days.",
+          "next_state": "QUALIFYING",
+          "conversation_act": "answer_question",
+          "lead_intent": "onboarding_scope_question",
+          "confidence": 0.99,
+          "reasoning_summary": "The lead asked what is included in onboarding, and the FAQ provides a direct answer.",
+          "uses_knowledge_context": true,
+          "collected_fields": {
+            "service_needed": "Salesforce integration",
+            "timeline": "Within three weeks",
+            "locations": "Toronto",
+            "decision_makers": "Operations owner",
+            "urgency_driver": "Workflow live within three weeks",
+            "booking_intent_locked": false
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "QUALIFYING",
+        "expected_action": "none",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["answer_question"],
+        "expected_next_states": ["QUALIFYING"],
+        "must_include": ["field mapping", "team training", "five business days"],
+        "must_not_include": ["book", "meeting", "appointment"],
+        "required_facts": [
+          "Field mapping is included.",
+          "One team training session is included.",
+          "Standard onboarding takes five business days."
+        ],
+        "forbidden_claims": [
+          "Training is always billed separately."
+        ],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 320,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Fully answer the support question before scheduling is discussed.",
+          "Preserve the lead's known service and timeline."
+        ]
+      }
+    },
+    {
+      "inbound": "That answers it. I'd like to speak with someone Wednesday morning. Can you show me times?",
+      "replay_outputs": [
+        {
+          "reply_text": "",
+          "next_state": "BOOKING_SENT",
+          "conversation_act": "offer_slots",
+          "lead_intent": "explicit_booking_request_wednesday_morning",
+          "confidence": 0.99,
+          "reasoning_summary": "After receiving the support answer, the lead explicitly requested Wednesday morning availability.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Salesforce integration",
+            "timeline": "Within three weeks",
+            "locations": "Toronto",
+            "decision_makers": "Operations owner",
+            "urgency_driver": "Workflow live within three weeks",
+            "booking_intent_locked": true
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "find_slots",
+            "args": {
+              "preferred_day": "wednesday",
+              "preferred_period": "morning",
+              "limit": 3
+            }
+          }
+        },
+        {
+          "reply_text": "I found two Wednesday morning options: 1) Wed Aug 05 at 9:00 AM or 2) Wed Aug 05 at 11:00 AM. Reply with 1 or 2.",
+          "next_state": "BOOKING_SENT",
+          "conversation_act": "offer_slots",
+          "lead_intent": "explicit_booking_request_wednesday_morning",
+          "confidence": 0.99,
+          "reasoning_summary": "The response presents the two provider-backed Wednesday morning slots.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Salesforce integration",
+            "timeline": "Within three weeks",
+            "locations": "Toronto",
+            "decision_makers": "Operations owner",
+            "urgency_driver": "Workflow live within three weeks",
+            "booking_intent_locked": true
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "BOOKING_SENT",
+        "expected_action": "none",
+        "expected_pending_step": "slot_selection_pending",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["offer_slots"],
+        "expected_next_states": ["BOOKING_SENT"],
+        "must_include": ["Wed Aug 05 at 9:00 AM", "Wed Aug 05 at 11:00 AM"],
+        "must_not_include": ["booked", "confirmed"],
+        "required_facts": [
+          "Only Wednesday morning slots from tool_world are presented.",
+          "The prior support answer remains resolved rather than being repeated."
+        ],
+        "forbidden_claims": [
+          "The meeting is already booked.",
+          "A slot outside the tool result is available."
+        ],
+        "tool": {
+          "proposed_name": "find_slots",
+          "args_subset": {
+            "preferred_day": "wednesday",
+            "preferred_period": "morning"
+          },
+          "max_calls": 1
+        },
+        "visible_slot_indexes": [1, 2],
+        "max_questions": 1,
+        "max_chars": 420,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": ["find_slots"],
+        "max_tool_calls": 1,
+        "semantic_criteria": [
+          "Transition naturally from resolved support to explicit scheduling.",
+          "Do not re-qualify the lead or invent availability."
+        ]
+      }
+    },
+    {
+      "inbound": "1",
+      "replay_outputs": [],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "BOOKED",
+        "expected_action": "mark_booked",
+        "expected_pending_step": "none",
+        "allowed_actions": ["mark_booked"],
+        "allowed_conversation_acts": ["book_selected_slot"],
+        "expected_next_states": ["BOOKED"],
+        "allowed_resolution_paths": ["deterministic_booking_flow"],
+        "must_include": ["Booked", "Wed Aug 05 at 9:00 AM"],
+        "must_not_include": ["Wed Aug 05 at 11:00 AM", "could not confirm"],
+        "required_facts": [
+          "The first provider-backed slot is confirmed.",
+          "The booking confirmation uses the selected slot rather than another offered time."
+        ],
+        "forbidden_claims": [
+          "A different slot was booked.",
+          "Booking succeeded without a deterministic calendar result."
+        ],
+        "forbidden_tools": ["find_slots", "handoff_to_human"],
+        "tool": {
+          "proposed_name": "book_slot",
+          "max_calls": 1
+        },
+        "max_questions": 0,
+        "max_chars": 240,
+        "max_meeting_ctas": 1,
+        "booking_expected": true,
+        "handoff_expected": false,
+        "expected_tool_names": ["book_slot"],
+        "max_tool_calls": 1,
+        "semantic_criteria": [
+          "Confirm the exact slot the lead selected.",
+          "Do not ask another qualification or scheduling question after confirmation."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "booking_reference": "eval-support-booking-1",
+    "slots": [
+      {
+        "start": "2026-08-05T09:00:00-04:00",
+        "end": "2026-08-05T09:30:00-04:00",
+        "display_time": "Wed Aug 05 at 9:00 AM"
+      },
+      {
+        "start": "2026-08-05T11:00:00-04:00",
+        "end": "2026-08-05T11:30:00-04:00",
+        "display_time": "Wed Aug 05 at 11:00 AM"
+      }
+    ]
+  }
+}

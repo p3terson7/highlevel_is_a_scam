@@ -2,14 +2,18 @@ from fastapi import APIRouter
 
 from app.services.knowledge import (
     KnowledgeIngestionError,
+    clear_knowledge,
     public_source_url,
     validate_ingestion_urls,
 )
 from app.services.zapier_booking import notify_zapier_booking_webhook
 from app.workers.knowledge_tasks import (
+    cancel_knowledge_ingestion,
     KnowledgeIngestionBusy,
+    KnowledgeIngestionJobNotFound,
     KnowledgeIngestionQueueUnavailable,
     enqueue_knowledge_ingestion,
+    get_knowledge_ingestion_job_status,
 )
 
 from .shared import *
@@ -588,6 +592,57 @@ def ui_owner_knowledge(
     }
 
 
+@router.delete("/ui/api/owner/{client_key}/knowledge")
+def ui_owner_clear_knowledge(
+    client_key: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(
+        db=db,
+        settings=settings,
+        admin_token=admin_token,
+        portal_token=portal_token,
+    )
+    if actor.role == "client":
+        client = actor.client
+        if client is None or client.client_key != client_key:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Client not found",
+            )
+    else:
+        client = _load_client_by_key(db, client_key)
+
+    cancelled_active_job = cancel_knowledge_ingestion(client_id=client.id)
+    deleted_sources = clear_knowledge(db, client_id=client.id)
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=None,
+            event_type="knowledge_cleared",
+            decision={
+                "deleted_sources": deleted_sources,
+                "cancelled_active_job": cancelled_active_job,
+                "actor_role": actor.role,
+            },
+        )
+    )
+    db.commit()
+    return {
+        "status": "ok",
+        "client_key": client.client_key,
+        "deleted_sources": deleted_sources,
+        "cancelled_active_job": cancelled_active_job,
+        "sources": [],
+        "total_sources": 0,
+        "total_chunks": 0,
+        "business_profile_context": "",
+    }
+
+
 @router.post(
     "/ui/api/owner/{client_key}/knowledge/ingest",
     status_code=status.HTTP_202_ACCEPTED,
@@ -612,7 +667,7 @@ def ui_owner_ingest_knowledge(
         normalized_urls = validate_ingestion_urls(payload.urls)
     except KnowledgeIngestionError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
 
@@ -659,6 +714,45 @@ def ui_owner_ingest_knowledge(
             "total_pages": len(normalized_urls),
             "total_chunks": 0,
         },
+    }
+
+
+@router.get("/ui/api/owner/{client_key}/knowledge/jobs/{job_id}")
+def ui_owner_knowledge_job_status(
+    client_key: str,
+    job_id: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> dict[str, Any]:
+    actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
+    if actor.role == "client":
+        client = actor.client
+        if client is None or client.client_key != client_key:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+    else:
+        client = _load_client_by_key(db, client_key)
+
+    try:
+        job_status = get_knowledge_ingestion_job_status(
+            client_id=client.id,
+            job_id=job_id,
+        )
+    except KnowledgeIngestionJobNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Knowledge ingestion job not found.",
+        ) from exc
+    except KnowledgeIngestionQueueUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Knowledge ingestion queue is unavailable.",
+        ) from exc
+
+    return {
+        "client_key": client.client_key,
+        **job_status,
     }
 
 

@@ -10,6 +10,7 @@ import type {
   ConversationsPayload,
   CrmLeadsPayload,
   DashboardPayload,
+  KnowledgeJobStatus,
   KnowledgePayload,
   LeadDetailPayload,
   ManualMeetingCreatePayload,
@@ -18,6 +19,7 @@ import type {
   OwnerCalendarConfig,
   OwnerWorkspacePayload,
   RuntimeConfigStatus,
+  SandboxMessageResponse,
   SandboxStartPayload,
   SandboxStartResponse,
   SessionPayload,
@@ -195,8 +197,19 @@ export function fetchOwnerKnowledge(clientKey: string): Promise<KnowledgePayload
   return apiJson<KnowledgePayload>(`/ui/api/owner/${encodeURIComponent(clientKey)}/knowledge`);
 }
 
+export function clearOwnerKnowledge(clientKey: string): Promise<KnowledgePayload> {
+  return apiJson<KnowledgePayload>(
+    `/ui/api/owner/${encodeURIComponent(clientKey)}/knowledge`,
+    { method: "DELETE" }
+  );
+}
+
 export function ingestOwnerKnowledge(clientKey: string, payload: { urls: string[]; replace: boolean }): Promise<KnowledgePayload> {
   return apiJson<KnowledgePayload>(`/ui/api/owner/${encodeURIComponent(clientKey)}/knowledge/ingest`, jsonRequest("POST", payload));
+}
+
+export function fetchOwnerKnowledgeJobStatus(clientKey: string, jobId: string): Promise<KnowledgeJobStatus> {
+  return apiJson<KnowledgeJobStatus>(`/ui/api/owner/${encodeURIComponent(clientKey)}/knowledge/jobs/${encodeURIComponent(jobId)}`);
 }
 
 export function updateOwnerCalendar(clientKey: string, payload: OwnerCalendarConfig): Promise<{ status: string; client_key: string; booking_mode: string; internal_calendar: OwnerCalendarConfig; updated_at: string }> {
@@ -213,6 +226,13 @@ export function updateRuntimeConfig(payload: { openai_api_key?: string; openai_m
 
 export function startSandbox(clientKey: string, payload: SandboxStartPayload): Promise<SandboxStartResponse> {
   return apiJson<SandboxStartResponse>(`/ui/api/owner/${encodeURIComponent(clientKey)}/sandbox/start`, jsonRequest("POST", payload));
+}
+
+export function sendSandboxMessage(leadId: number, body: string): Promise<SandboxMessageResponse> {
+  return apiJson<SandboxMessageResponse>(
+    `/ui/api/conversations/${leadId}/sandbox/messages`,
+    jsonRequest("POST", { body })
+  );
 }
 
 export function fetchCrmLeads(params: Record<string, string | number | boolean | null | undefined> = {}): Promise<CrmLeadsPayload> {

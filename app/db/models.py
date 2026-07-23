@@ -10,9 +10,11 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     JSON,
+    literal_column,
     String,
     Text,
     UniqueConstraint,
@@ -114,6 +116,7 @@ class Client(Base, TimestampMixin):
     )
     faq_context: Mapped[str] = mapped_column(Text, default="", nullable=False)
     ai_context: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    knowledge_profile_context: Mapped[str] = mapped_column(Text, default="", nullable=False)
     template_overrides: Mapped[dict[str, str]] = mapped_column(
         JSON, default=default_dict, nullable=False
     )
@@ -482,24 +485,29 @@ class KnowledgeSource(Base, TimestampMixin):
     __tablename__ = "knowledge_sources"
     __table_args__ = (
         UniqueConstraint("client_id", "normalized_url", name="uq_knowledge_sources_client_url"),
+        UniqueConstraint("client_id", "id", name="uq_knowledge_sources_client_id_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
     url: Mapped[str] = mapped_column(String(2048), nullable=False)
     normalized_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    final_url: Mapped[str] = mapped_column(String(2048), default="", nullable=False)
     title: Mapped[str] = mapped_column(String(512), default="", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
     content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     extracted_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
     text_excerpt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    structured_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
     error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
     last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     client: Mapped[Client] = relationship(back_populates="knowledge_sources")
     chunks: Mapped[list["KnowledgeChunk"]] = relationship(
         back_populates="source",
         cascade="all, delete-orphan",
+        foreign_keys=lambda: [KnowledgeChunk.client_id, KnowledgeChunk.source_id],
         order_by="KnowledgeChunk.chunk_index",
     )
 
@@ -508,6 +516,12 @@ class KnowledgeChunk(Base, TimestampMixin):
     __tablename__ = "knowledge_chunks"
     __table_args__ = (
         UniqueConstraint("source_id", "chunk_index", name="uq_knowledge_chunks_source_index"),
+        ForeignKeyConstraint(
+            ["client_id", "source_id"],
+            ["knowledge_sources.client_id", "knowledge_sources.id"],
+            name="fk_knowledge_chunks_client_source",
+            ondelete="CASCADE",
+        ),
         Index("ix_knowledge_chunks_client_source_index", "client_id", "source_id", "chunk_index"),
     )
 
@@ -518,4 +532,17 @@ class KnowledgeChunk(Base, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     search_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
-    source: Mapped[KnowledgeSource] = relationship(back_populates="chunks")
+    source: Mapped[KnowledgeSource] = relationship(
+        back_populates="chunks",
+        foreign_keys=[client_id, source_id],
+    )
+
+
+# PostgreSQL production retrieval uses this expression index. SQLite development
+# and tests deliberately skip it and use the bounded lexical fallback.
+Index(
+    "ix_knowledge_chunks_search_tsv",
+    func.to_tsvector(literal_column("'simple'"), KnowledgeChunk.search_text),
+    postgresql_using="gin",
+    _table=KnowledgeChunk.__table__,
+).ddl_if(dialect="postgresql")

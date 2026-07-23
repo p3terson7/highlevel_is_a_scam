@@ -205,7 +205,17 @@ describe("Phase 8 admin/config islands", () => {
       );
     });
     await waitFor(() => {
-      expect(screen.getByText(/queued 1 source/i)).toBeInTheDocument();
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/ui/api/owner/demo/knowledge/jobs/knowledge-job-1",
+        expect.any(Object)
+      );
+    });
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/ui/api/owner/demo/knowledge",
+        expect.any(Object)
+      );
+      expect(screen.getByText(/extracted 1 source into 3 chunks/i)).toBeInTheDocument();
     });
 
     fireEvent.change(screen.getByLabelText("Meeting length"), {
@@ -275,7 +285,32 @@ describe("Phase 8 admin/config islands", () => {
       );
     });
     const sandboxCall = (fetchMock.mock.calls as Array<[RequestInfo | URL, RequestInit?]>).find((call) => call[0] === "/ui/api/owner/demo/sandbox/start" && call[1]?.method === "POST");
-    expect(JSON.parse(sandboxCall?.[1]?.body as string)).toMatchObject({ mode: "gpt_zapier" });
+    const sandboxPayload = JSON.parse(sandboxCall?.[1]?.body as string);
+    expect(sandboxPayload).toMatchObject({
+      mode: "gpt_zapier",
+      full_name: "Martin Gagnon / Fonderie Laurentide",
+      phone: "+14185550147",
+      email: "martin.gagnon@example.com",
+      city: "Québec, QC"
+    });
+    expect(sandboxPayload.form_answers).toEqual([
+      { question: "Secteur d'activité", answer: "Entreprise" },
+      { question: "Dimensions de l'objet — Hauteur", answer: "45 mm" },
+      { question: "Dimensions de l'objet — Largeur", answer: "280 mm" },
+      { question: "Dimensions de l'objet — Longueur", answer: "280 mm" },
+      { question: "Dimensions de l'objet — Autres", answer: "Roue dentée en acier, environ 18 kg" },
+      { question: "Joindre des fichiers (Images, STL...)", answer: "Deux photos de la pièce brisée et une ancienne fiche fournisseur sont disponibles." },
+      { question: "Délai de réalisation souhaité?", answer: "Dans les 5 jours ouvrables" },
+      { question: "La demande est-elle urgente?", answer: "Oui — arrêt partiel de production" },
+      { question: "Sélectionner les services requis", answer: "Scan 3D, Rétro-ingénierie (3D & 2D), Modélisation" },
+      {
+        question: "Informations additionnelles",
+        answer: "Une roue dentée est brisée et nous n'avons aucun plan CAD exploitable. Nous avons la pièce cassée et une pièce usée de référence; il nous faut un fichier STEP et un dessin technique pour la refaire usiner."
+      }
+    ]);
+    const submittedQuestions = sandboxPayload.form_answers.map((row: { question: string }) => row.question);
+    expect(submittedQuestions).not.toContain("Timeline");
+    expect(submittedQuestions).not.toContain("Service interest");
     expect(await screen.findByText(/Sandbox started/i)).toBeInTheDocument();
     expect(screen.getByText(/waiting_for_booking/i)).toBeInTheDocument();
 
@@ -374,6 +409,26 @@ async function fetchStub(input: RequestInfo | URL, init?: RequestInit) {
       job_id: "knowledge-job-1",
       total_sources: 1,
       total_chunks: 2
+    });
+  }
+  if (url === "/ui/api/owner/demo/knowledge/jobs/knowledge-job-1") {
+    return jsonResponse({
+      client_key: "demo",
+      job_id: "knowledge-job-1",
+      status: "ok",
+      terminal: true,
+      total_pages: 1,
+      failed_pages: 0,
+      total_chunks: 3
+    });
+  }
+  if (url === "/ui/api/owner/demo/knowledge") {
+    return jsonResponse({
+      ...sampleWorkspace.knowledge,
+      status: "ok",
+      total_sources: 1,
+      total_chunks: 3,
+      sources: [{ url: "https://example.test/services", title: "Services refreshed", status: "ok", chunk_count: 3 }]
     });
   }
   if (url === "/ui/api/owner/demo/calendar" && init?.method === "PATCH") {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
@@ -84,7 +85,9 @@ _NON_QUESTION_FORM_KEYS = {
 
 
 def _canonical_key(raw_key: Any) -> str:
-    base = re.sub(r"[^a-z0-9]+", "_", str(raw_key or "").strip().lower()).strip("_")
+    normalized = unicodedata.normalize("NFKD", str(raw_key or "").strip())
+    folded = "".join(character for character in normalized if not unicodedata.combining(character)).casefold()
+    base = re.sub(r"[^a-z0-9]+", "_", folded).strip("_")
     if not base:
         return ""
     return _KEY_ALIASES.get(base, base)

@@ -69,7 +69,7 @@ from app.services.demo_seed import (
 )
 from app.services.lead_intake import normalize_phone
 from app.services.knowledge import knowledge_payload
-from app.services.inbound_sms import process_inbound_turn
+from app.services.inbound_sms import process_inbound_turn, safe_agent_diagnostics
 from app.services.llm_agent import build_llm_agent
 from app.services.message_media import refresh_attachment_public_access
 from app.services.lead_summary import build_lead_summary_lines, build_lead_summary_text, normalize_form_answers
@@ -87,7 +87,6 @@ from app.services.runtime_config import (
     load_runtime_overrides,
 )
 from app.services.sms_service import SMSDeliveryError, SMSService, build_mock_sms_service, build_sms_service
-from app.workers.tasks import _meta_initial_seed_text
 
 _UI_FILE = Path(__file__).resolve().parents[1] / "templates" / "ui.html"
 _WEBHOOK_EVENT_TYPES = {

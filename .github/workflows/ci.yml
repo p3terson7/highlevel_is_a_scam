@@ -37,7 +37,7 @@ jobs:
           python -m pip check
 
       - name: Run high-signal Python static checks
-        run: python -m ruff check --select E9,F63,F7,F82 app scripts
+        run: python -m ruff check --select E9,F63,F7,F82 app scripts evals
 
       - name: Audit Python dependencies
         run: python -m pip_audit -r requirements-dev.txt
@@ -47,6 +47,19 @@ jobs:
           PYTHONHASHSEED: "0"
           TZ: UTC
         run: python -m pytest -q
+
+      - name: Run offline chatbot safety smoke gate
+        env:
+          PYTHONHASHSEED: "0"
+          TZ: UTC
+        run: >-
+          python scripts/run_chatbot_evals.py
+          --agent v3
+          --suite smoke
+          --provider replay
+          --judge off
+          --workers 2
+          --output /tmp/chatbot-evals-smoke
 
   frontend:
     name: Frontend checks and production build

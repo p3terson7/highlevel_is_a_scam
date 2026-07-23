@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from sqlalchemy import select
 
-from app.db.models import Client, Lead, LeadSource, OutboundRequest
+from app.db.models import AuditLog, Client, Lead, LeadSource, OutboundRequest
 from app.db.session import get_session_factory
 from app.services.outbound_recovery import reconcile_stale_outbound_requests
 from app.services.outbound_requests import fingerprint_payload
@@ -56,6 +56,97 @@ def _create_lead(*, external_id: str, phone: str) -> int:
         db.add(lead)
         db.commit()
         return lead.id
+
+
+def test_initial_sms_enqueue_uses_non_blocking_twenty_second_delay(monkeypatch):
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def enqueue_in(self, delay, func, *args, **kwargs):
+            self.calls.append((delay, func, args, kwargs))
+            return object()
+
+    queue = FakeQueue()
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(rq_eager=False, automated_sms_delay_seconds=20),
+    )
+    monkeypatch.setattr(tasks, "get_queue", lambda: queue)
+
+    assert tasks.enqueue_send_initial_sms(123) is not None
+    assert len(queue.calls) == 1
+    delay, func, args, kwargs = queue.calls[0]
+    assert delay == timedelta(seconds=20)
+    assert func is tasks.send_initial_sms_task
+    assert args == (123,)
+    assert kwargs["retry"].max == 3
+    assert kwargs["retry"].intervals == [30, 120, 300]
+
+
+def test_automated_sms_pacing_normalizes_naive_database_timestamps():
+    settings = SimpleNamespace(rq_eager=False, automated_sms_delay_seconds=20)
+    anchor = datetime(2026, 7, 22, 16, 0)
+    older_trigger = datetime(2026, 7, 22, 15, 59, tzinfo=timezone.utc)
+
+    assert tasks._remaining_automated_sms_delay(
+        settings,
+        older_trigger,
+        anchor,
+        now=datetime(2026, 7, 22, 16, 0, tzinfo=timezone.utc),
+    ) == 20
+    assert tasks._remaining_automated_sms_delay(
+        settings,
+        anchor,
+        now=datetime(2026, 7, 22, 16, 0, 20, tzinfo=timezone.utc),
+    ) == 0
+
+
+def test_missing_queue_never_turns_delayed_followup_into_immediate_send(monkeypatch):
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(rq_eager=False, after_hours_followup_minutes=720),
+    )
+    monkeypatch.setattr(tasks, "get_queue", lambda: None)
+
+    assert tasks.enqueue_followup_sms(123, reason="after_hours_followup") is False
+
+
+def test_delayed_initial_sms_is_suppressed_after_lead_starts_conversation(
+    test_context,
+    monkeypatch,
+):
+    lead_id = _create_lead(
+        external_id="conversation-started-before-greeting",
+        phone="+15550001000",
+    )
+    with get_session_factory()() as db:
+        lead = db.get(Lead, lead_id)
+        assert lead is not None
+        lead.last_inbound_at = datetime.now(timezone.utc)
+        db.commit()
+
+    service = ControlledSMSService()
+    monkeypatch.setattr(tasks, "build_sms_service", lambda *args, **kwargs: service)
+    monkeypatch.setattr(tasks, "_acquire_lead_workflow_lock", lambda **kwargs: None)
+
+    result = tasks.send_initial_sms_task(lead_id)
+
+    assert result == {"status": "skipped", "reason": "conversation_already_started"}
+    assert service.send_calls == 0
+    with get_session_factory()() as db:
+        audit = db.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.lead_id == lead_id,
+                AuditLog.event_type == "initial_sms_skipped",
+            )
+            .order_by(AuditLog.id.desc())
+        )
+        assert audit is not None
+        assert audit.decision["reason"] == "conversation_already_started"
 
 
 def test_sms_failure_classification_distinguishes_rejection_from_unknown_result():

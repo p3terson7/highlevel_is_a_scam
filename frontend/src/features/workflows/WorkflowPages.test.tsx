@@ -170,6 +170,92 @@ describe("Phase 7 inbox island", () => {
     expect(document.body).not.toHaveTextContent("[object Object]");
   });
 
+  it("sends Test Lab composer messages as the sandbox lead and renders the GPT reply", async () => {
+    const view = activeView("view-conversations", document.createElement("div"), document.createElement("div"));
+    document.body.appendChild(view);
+    let turnCompleted = false;
+    const leadMessage = "Est-ce que vous êtes disponible vendredi?";
+    const agentReply = "Oui, je peux vous proposer vendredi à 14 h.";
+    const sandboxThread = {
+      ...sampleThread,
+      lead: { ...sampleThread.lead, tags: ["sandbox", "Qualified"] }
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/ui/api/conversations/42/sandbox/messages") {
+        turnCompleted = true;
+        return jsonResponse({
+          status: "ok",
+          lead_id: 42,
+          state: "QUALIFYING",
+          crm_stage: "Qualified",
+          delivery_mode: "sandbox",
+          twilio_bypassed: true,
+          inbound_message_id: 3,
+          reply: { id: 4, body: agentReply, provider_message_sid: "MOCK-OUT-4" }
+        });
+      }
+      if (url === "/ui/api/conversations/42/thread") {
+        return jsonResponse({
+          ...sandboxThread,
+          messages: turnCompleted
+            ? [
+                ...sampleThread.messages,
+                {
+                  id: 3,
+                  direction: "INBOUND",
+                  body: leadMessage,
+                  provider_message_sid: "SANDBOX-IN-3",
+                  attachments: [],
+                  delivery: null,
+                  created_at: "2026-06-10T12:10:00Z"
+                },
+                {
+                  id: 4,
+                  direction: "OUTBOUND",
+                  body: agentReply,
+                  provider_message_sid: "MOCK-OUT-4",
+                  attachments: [],
+                  delivery: null,
+                  created_at: "2026-06-10T12:10:01Z"
+                }
+              ]
+            : sampleThread.messages
+        });
+      }
+      return fetchStub(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App mode="inbox" />);
+
+    const composer = await screen.findByRole("textbox", { name: /test lead message/i });
+    expect(composer).toHaveAttribute("placeholder", "Type the next message as the test lead.");
+    expect(screen.getByText(/messages send as the test lead.*Twilio is not used/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/attach image or video/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /pause ai/i })).not.toBeInTheDocument();
+
+    fireEvent.change(composer, { target: { value: leadMessage } });
+    fireEvent.click(screen.getByRole("button", { name: /send as test lead/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/ui/api/conversations/42/sandbox/messages",
+      expect.objectContaining({ method: "POST" })
+    ));
+    const sandboxCall = (fetchMock.mock.calls as Array<[RequestInfo | URL, RequestInit?]>).find(
+      (call) => call[0] === "/ui/api/conversations/42/sandbox/messages"
+    );
+    expect(JSON.parse(sandboxCall?.[1]?.body as string)).toEqual({ body: leadMessage });
+    expect((sandboxCall?.[1]?.headers as Headers).get("Idempotency-Key")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/ui/api/conversations/42/messages/manual",
+      expect.anything()
+    );
+    expect(await screen.findByText(agentReply)).toBeInTheDocument();
+    expect(screen.getByText(leadMessage)).toBeInTheDocument();
+    expect(window.localStorage.getItem("lead-ui-sandbox-lead")).toBe("42");
+  });
+
   it("requires explicit confirmation before rotating an ambiguous outbound attempt", async () => {
     const view = activeView("view-conversations", document.createElement("div"), document.createElement("div"));
     document.body.appendChild(view);

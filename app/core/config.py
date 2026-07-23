@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     twilio_inbound_window_seconds: int = 60
     rate_limit_count: int = 100
     rate_limit_window_minutes: int = 1
+    automated_sms_delay_seconds: int = 20
     after_hours_followup_minutes: int = 720
     request_timeout_seconds: int = 20
     request_body_max_bytes: int = 1024 * 1024
@@ -112,6 +113,9 @@ def validate_security_settings(settings: Settings) -> None:
         raise RuntimeError("TWILIO_INBOUND_ACCOUNT_LIMIT must be greater than zero")
     if settings.twilio_inbound_window_seconds <= 0:
         raise RuntimeError("TWILIO_INBOUND_WINDOW_SECONDS must be greater than zero")
+
+    if not 0 <= settings.automated_sms_delay_seconds <= 300:
+        raise RuntimeError("AUTOMATED_SMS_DELAY_SECONDS must be between 0 and 300")
 
     if (
         settings.env.strip().lower() in {"prod", "production"}

@@ -1,12 +1,14 @@
 import { FormEvent, useEffect, useState } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import {
+  clearOwnerKnowledge,
   createClient,
   fetchAuditLogs,
   fetchAutomationHealth,
   fetchClientDetail,
   fetchClients,
   fetchOwnerKnowledge,
+  fetchOwnerKnowledgeJobStatus,
   fetchOwnerWorkspace,
   fetchRuntimeStatus,
   ingestOwnerKnowledge,
@@ -23,6 +25,7 @@ import type {
   ClientDetailPayload,
   ClientSummary,
   KnowledgePayload,
+  KnowledgeSource,
   OwnerCalendarAvailabilityRow,
   OwnerCalendarConfig,
   OwnerWorkspacePayload,
@@ -86,11 +89,21 @@ const DEFAULT_CALENDAR: OwnerCalendarConfig = {
   availability: DEFAULT_AVAILABILITY
 };
 
-const DEFAULT_TEST_ANSWERS = [
-  { question: "Timeline", answer: "Within 2 weeks" },
-  { question: "Service interest", answer: "I want to understand options and next steps" },
-  { question: "Main goal", answer: "Find the right solution without wasting time" },
-  { question: "Decision role", answer: "Owner" }
+// Mirrors the 3D PreciScan quote form in php/soumission.php with a coherent synthetic lead.
+const DEFAULT_PRECISCAN_TEST_ANSWERS = [
+  { question: "Secteur d'activité", answer: "Entreprise" },
+  { question: "Dimensions de l'objet — Hauteur", answer: "45 mm" },
+  { question: "Dimensions de l'objet — Largeur", answer: "280 mm" },
+  { question: "Dimensions de l'objet — Longueur", answer: "280 mm" },
+  { question: "Dimensions de l'objet — Autres", answer: "Roue dentée en acier, environ 18 kg" },
+  { question: "Joindre des fichiers (Images, STL...)", answer: "Deux photos de la pièce brisée et une ancienne fiche fournisseur sont disponibles." },
+  { question: "Délai de réalisation souhaité?", answer: "Dans les 5 jours ouvrables" },
+  { question: "La demande est-elle urgente?", answer: "Oui — arrêt partiel de production" },
+  { question: "Sélectionner les services requis", answer: "Scan 3D, Rétro-ingénierie (3D & 2D), Modélisation" },
+  {
+    question: "Informations additionnelles",
+    answer: "Une roue dentée est brisée et nous n'avons aucun plan CAD exploitable. Nous avons la pièce cassée et une pièce usée de référence; il nous faut un fichier STEP et un dessin technique pour la refaire usiner."
+  }
 ];
 
 export function ClientsPage({ onReadyChange }: AdminPageProps) {
@@ -866,6 +879,7 @@ export function SettingsPage({ onReadyChange }: AdminPageProps) {
   const [openAiModel, setOpenAiModel] = useState("gpt-5.4-mini");
   const [calendar, setCalendar] = useState<OwnerCalendarConfig>(DEFAULT_CALENDAR);
   const [knowledgeUrls, setKnowledgeUrls] = useState("");
+  const [knowledgeJobId, setKnowledgeJobId] = useState("");
   const [actionStatus, setActionStatus] = useState("");
   const [retryVersion, setRetryVersion] = useState(0);
 
@@ -910,6 +924,7 @@ export function SettingsPage({ onReadyChange }: AdminPageProps) {
   useEffect(() => {
     if (auth.status !== "ready" || !clientKey) return;
     let cancelled = false;
+    setKnowledgeJobId("");
     setStatus("loading");
     setError("");
     onReadyChange?.(false);
@@ -940,6 +955,51 @@ export function SettingsPage({ onReadyChange }: AdminPageProps) {
       cancelled = true;
     };
   }, [auth.status, clientKey, retryVersion]);
+
+  useEffect(() => {
+    if (!clientKey || !knowledgeJobId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let consecutiveFailures = 0;
+
+    const scheduleNextPoll = () => {
+      timer = setTimeout(() => void poll(), 1500);
+    };
+    const poll = async () => {
+      try {
+        const job = await fetchOwnerKnowledgeJobStatus(clientKey, knowledgeJobId);
+        if (cancelled) return;
+        consecutiveFailures = 0;
+        if (!job.terminal) {
+          setActionStatus(job.status === "running" ? "Extracting website knowledge..." : "Website extraction is queued...");
+          scheduleNextPoll();
+          return;
+        }
+
+        const refreshed = await fetchOwnerKnowledge(clientKey);
+        if (cancelled) return;
+        setWorkspace((current) => current ? { ...current, knowledge: refreshed } : current);
+        setKnowledgeUrls((refreshed.sources || []).map((source) => source.url).filter(Boolean).join("\n"));
+        setActionStatus(knowledgeJobCompletionMessage(job.status, job.total_pages, job.failed_pages, refreshed.total_chunks || job.total_chunks));
+        setKnowledgeJobId("");
+      } catch {
+        if (cancelled) return;
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= 3) {
+          setActionStatus("Could not monitor website extraction. Use Refresh extraction to check it manually.");
+          setKnowledgeJobId("");
+          return;
+        }
+        scheduleNextPoll();
+      }
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [clientKey, knowledgeJobId]);
 
   if (status !== "ready" && !workspace) {
     return <AdminLoadState title="Settings" status={status} error={error} onRetry={() => setRetryVersion((current) => current + 1)} />;
@@ -985,12 +1045,13 @@ export function SettingsPage({ onReadyChange }: AdminPageProps) {
       setActionStatus("Add at least one URL.");
       return;
     }
-    setActionStatus("Fetching and extracting website text...");
+    setActionStatus("Queueing website extraction...");
     try {
       const result = await ingestOwnerKnowledge(clientKey, { urls, replace: true });
       setWorkspace((current) => current ? { ...current, knowledge: result } : current);
-      if (result.status === "queued") {
-        setActionStatus(`Queued ${urls.length} source${urls.length === 1 ? "" : "s"}. Use Refresh extraction to see progress.`);
+      if (result.status === "queued" && result.job_id) {
+        setActionStatus(`Queued ${urls.length} source${urls.length === 1 ? "" : "s"}. Monitoring progress...`);
+        setKnowledgeJobId(result.job_id);
       } else {
         setActionStatus(`Ingested ${result.total_sources || urls.length} sources and ${result.total_chunks || 0} chunks.`);
       }
@@ -1009,6 +1070,21 @@ export function SettingsPage({ onReadyChange }: AdminPageProps) {
       setActionStatus(`Loaded ${result.total_sources || 0} sources.`);
     } catch (caught: unknown) {
       setActionStatus(messageFor(caught, "Knowledge refresh failed"));
+    }
+  }
+
+  async function clearKnowledge() {
+    if (!clientKey) return;
+    if (!window.confirm("Clear all extracted website knowledge for this workspace?")) return;
+    setActionStatus("Clearing website knowledge...");
+    try {
+      const result = await clearOwnerKnowledge(clientKey);
+      setWorkspace((current) => current ? { ...current, knowledge: result } : current);
+      setKnowledgeUrls("");
+      setKnowledgeJobId("");
+      setActionStatus(`Cleared ${result.deleted_sources || 0} website knowledge sources.`);
+    } catch (caught: unknown) {
+      setActionStatus(messageFor(caught, "Knowledge clear failed"));
     }
   }
 
@@ -1163,6 +1239,7 @@ export function SettingsPage({ onReadyChange }: AdminPageProps) {
             <div className="actions">
               <button className="primary" type="submit">Ingest URLs</button>
               <button className="ghost" type="button" onClick={() => void refreshKnowledge()}>Refresh extraction</button>
+              <button className="ghost" type="button" onClick={() => void clearKnowledge()}>Clear knowledge</button>
             </div>
             <KnowledgeSummary knowledge={workspace?.knowledge || null} />
           </form>
@@ -1214,11 +1291,11 @@ export function TestLabPage({ onReadyChange }: AdminPageProps) {
   const [clientKey, setClientKey] = useState("");
   const [workspace, setWorkspace] = useState<OwnerWorkspacePayload | null>(null);
   const [mode, setMode] = useState("gpt_only");
-  const [fullName, setFullName] = useState("Strategy Call Contact");
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("contact@example.com");
-  const [city, setCity] = useState("Toronto");
-  const [answers, setAnswers] = useState(DEFAULT_TEST_ANSWERS);
+  const [fullName, setFullName] = useState("Martin Gagnon / Fonderie Laurentide");
+  const [phone, setPhone] = useState("+14185550147");
+  const [email, setEmail] = useState("martin.gagnon@example.com");
+  const [city, setCity] = useState("Québec, QC");
+  const [answers, setAnswers] = useState(DEFAULT_PRECISCAN_TEST_ANSWERS);
   const [result, setResult] = useState<SandboxStartResponse | null>(null);
   const [labStatus, setLabStatus] = useState("");
   const [labFailed, setLabFailed] = useState(false);
@@ -1510,11 +1587,34 @@ function KnowledgeSummary({ knowledge }: { knowledge: KnowledgePayload | null })
             {renderBadge(source.status || "pending", source.status === "ok" ? "ok" : "warn")}
           </div>
           <div className="item-subtitle mono">{source.url}</div>
-          <div className="item-snippet">{source.status === "ok" ? `${source.chunk_count || 0} chunks · ${formatDateTime(source.last_crawled_at || "")}` : source.error_message || "Waiting for extraction."}</div>
+          <div className="item-snippet">{knowledgeSourceSummary(source)}</div>
         </div>
       ))}
     </div>
   );
+}
+
+function knowledgeSourceSummary(source: KnowledgeSource) {
+  if (source.status === "ok") {
+    return `${source.chunk_count || 0} chunks · updated ${formatDateTime(source.last_success_at || source.last_crawled_at || "")}`;
+  }
+  if (source.status === "stale") {
+    const retained = `${source.chunk_count || 0} retained chunks · last successful ${formatDateTime(source.last_success_at || "")}`;
+    return source.error_message ? `${retained} · refresh failed: ${source.error_message}` : retained;
+  }
+  return source.error_message || "Waiting for extraction.";
+}
+
+function knowledgeJobCompletionMessage(status: string, totalPages: number, failedPages: number, totalChunks: number) {
+  if (status === "ok" || status === "completed") {
+    return `Extracted ${totalPages} source${totalPages === 1 ? "" : "s"} into ${totalChunks} chunks.`;
+  }
+  if (status === "partial") {
+    return `Extraction completed with ${failedPages} of ${totalPages} sources failing. Existing successful knowledge is available.`;
+  }
+  if (status === "skipped") return "Website extraction was skipped because the job was superseded or the workspace is unavailable.";
+  if (status === "cancelled") return "Website extraction was cancelled.";
+  return "Website extraction failed. Existing knowledge remains available.";
 }
 
 function SettingsReadinessStrip({ isAdmin, runtime, workspace }: { isAdmin: boolean; runtime: RuntimeConfigStatus | null; workspace: OwnerWorkspacePayload | null }) {
@@ -1864,7 +1964,7 @@ function updateCalendarRow(current: OwnerCalendarConfig, index: number, patch: P
   };
 }
 
-function updateAnswer(rows: typeof DEFAULT_TEST_ANSWERS, index: number, field: "question" | "answer", value: string) {
+function updateAnswer(rows: typeof DEFAULT_PRECISCAN_TEST_ANSWERS, index: number, field: "question" | "answer", value: string) {
   return rows.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row);
 }
 

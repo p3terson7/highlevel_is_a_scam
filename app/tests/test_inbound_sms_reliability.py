@@ -321,21 +321,77 @@ def test_queue_handoff_is_deduplicated_before_worker_claim(test_context, monkeyp
         def __init__(self) -> None:
             self.calls: list[tuple] = []
 
-        def enqueue(self, func, **kwargs):
-            self.calls.append((func, kwargs))
+        def enqueue_in(self, delay, func, **kwargs):
+            self.calls.append((delay, func, kwargs))
             return object()
 
     queue = FakeQueue()
-    monkeypatch.setattr(tasks, "get_settings", lambda: SimpleNamespace(rq_eager=False))
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(rq_eager=False, automated_sms_delay_seconds=20),
+    )
     monkeypatch.setattr(tasks, "get_queue", lambda: queue)
 
     assert tasks.enqueue_process_inbound_sms(lead_id, message_id) is not False
     assert tasks.enqueue_process_inbound_sms(lead_id, message_id) is True
     assert len(queue.calls) == 1
+    delay, func, kwargs = queue.calls[0]
+    assert delay.total_seconds() == 20
+    assert func is tasks.process_inbound_sms_task
+    assert kwargs == {"lead_id": lead_id, "inbound_message_id": message_id}
     with get_session_factory()() as db:
         message = db.get(Message, message_id)
         assert message is not None
         assert message.inbound_work_status == INBOUND_WORK_ENQUEUED
+
+
+def test_fresh_inbound_turn_requeues_before_claim_or_send(test_context, monkeypatch) -> None:
+    lead_id, message_id = _seed_queued_message(
+        phone="+15559990013",
+        sid="SM-PACED-INBOUND",
+    )
+    with get_session_factory()() as db:
+        message = db.get(Message, message_id)
+        assert message is not None
+        message.inbound_work_status = INBOUND_WORK_ENQUEUED
+        db.commit()
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def enqueue_in(self, delay, func, *args, **kwargs):
+            self.calls.append((delay, func, args, kwargs))
+            return object()
+
+    queue = FakeQueue()
+    monkeypatch.setattr(tasks, "_acquire_lead_workflow_lock", lambda **kwargs: None)
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(rq_eager=False, automated_sms_delay_seconds=20),
+    )
+    monkeypatch.setattr(tasks, "get_queue", lambda: queue)
+
+    result = tasks.process_inbound_sms_task(lead_id, message_id)
+
+    assert result["status"] == "requeued"
+    assert result["reason"] == "automated_sms_pacing"
+    assert 1 <= result["delay_seconds"] <= 20
+    assert len(queue.calls) == 1
+    delay, func, args, kwargs = queue.calls[0]
+    assert delay.total_seconds() == result["delay_seconds"]
+    assert func is tasks.process_inbound_sms_task
+    assert args == (lead_id, message_id, False)
+    assert kwargs == {}
+    assert test_context.fake_llm.calls == 0
+    assert test_context.fake_sms.sent == []
+    with get_session_factory()() as db:
+        message = db.get(Message, message_id)
+        assert message is not None
+        assert message.inbound_work_status == INBOUND_WORK_ENQUEUED
+        assert message.inbound_work_attempt_count == 0
 
 
 def test_startup_webhook_recovery_also_recovers_inbound_text(test_context, monkeypatch) -> None:

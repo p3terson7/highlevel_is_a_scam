@@ -14,13 +14,18 @@ from app.db.models import (
     CalendarBooking,
     Client,
     ConversationState,
+    KnowledgeChunk,
+    KnowledgeSource,
     Lead,
     LeadSource,
+    Message,
     MessageAttachment,
+    MessageDirection,
     OutboundRequest,
 )
 from app.db.session import get_session_factory
 from app.services import zapier_booking
+from app.services.llm_agent import LLMAgent
 
 
 def _admin_headers() -> dict[str, str]:
@@ -422,6 +427,144 @@ def test_ui_can_start_custom_test_lab_sandbox_thread(test_context):
     assert thread_payload["messages"]
     assert thread_payload["messages"][0]["direction"] == "OUTBOUND"
     assert any(item["event_type"] == "ui_sandbox_initial_ai_sms" for item in thread_payload["audit_events"])
+
+
+def test_test_lab_opening_reply_uses_selected_clients_website_knowledge(
+    test_context,
+    monkeypatch,
+):
+    captured_prompts: list[dict] = []
+    now = datetime.now(timezone.utc)
+    session_factory = get_session_factory()
+    with session_factory() as db:
+        selected_client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert selected_client is not None
+        selected_client.knowledge_profile_context = (
+            "Selected tenant profile: precision metrology specialists."
+        )
+        other_client = Client(
+            client_key="other-knowledge-tenant",
+            business_name="Other Knowledge Tenant",
+            knowledge_profile_context="Other tenant profile must never appear.",
+        )
+        db.add(other_client)
+        db.flush()
+
+        selected_source = KnowledgeSource(
+            client_id=selected_client.id,
+            url="https://selected.example/metrology",
+            normalized_url="https://selected.example/metrology",
+            final_url="https://selected.example/metrology",
+            title="Selected precision metrology",
+            status="ok",
+            extracted_text="Selected-source fact: zirconium turbine metrology fixtures are supported.",
+            text_excerpt="Selected-source fact: zirconium turbine metrology fixtures are supported.",
+            last_success_at=now,
+        )
+        other_source = KnowledgeSource(
+            client_id=other_client.id,
+            url="https://other.example/metrology",
+            normalized_url="https://other.example/metrology",
+            final_url="https://other.example/metrology",
+            title="Other tenant metrology",
+            status="ok",
+            extracted_text="Other-tenant secret: zirconium turbine metrology fixtures are forbidden.",
+            text_excerpt="Other-tenant secret: zirconium turbine metrology fixtures are forbidden.",
+            last_success_at=now,
+        )
+        db.add_all([selected_source, other_source])
+        db.flush()
+        db.add_all(
+            [
+                KnowledgeChunk(
+                    client_id=selected_client.id,
+                    source_id=selected_source.id,
+                    chunk_index=0,
+                    content=selected_source.extracted_text,
+                    search_text=selected_source.extracted_text.casefold(),
+                ),
+                KnowledgeChunk(
+                    client_id=other_client.id,
+                    source_id=other_source.id,
+                    chunk_index=0,
+                    content=other_source.extracted_text,
+                    search_text=other_source.extracted_text.casefold(),
+                ),
+            ]
+        )
+        selected_client_id = selected_client.id
+        selected_source_id = selected_source.id
+        db.commit()
+
+    class OpeningKnowledgeProvider:
+        name = "test-lab-opening-knowledge"
+
+        def generate_json(self, system_prompt: str, user_prompt: str):
+            _ = system_prompt
+            prompt = json.loads(user_prompt)
+            captured_prompts.append(prompt)
+            return {
+                "reply_text": "Yes, our precision metrology team can help.",
+                "next_state": "QUALIFYING",
+                "collected_fields": prompt["qualification_memory"],
+                "next_question_key": None,
+                "action": "none",
+                "uses_knowledge_context": True,
+                "tool_call": {"name": "none", "args": {}},
+            }
+
+    monkeypatch.setattr(
+        sandbox_routes,
+        "build_llm_agent",
+        lambda *args, **kwargs: LLMAgent(provider=OpeningKnowledgeProvider()),
+    )
+
+    response = test_context.client.post(
+        f"/ui/api/owner/{test_context.client_key}/sandbox/start",
+        headers=_admin_headers(),
+        json={
+            "mode": "gpt_only",
+            "full_name": "Knowledge Sandbox Lead",
+            "form_answers": [
+                {
+                    "question": "Project scope",
+                    "answer": "Zirconium turbine metrology fixture",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(captured_prompts) == 1
+    opening_prompt = captured_prompts[0]
+    assert "selected tenant profile" in opening_prompt["business_profile_context"].lower()
+    assert "selected-source fact" in opening_prompt["knowledge_context"].lower()
+    assert "other tenant" not in opening_prompt["business_profile_context"].lower()
+    assert "other-tenant secret" not in opening_prompt["knowledge_context"].lower()
+    assert "ai sandbox" in opening_prompt["latest_inbound_message"].lower()
+    assert "meta lead ads" not in opening_prompt["latest_inbound_message"].lower()
+
+    with session_factory() as db:
+        lead = db.get(Lead, response.json()["lead_id"])
+        assert lead is not None
+        assert lead.client_id == selected_client_id
+        outbound = db.scalar(
+            select(Message)
+            .where(
+                Message.lead_id == lead.id,
+                Message.direction == MessageDirection.OUTBOUND,
+            )
+            .order_by(Message.id.desc())
+        )
+        assert outbound is not None
+        agent_trace = (outbound.raw_payload or {})["agent"]
+        assert agent_trace["uses_knowledge_context"] is True
+        assert agent_trace["knowledge_retrieval"]["selected_sources"][0][
+            "source_id"
+        ] == selected_source_id
+        assert "url" not in agent_trace["knowledge_retrieval"]["selected_sources"][0]
 
 
 def test_test_lab_future_modes_are_explicitly_disabled(test_context):

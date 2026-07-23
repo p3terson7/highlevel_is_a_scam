@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -37,6 +38,8 @@ from app.services.compliance import within_operating_hours
 from app.services.crm import CRM_STAGE_CONTACTED, progress_crm_stage
 from app.services.inbound_sms import already_processed_inbound_message, process_inbound_turn
 from app.services.inbound_work import (
+    INBOUND_WORK_COMPLETED,
+    INBOUND_WORK_DEAD_LETTER,
     INBOUND_WORK_SUPPRESSED,
     claim_inbound_work,
     fail_inbound_work_safely,
@@ -86,6 +89,70 @@ _OUTBOUND_RECOVERY_INTERVAL = timedelta(minutes=5)
 _OUTBOUND_RECOVERY_SCHEDULE_KEY = "outbound-delivery-recovery:scheduled"
 _INBOUND_SMS_RECOVERY_INTERVAL = timedelta(minutes=5)
 _INBOUND_SMS_RECOVERY_SCHEDULE_KEY = "inbound-sms-recovery:scheduled"
+
+
+def _automated_sms_delay_seconds(settings) -> int:
+    """Return the configured per-lead pacing interval.
+
+    Startup validation bounds the real setting. The fallback keeps rolling
+    workers and focused tests compatible while a deployment is being upgraded.
+    """
+
+    try:
+        return max(0, int(getattr(settings, "automated_sms_delay_seconds", 20)))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _remaining_automated_sms_delay(
+    settings,
+    *anchors: datetime | None,
+    now: datetime | None = None,
+) -> int:
+    """Seconds until both trigger and prior-outbound pacing windows expire."""
+
+    delay_seconds = _automated_sms_delay_seconds(settings)
+    if delay_seconds <= 0 or bool(getattr(settings, "rq_eager", False)):
+        return 0
+    normalized = [value for value in (_as_utc(anchor) for anchor in anchors) if value is not None]
+    if not normalized:
+        return 0
+    current = _as_utc(now) or datetime.now(timezone.utc)
+    remaining = (max(normalized) + timedelta(seconds=delay_seconds) - current).total_seconds()
+    return max(0, math.ceil(remaining))
+
+
+def _requeue_automated_task_for_pacing(
+    task_func,
+    *args,
+    delay_seconds: int,
+    retry: Retry | None = None,
+) -> bool:
+    """Requeue an automated task without sleeping or holding a worker."""
+
+    if delay_seconds <= 0:
+        return False
+    queue = get_queue()
+    if queue is None:
+        raise RuntimeError("Automated SMS pacing requires the default RQ queue")
+    enqueue_options: dict[str, Any] = {}
+    if retry is not None:
+        enqueue_options["retry"] = retry
+    queue.enqueue_in(
+        timedelta(seconds=delay_seconds),
+        task_func,
+        *args,
+        **enqueue_options,
+    )
+    return True
 
 
 @lru_cache
@@ -173,7 +240,27 @@ def enqueue_process_webhook_event(event_id: int):
 
 
 def enqueue_send_initial_sms(lead_id: int):
-    return _enqueue(send_initial_sms_task, lead_id)
+    settings = get_settings()
+    if settings.rq_eager:
+        return send_initial_sms_task(lead_id)
+
+    queue = get_queue()
+    if queue is None:
+        # A missing scheduler must not turn a deliberately paced first message
+        # into an immediate inline send. The durable webhook dispatch remains
+        # recoverable when this exception propagates.
+        raise RuntimeError("Initial SMS scheduling requires the default RQ queue")
+
+    delay_seconds = _automated_sms_delay_seconds(settings)
+    enqueue_options = {"retry": Retry(max=3, interval=[30, 120, 300])}
+    if delay_seconds > 0:
+        return queue.enqueue_in(
+            timedelta(seconds=delay_seconds),
+            send_initial_sms_task,
+            lead_id,
+            **enqueue_options,
+        )
+    return queue.enqueue(send_initial_sms_task, lead_id, **enqueue_options)
 
 
 def enqueue_process_inbound_sms(lead_id: int, inbound_message_id: int):
@@ -203,6 +290,14 @@ def enqueue_process_inbound_sms(lead_id: int, inbound_message_id: int):
         return False
     # Avoid automatic retries for inbound reply jobs to reduce duplicate sends.
     try:
+        delay_seconds = _automated_sms_delay_seconds(settings)
+        if delay_seconds > 0:
+            return queue.enqueue_in(
+                timedelta(seconds=delay_seconds),
+                process_inbound_sms_task,
+                lead_id=lead_id,
+                inbound_message_id=inbound_message_id,
+            )
         return queue.enqueue(
             process_inbound_sms_task,
             lead_id=lead_id,
@@ -246,7 +341,11 @@ def enqueue_followup_sms(lead_id: int, reason: str = "after_hours"):
 
     queue = get_queue()
     if queue is None:
-        return send_followup_sms_task(lead_id=lead_id, reason=reason)
+        logger.warning(
+            "followup_sms_queue_unavailable",
+            extra={"lead_id": lead_id, "reason": reason},
+        )
+        return False
 
     return queue.enqueue_in(
         timedelta(minutes=settings.after_hours_followup_minutes),
@@ -843,10 +942,17 @@ def _safe_media_worker_error(exc: Exception) -> str:
 
 
 async def _download_inbound_media_with_timeout(*, aggregate_timeout_seconds: float, **kwargs) -> bytes:
-    return await asyncio.wait_for(
-        download_twilio_media(**kwargs),
-        timeout=max(0.1, aggregate_timeout_seconds),
-    )
+    try:
+        return await asyncio.wait_for(
+            download_twilio_media(**kwargs),
+            timeout=max(0.1, aggregate_timeout_seconds),
+        )
+    except asyncio.TimeoutError as exc:
+        # Python 3.10 exposes asyncio.TimeoutError as a separate exception,
+        # while newer Python versions alias it to the built-in TimeoutError.
+        # Normalize the worker boundary so retry/error classification is stable
+        # across every supported runtime.
+        raise TimeoutError("MMS download exceeded the aggregate processing time limit") from exc
 
 
 def _record_inbound_media_failure(
@@ -1232,6 +1338,30 @@ def process_inbound_sms_task(
             client = db.get(Client, lead.client_id)
             if client is None:
                 return {"status": "skipped", "reason": "client_not_found"}
+            if inbound_message.inbound_work_status in {
+                INBOUND_WORK_COMPLETED,
+                INBOUND_WORK_SUPPRESSED,
+                INBOUND_WORK_DEAD_LETTER,
+            }:
+                return {"status": "skipped", "reason": "work_not_recoverable_or_claimed"}
+            pacing_delay = _remaining_automated_sms_delay(
+                settings,
+                inbound_message.created_at,
+                lead.last_outbound_at,
+            )
+            if _requeue_automated_task_for_pacing(
+                process_inbound_sms_task,
+                lead_id,
+                inbound_message_id,
+                retry_definitive_failure,
+                delay_seconds=pacing_delay,
+            ):
+                return {
+                    "status": "requeued",
+                    "reason": "automated_sms_pacing",
+                    "lead_id": lead_id,
+                    "delay_seconds": pacing_delay,
+                }
             if not claim_inbound_work(
                 db=db,
                 message_id=inbound_message.id,
@@ -1390,6 +1520,18 @@ def send_initial_sms_task(
 
             if lead.initial_sms_sent_at is not None:
                 return {"status": "skipped", "reason": "already_sent"}
+
+            if lead.last_inbound_at is not None or lead.last_outbound_at is not None:
+                db.add(
+                    AuditLog(
+                        client_id=client.id,
+                        lead_id=lead.id,
+                        event_type="initial_sms_skipped",
+                        decision={"reason": "conversation_already_started"},
+                    )
+                )
+                db.commit()
+                return {"status": "skipped", "reason": "conversation_already_started"}
 
             first_name = lead.full_name.split(" ")[0] if lead.full_name else "there"
             context = {
@@ -1682,6 +1824,24 @@ def send_followup_sms_task(
             client = db.get(Client, lead.client_id)
             if client is None:
                 return {"status": "skipped", "reason": "client_not_found"}
+            pacing_delay = _remaining_automated_sms_delay(
+                settings,
+                lead.last_outbound_at,
+            )
+            if _requeue_automated_task_for_pacing(
+                send_followup_sms_task,
+                lead_id,
+                reason,
+                retry_definitive_failure,
+                delay_seconds=pacing_delay,
+                retry=Retry(max=3, interval=[60, 240, 600]),
+            ):
+                return {
+                    "status": "requeued",
+                    "reason": "automated_sms_pacing",
+                    "lead_id": lead_id,
+                    "delay_seconds": pacing_delay,
+                }
             effective_runtime = get_effective_runtime_map_for_client(
                 settings=settings,
                 overrides=runtime_overrides,

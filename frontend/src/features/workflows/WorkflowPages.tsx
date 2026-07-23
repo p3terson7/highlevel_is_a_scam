@@ -24,6 +24,7 @@ import {
   sendBookingLink,
   sendManualMediaMessage,
   sendManualMessage,
+  sendSandboxMessage,
   updateAgentControl,
   updateLeadStage,
   updateMeetingStatus,
@@ -1891,6 +1892,13 @@ export function InboxPage({ onReadyChange, selectedClientKey = "", searchQuery =
   const effectiveClientKey = auth.status === "ready" && auth.session.role === "client"
     ? auth.session.client_key || ""
     : selectedClientKey;
+  const sandboxLeadId = thread && hasTag(thread.lead.tags || [], "sandbox") ? thread.lead.id : null;
+
+  useEffect(() => {
+    if (!sandboxLeadId) return;
+    setMediaFile(null);
+    setPauseAfterSend(false);
+  }, [sandboxLeadId]);
 
   useEffect(() => {
     selectedLeadIdRef.current = selectedLeadId;
@@ -2039,21 +2047,28 @@ export function InboxPage({ onReadyChange, selectedClientKey = "", searchQuery =
     if (busy || !thread || (!message.trim() && !mediaFile)) return;
     const leadId = thread.lead.id;
     const body = message.trim();
+    const sandboxThread = hasTag(thread.lead.tags || [], "sandbox");
+    if (sandboxThread && !body) return;
     const requestScope = `inbox-message-${leadId}`;
-    const fingerprint = JSON.stringify({
-      body,
-      pauseAfterSend,
-      media: mediaFile ? [mediaFile.name, mediaFile.type, mediaFile.size, mediaFile.lastModified] : null
-    });
-    const idempotencyKey = outboundRequestKey(requestScope, fingerprint);
-    const successMessage = mediaFile
-      ? pauseAfterSend ? "Media sent and AI paused." : "Media sent."
-      : pauseAfterSend ? "Reply sent and AI paused." : "Reply sent.";
+    const idempotencyKey = sandboxThread
+      ? undefined
+      : outboundRequestKey(requestScope, JSON.stringify({
+          body,
+          pauseAfterSend,
+          media: mediaFile ? [mediaFile.name, mediaFile.type, mediaFile.size, mediaFile.lastModified] : null
+        }));
+    const successMessage = sandboxThread
+      ? "AI replied to the test lead in sandbox."
+      : mediaFile
+        ? pauseAfterSend ? "Media sent and AI paused." : "Media sent."
+        : pauseAfterSend ? "Reply sent and AI paused." : "Reply sent.";
     setBusy(true);
-    setActionStatus("Sending reply...");
+    setActionStatus(sandboxThread ? "Sending as the test lead and waiting for GPT..." : "Sending reply...");
     setRetryOutboundScope(null);
     try {
-      if (mediaFile) {
+      if (sandboxThread) {
+        await sendSandboxMessage(leadId, body);
+      } else if (mediaFile) {
         await sendManualMediaMessage(leadId, body, mediaFile, idempotencyKey);
       } else {
         await sendManualMessage(leadId, body, pauseAfterSend, idempotencyKey);
@@ -2061,13 +2076,14 @@ export function InboxPage({ onReadyChange, selectedClientKey = "", searchQuery =
 
       // Once the provider accepted the message, never present a later refresh/control
       // failure as a send failure that invites a duplicate retry.
-      clearOutboundRequestKey(requestScope);
+      if (!sandboxThread) clearOutboundRequestKey(requestScope);
       setMessage("");
       setMediaFile(null);
       setPauseAfterSend(false);
+      if (sandboxThread) window.localStorage.setItem("lead-ui-sandbox-lead", String(leadId));
 
       let completionMessage = successMessage;
-      if (mediaFile && pauseAfterSend) {
+      if (!sandboxThread && mediaFile && pauseAfterSend) {
         try {
           await updateAgentControl(leadId, true, "manual_media_reply_takeover", "Paused automatically after a manual media message.");
         } catch (caught: unknown) {
@@ -2082,8 +2098,8 @@ export function InboxPage({ onReadyChange, selectedClientKey = "", searchQuery =
       }
       setActionStatus(completionMessage);
     } catch (caught: unknown) {
-      setActionStatus(messageFor(caught, "Reply could not be sent."));
-      setRetryOutboundScope(requestScope);
+      setActionStatus(messageFor(caught, sandboxThread ? "The sandbox turn could not be completed." : "Reply could not be sent."));
+      if (!sandboxThread) setRetryOutboundScope(requestScope);
     } finally {
       setBusy(false);
     }
@@ -2397,6 +2413,7 @@ function ThreadPane({
   onSubmitMessage: (event: FormEvent) => void;
 }) {
   const mediaInputRef = useRef<HTMLInputElement>(null);
+  const sandboxThread = Boolean(thread && hasTag(thread.lead.tags || [], "sandbox"));
 
   useEffect(() => {
     if (!mediaFile && mediaInputRef.current) mediaInputRef.current.value = "";
@@ -2411,38 +2428,54 @@ function ThreadPane({
               <button className="small ghost conversation-mobile-back hidden" type="button" aria-label="Back to conversations" onClick={onBack}>Back</button>
               <h3>{thread.lead.display_name || "Thread"}</h3>
             </div>
-            <div className="chip-row">{renderStageBadge(thread.lead.crm_stage)}{renderTag(thread.lead.current_state)}</div>
+            <div className="chip-row">{renderStageBadge(thread.lead.crm_stage)}{renderTag(thread.lead.current_state)}{sandboxThread ? renderTag("sandbox") : null}</div>
           </div>
           <MessageList messages={thread.messages} timeline />
           <form className="composer" onSubmit={(event) => void onSubmitMessage(event)}>
             <div className="composer-field">
               <div className="composer-combo lead-combo-control">
-                <textarea value={message} disabled={busy} onChange={(event) => setMessage(event.currentTarget.value)} placeholder="Type a direct outbound message to this contact." />
-                <input
-                  id="react-thread-media-input"
-                  ref={mediaInputRef}
-                  className="sr-only"
-                  type="file"
-                  accept="image/*,video/*"
-                  aria-label="Attach image or video"
+                <textarea
+                  value={message}
                   disabled={busy}
-                  onChange={(event) => setMediaFile(event.currentTarget.files?.[0] || null)}
+                  aria-label={sandboxThread ? "Test lead message" : "Message"}
+                  onChange={(event) => setMessage(event.currentTarget.value)}
+                  placeholder={sandboxThread ? "Type the next message as the test lead." : "Type a direct outbound message to this contact."}
                 />
-                <label className="combo-action composer-attach-btn icon-only" htmlFor="react-thread-media-input" title="Attach image or video">
-                  <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                    <path d="M2.5 4.5A2 2 0 0 1 4.5 2.5h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-7Z" stroke="currentColor" strokeWidth="1.35" />
-                    <path d="m3.4 11.4 3.1-3.1 2.1 2.1 1.3-1.3 2.7 2.7" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
-                    <circle cx="10.8" cy="5.3" r="1.1" fill="currentColor" />
-                  </svg>
-                </label>
-                <button className="combo-action composer-send-btn" type="submit" disabled={busy || (!message.trim() && !mediaFile)} aria-label="Send message" title="Send message">
+                {!sandboxThread ? (
+                  <>
+                    <input
+                      id="react-thread-media-input"
+                      ref={mediaInputRef}
+                      className="sr-only"
+                      type="file"
+                      accept="image/*,video/*"
+                      aria-label="Attach image or video"
+                      disabled={busy}
+                      onChange={(event) => setMediaFile(event.currentTarget.files?.[0] || null)}
+                    />
+                    <label className="combo-action composer-attach-btn icon-only" htmlFor="react-thread-media-input" title="Attach image or video">
+                      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M2.5 4.5A2 2 0 0 1 4.5 2.5h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-7Z" stroke="currentColor" strokeWidth="1.35" />
+                        <path d="m3.4 11.4 3.1-3.1 2.1 2.1 1.3-1.3 2.7 2.7" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
+                        <circle cx="10.8" cy="5.3" r="1.1" fill="currentColor" />
+                      </svg>
+                    </label>
+                  </>
+                ) : null}
+                <button
+                  className="combo-action composer-send-btn"
+                  type="submit"
+                  disabled={busy || (sandboxThread ? !message.trim() : (!message.trim() && !mediaFile))}
+                  aria-label={sandboxThread ? "Send as test lead" : "Send message"}
+                  title={sandboxThread ? "Send as test lead" : "Send message"}
+                >
                   <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <path d="M2 8 13.5 2.7 11 13.3 7.2 9.5 2 8Z" fill="currentColor" />
                     <path d="M7.2 9.5 13.5 2.7" stroke="rgba(4,8,14,0.26)" strokeWidth="1.1" strokeLinecap="round" />
                   </svg>
                 </button>
               </div>
-              {mediaFile ? (
+              {!sandboxThread && mediaFile ? (
                 <div className="composer-media-preview">
                   <div className="composer-media-card">
                     <div className="composer-media-copy">
@@ -2454,11 +2487,15 @@ function ThreadPane({
                 </div>
               ) : null}
               <div className="composer-foot">
-                <label className="checkbox-inline composer-pause-control">
-                  <input type="checkbox" checked={pauseAfterSend} disabled={busy} onChange={(event) => setPauseAfterSend(event.currentTarget.checked)} />
-                  <span>Pause AI after this manual reply</span>
-                </label>
-                {busy ? <span className="meta-text" role="status">Sending...</span> : null}
+                {sandboxThread ? (
+                  <span className="meta-text">Sandbox mode: messages send as the test lead, run GPT, and stay inside this thread. Twilio is not used.</span>
+                ) : (
+                  <label className="checkbox-inline composer-pause-control">
+                    <input type="checkbox" checked={pauseAfterSend} disabled={busy} onChange={(event) => setPauseAfterSend(event.currentTarget.checked)} />
+                    <span>Pause AI after this manual reply</span>
+                  </label>
+                )}
+                {busy ? <span className="meta-text" role="status">{sandboxThread ? "Waiting for GPT..." : "Sending..."}</span> : null}
               </div>
             </div>
           </form>

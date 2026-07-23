@@ -221,5 +221,5 @@ def test_sqlite_security_migration_upgrade_and_downgrade(
 
     command.upgrade(config, "head")
     engine = sa.create_engine(database_url)
-    assert _connection_revision(engine) == "20260714_0020"
+    assert _connection_revision(engine) == "20260716_0022"
     engine.dispose()

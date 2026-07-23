@@ -240,18 +240,23 @@ export type KnowledgeSource = {
   id?: number;
   url?: string;
   normalized_url?: string;
+  final_url?: string;
   title?: string;
   status?: string;
   error_message?: string;
   text_excerpt?: string;
+  structured_data?: Record<string, unknown>;
   chunk_count?: number;
   last_crawled_at?: string;
+  last_success_at?: string;
   chunks?: Array<{ chunk_index?: number; content?: string }>;
 };
 
 export type KnowledgePayload = {
   status?: string;
   job_id?: string;
+  deleted_sources?: number;
+  cancelled_active_job?: boolean;
   client_key?: string;
   sources?: KnowledgeSource[];
   total_sources?: number;
@@ -262,6 +267,16 @@ export type KnowledgePayload = {
     total_chunks?: number;
     pages?: Array<{ url?: string; status?: string; title?: string }>;
   };
+};
+
+export type KnowledgeJobStatus = {
+  client_key?: string;
+  job_id: string;
+  status: "queued" | "running" | "ok" | "partial" | "failed" | "skipped" | "completed" | "cancelled";
+  terminal: boolean;
+  total_pages: number;
+  failed_pages: number;
+  total_chunks: number;
 };
 
 export type OwnerWorkspacePayload = {
@@ -326,6 +341,23 @@ export type SandboxStartResponse = {
   state?: string;
   body?: string;
   phone?: string;
+  booking_debug?: unknown;
+  zapier_booking_webhook?: unknown;
+};
+
+export type SandboxMessageResponse = {
+  status: string;
+  lead_id: number;
+  state: string;
+  crm_stage: string;
+  delivery_mode: "sandbox";
+  twilio_bypassed: boolean;
+  inbound_message_id: number;
+  reply: {
+    id: number | null;
+    body: string;
+    provider_message_sid: string;
+  };
   booking_debug?: unknown;
   zapier_booking_webhook?: unknown;
 };

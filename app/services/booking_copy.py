@@ -43,6 +43,13 @@ def render_booking_slot_reply(
     language = normalize_language(language)
     if not slots:
         return _no_slots_reply(request=request, language=language)
+    if plan.match_mode == "exact_time" and len(slots) == 1:
+        return _single_exact_slot_reply(
+            slot=slots[0],
+            timezone_label=timezone_label,
+            language=language,
+            timezone_name=timezone_name,
+        )
 
     lines = [_intro(request=request, plan=plan, coverage_summary=coverage_summary, language=language)]
     lines.extend(
@@ -51,6 +58,34 @@ def render_booking_slot_reply(
     )
     lines.append(_selection_prompt(slots=slots, timezone_label=timezone_label, language=language))
     return "\n".join(line for line in lines if line)
+
+
+def _single_exact_slot_reply(
+    *,
+    slot: Any,
+    timezone_label: str,
+    language: str,
+    timezone_name: str,
+) -> str:
+    index = _slot_index(slot) or 1
+    display_time = _slot_display_time(
+        slot,
+        language=language,
+        timezone_name=timezone_name,
+    )
+    if language == "fr":
+        return (
+            f"Le créneau demandé est disponible pour un appel de consultation : {index}) {display_time}. "
+            f"Répondez {index} pour réserver l'appel. "
+            "Si ce créneau ne fonctionne pas, envoyez-moi un autre moment qui vous convient. "
+            f"Heure affichée en {timezone_label}."
+        )
+    return (
+        f"The requested consultation call time is available: {index}) {display_time}. "
+        f"Reply with {index} to book the call. "
+        "If that time doesn't work, send me another time that suits you. "
+        f"Time shown in {timezone_label}."
+    )
 
 
 def _intro(*, request: BookingTimeRequest, plan: BookingPlanResult, coverage_summary: str, language: str) -> str:

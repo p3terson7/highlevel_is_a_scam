@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "id": "code_switch_to_french",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["language-switch", "english", "french", "support-first"],
+  "risk": "high",
+  "tenant": {
+    "business_name": "Clearpath Property Services",
+    "tone": "friendly and direct",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Which property service do you need?",
+      "What timing are you working with?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "Post-project cleanup is included in every standard service. Le nettoyage après les travaux est inclus dans chaque service standard.",
+    "ai_context": "Honor an explicit request to switch between English and French, while keeping factual answers grounded in the FAQ."
+  },
+  "lead": {
+    "full_name": "Morgan Démo",
+    "email": "morgan.demo@example.test",
+    "phone": "+14165550103",
+    "city": "Ottawa",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "service_interest": "Property turnover service"
+    },
+    "raw_payload": {
+      "lead_language": "en"
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "INBOUND",
+      "body": "How long does a standard property turnover take?",
+      "raw_payload": {}
+    },
+    {
+      "direction": "OUTBOUND",
+      "body": "A standard turnover normally takes two business days.",
+      "raw_payload": {
+        "agent": {
+          "action": "none"
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "Merci. On peut continuer en français? Je veux savoir si le nettoyage est inclus.",
+      "replay_outputs": [
+        {
+          "reply_text": "Bien sûr, nous pouvons continuer en français. Oui, le nettoyage après les travaux est inclus dans chaque service standard.",
+          "next_state": "QUALIFYING",
+          "conversation_act": "answer_question",
+          "lead_intent": "language_switch_and_support_question",
+          "confidence": 0.99,
+          "reasoning_summary": "Le prospect demande explicitement le français et pose une question couverte par la FAQ.",
+          "uses_knowledge_context": true,
+          "collected_fields": {
+            "service_needed": "Property turnover service",
+            "timeline": null,
+            "locations": "Ottawa",
+            "decision_makers": null,
+            "urgency_driver": null,
+            "booking_intent_locked": false
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "QUALIFYING",
+        "expected_action": "none",
+        "language_switch_from": "en",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["answer_question"],
+        "expected_next_states": ["QUALIFYING"],
+        "must_include": ["continuer en français", "nettoyage après les travaux", "inclus"],
+        "must_not_include": ["book", "meeting", "appointment"],
+        "required_facts": [
+          "Le nettoyage après les travaux est inclus dans le service standard."
+        ],
+        "forbidden_claims": [
+          "Le nettoyage entraîne toujours des frais supplémentaires."
+        ],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 320,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Acknowledge and honor the explicit switch to French.",
+          "Answer the cleanup question without returning to English."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}

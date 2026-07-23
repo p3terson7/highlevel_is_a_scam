@@ -69,7 +69,9 @@ Equivalent command:
 docker compose up --build
 ```
 
-Non-Compose deployments must also run `rq worker knowledge` and use a private Redis deployment with persistence enabled. Remote website extraction is intentionally kept off both the API process and the default SMS/webhook queue. Compose enables Redis AOF persistence and stores it in the `redis_data` volume.
+Non-Compose deployments must run the default queue as `rq worker --with-scheduler`, because automated SMS pacing and after-hours follow-ups use scheduled jobs. They must also run `rq worker knowledge` and use a private Redis deployment with persistence enabled. Remote website extraction is intentionally kept off both the API process and the default SMS/webhook queue. Compose enables Redis AOF persistence and stores it in the `redis_data` volume.
+
+Website knowledge ingestion accepts up to 12 owner-managed public HTTP(S) URLs per run and 48 stored sources per workspace, discovers a bounded set of same-site service/about/capability pages, and extracts readable HTML, form labels/options, metadata, and JSON-LD. Settings reports queued/running/partial results and can explicitly clear all derived knowledge; clearing also supersedes an active crawl so it cannot repopulate the deleted data. A failed refresh keeps last-successful chunks available for source-labelled, query-specific retrieval for at most 30 days, but stale facts are excluded from always-on business memory. Production crawl URLs are encrypted in Redis, query credentials are never returned as source citations, and query-bearing URLs must use HTTPS. Query strings are used for that crawl but are not persisted, so a signed URL must be re-entered for a later refresh. The crawler intentionally does not execute JavaScript, so content available only after client-side rendering needs a server-rendered source URL before it can be indexed.
 
 Demo data is disabled by default. Set `ENABLE_DEMO_SEED=true` only for an intentional local demo environment.
 
@@ -523,6 +525,7 @@ Current variables used by the app:
 - `TWILIO_INBOUND_WINDOW_SECONDS` (Redis-coordinated admission window; deployed outages fail closed)
 - `RATE_LIMIT_COUNT`
 - `RATE_LIMIT_WINDOW_MINUTES`
+- `AUTOMATED_SMS_DELAY_SECONDS` (default `20`; delays initial and automated reply SMS, `0` disables pacing)
 - `AFTER_HOURS_FOLLOWUP_MINUTES`
 - `REQUEST_TIMEOUT_SECONDS`
 - `REQUEST_BODY_MAX_BYTES`
@@ -582,9 +585,12 @@ Note: global OpenAI UI overrides are stored in `runtime_settings`; per-client Tw
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
+python scripts/run_chatbot_evals.py --agent v3 --suite smoke --provider replay
 ```
 
 Production images install only `requirements.txt`; test, lint, and dependency-audit tooling stays in `requirements-dev.txt`.
+
+The chatbot evaluation command runs synthetic conversations through the real inbound Agent V3 pipeline with fake SMS/calendar boundaries, so it requires no lead creation, provider credentials, or network access. See [the chatbot evaluation guide](evals/chatbot/README.md) for regression, journey, live-model, and model-judge runs.
 
 Current tests cover:
 - webhook intake -> lead creation -> initial outbound message

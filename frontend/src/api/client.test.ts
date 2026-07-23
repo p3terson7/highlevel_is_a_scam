@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   apiJson,
   authHeaders,
+  clearOwnerKnowledge,
   clearOutboundRequestKey,
   fetchCrmLeads,
   fetchDashboard,
   fetchSession,
   outboundRequestKey,
   sendManualMessage,
+  sendSandboxMessage,
   updateLeadStage
 } from "./client";
 
@@ -142,6 +144,49 @@ describe("api client", () => {
     expect(JSON.parse(fetchMock.mock.calls[1][1].body as string)).toEqual({ body: "Following up.", pause_agent: true });
     expect((fetchMock.mock.calls[1][1].headers as Headers).get("Idempotency-Key")).toBe("attempt-123");
     expect((fetchMock.mock.calls[1][1].headers as Headers).get("X-CSRF-Token")).toBe("csrf-token");
+  });
+
+  it("sends GPT test-lab turns through the inbound sandbox endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      status: "ok",
+      lead_id: 42,
+      state: "QUALIFYING",
+      crm_stage: "Qualified",
+      delivery_mode: "sandbox",
+      twilio_bypassed: true,
+      inbound_message_id: 3,
+      reply: { id: 4, body: "Friday works.", provider_message_sid: "MOCK-OUT-4" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    document.cookie = "leadops_csrf=csrf-token; Path=/";
+
+    await sendSandboxMessage(42, "Are you free Friday?");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/ui/api/conversations/42/sandbox/messages",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({ body: "Are you free Friday?" });
+    expect((fetchMock.mock.calls[0][1].headers as Headers).get("X-CSRF-Token")).toBe("csrf-token");
+    expect((fetchMock.mock.calls[0][1].headers as Headers).get("Idempotency-Key")).toBeNull();
+  });
+
+  it("purges website knowledge with CSRF-protected cookie auth", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      status: "ok",
+      deleted_sources: 2,
+      sources: [],
+      total_sources: 0,
+      total_chunks: 0
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    document.cookie = "leadops_csrf=csrf-token; Path=/";
+
+    await clearOwnerKnowledge("demo client");
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/ui/api/owner/demo%20client/knowledge");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "DELETE" });
+    expect((fetchMock.mock.calls[0][1].headers as Headers).get("X-CSRF-Token")).toBe("csrf-token");
   });
 });
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -9,6 +10,12 @@ from app.db.models import Client, ConversationStateEnum, Lead, Message, MessageD
 from app.services.agent_v3_types import *
 from app.services.i18n import normalize_language
 from app.services.lead_summary import build_lead_summary_text
+
+# Match the existing outbound-message API ceiling. A 320-character hard cut
+# removed structured slot choices and their selection instructions before the
+# message reached persistence or the UI.
+_MAX_AGENT_REPLY_CHARS = 1_600
+
 
 def _serialize_message(message: Message) -> dict[str, Any]:
     raw_payload = message.raw_payload if isinstance(message.raw_payload, dict) else {}
@@ -51,15 +58,23 @@ def _is_identity_question(text: str) -> bool:
 def _identity_agent_response(context: dict[str, Any]) -> AgentResponse:
     current_state = str(context.get("current_state") or "").upper()
     next_state = ConversationStateEnum.BOOKED if current_state == ConversationStateEnum.BOOKED.value else ConversationStateEnum.QUALIFYING
+    reply_text = _identity_reply(context)
+    offer_due = _qualified_scoping_call_offer_due(context)
+    if offer_due:
+        reply_text = _answer_then_explicit_expert_meeting_offer(reply_text, context)
     return _finalize_response_with_context(
         AgentResponse(
-            reply_text=_identity_reply(context),
+            reply_text=reply_text,
             next_state=next_state,
             collected_fields=QualificationMemory.model_validate(context.get("qualification_memory") or {}),
             next_question_key=None,
-            action="none",
+            action="offer_booking" if offer_due else "none",
+            conversation_act="answer_then_soft_cta" if offer_due else "answer_question",
             tool_call=ToolCall(),
-            runtime_payload={"flow_state": "IDENTITY_ANSWERED"},
+            runtime_payload={
+                "flow_state": "IDENTITY_ANSWERED",
+                **({"scoping_call_offer_forced": True} if offer_due else {}),
+            },
         ),
         context,
     )
@@ -145,7 +160,10 @@ def _infer_missing_field_key_from_text(text: str) -> str | None:
         question = _normalize_text(str(spec.get("question") or ""))
         if question and question in normalized:
             return str(spec["key"])
-        for token in spec.get("question_tokens") or ():
+        localized_question = _normalize_text(_GENERIC_MISSING_QUESTION_FR.get(str(spec["key"]), ""))
+        if localized_question and localized_question in normalized:
+            return str(spec["key"])
+        for token in (*tuple(spec.get("question_tokens") or ()), *tuple(spec.get("question_tokens_fr") or ())):
             if _normalize_text(str(token)) in normalized:
                 return str(spec["key"])
     return None
@@ -155,7 +173,22 @@ def _is_substantive_missing_field_answer(text: str, field_key: str) -> bool:
     normalized = _normalize_text(text)
     if not normalized:
         return False
-    short_ack = {"yes", "yeah", "yep", "ok", "okay", "sure", "no", "nope", "thanks", "thank you"}
+    short_ack = {
+        "yes",
+        "yeah",
+        "yep",
+        "ok",
+        "okay",
+        "sure",
+        "no",
+        "nope",
+        "thanks",
+        "thank you",
+        "oui",
+        "non",
+        "merci",
+        "d accord",
+    }
     if normalized in short_ack and field_key not in {"decision_process", "follow_up_contact"}:
         return False
     return len(normalized) >= 2
@@ -183,7 +216,8 @@ def _fact_terms(fact: dict[str, str]) -> list[str]:
     value = _normalize_text(str(fact.get("value") or ""))
     terms: list[str] = []
     if len(value) >= 3:
-        terms.append(value)
+        terms.append(value[:160])
+        terms.extend(_salient_value_terms(value))
     if any(token in key or token in label for token in ("decision", "role", "owner", "approver")):
         terms.extend(["decision maker", "decision-maker", "owner"])
     if any(token in key or token in label for token in ("city", "location", "region", "market")) and len(value) >= 3:
@@ -191,6 +225,54 @@ def _fact_terms(fact: dict[str, str]) -> list[str]:
     if any(token in key or token in label for token in ("timeline", "deadline", "start", "date")) and len(value) >= 3:
         terms.append(value)
     return list(dict.fromkeys(term for term in terms if term))
+
+
+_FACT_TERM_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "avec",
+    "de",
+    "des",
+    "du",
+    "en",
+    "est",
+    "et",
+    "for",
+    "la",
+    "le",
+    "les",
+    "of",
+    "ou",
+    "the",
+    "to",
+    "un",
+    "une",
+    "with",
+}
+
+
+def _salient_value_terms(value: str) -> list[str]:
+    """Return compact phrases that survive natural paraphrasing of form answers."""
+
+    normalized = _normalize_text(value)
+    if not normalized:
+        return []
+    terms: list[str] = []
+    for chunk in re.split(r"[,;|/]+|\s+-\s+", normalized):
+        chunk = chunk.strip(" .:-")
+        if len(chunk) >= 7:
+            terms.append(chunk[:160])
+        words = [word for word in re.findall(r"[a-z0-9]+", chunk) if word not in _FACT_TERM_STOPWORDS]
+        for width in (3, 2):
+            for index in range(max(0, len(words) - width + 1)):
+                phrase = " ".join(words[index : index + width])
+                if len(phrase) >= 7:
+                    terms.append(phrase)
+    return list(dict.fromkeys(terms))[:16]
 
 
 def _slot_offer_tool_result(*, offer: Any, availability_query: dict[str, Any]) -> dict[str, Any]:
@@ -226,7 +308,15 @@ def _ensure_slot_fallback_line(text: str, *, language: str = "en") -> str:
             flags=re.IGNORECASE,
         ).strip()
     normalized = _normalize_text(clean)
-    if "if none of those work" in normalized or "si aucune option ne fonctionne" in normalized:
+    if any(
+        phrase in normalized
+        for phrase in (
+            "if none of those work",
+            "if that time doesn t work",
+            "si aucune option ne fonctionne",
+            "si ce creneau ne fonctionne pas",
+        )
+    ):
         return clean
     return f"{clean} {fallback}"
 
@@ -283,8 +373,8 @@ _LOCALIZED_AGENT_REPLIES = {
         "fr": "C'est tout bon. Répondez ici si quelque chose change avant l'appel.",
     },
     "share_times": {
-        "en": "I can share a few times that work.",
-        "fr": "Je peux vous envoyer quelques créneaux disponibles.",
+        "en": "I'll check the available times for a meeting with an expert.",
+        "fr": "Je vérifie les disponibilités pour un rendez-vous avec un expert.",
     },
     "understood": {
         "en": "Understood.",
@@ -293,6 +383,10 @@ _LOCALIZED_AGENT_REPLIES = {
     "handoff": {
         "en": "Understood. I'll have someone reach out.",
         "fr": "Compris. Je vais demander à quelqu'un de vous contacter.",
+    },
+    "availability_handoff": {
+        "en": "Your scoping-call request is noted, but I can't access the calendar right now. I'm handing this to the team to coordinate the meeting.",
+        "fr": "Votre demande d'appel de cadrage est bien notée, mais je n'arrive pas à consulter le calendrier pour le moment. Je la transmets à l'équipe pour coordonner le rendez-vous.",
     },
 }
 
@@ -518,7 +612,7 @@ def _build_cta_state(
     history_count = _count_meeting_suggestions(history)
     meeting_suggested_count = max(previous_count, history_count)
     last_outbound = _latest_outbound_from_history(history)
-    recent_meeting_cta = _message_suggests_meeting(last_outbound.get("body", "") if last_outbound else "")
+    recent_meeting_cta = _latest_outbound_invites_meeting(history)
     accepted = bool(
         explicit_booking_intent
         or _extract_slot_choice(inbound_text, latest_offer)
@@ -641,18 +735,18 @@ def _recommended_response_strategy(
         return "Do not discuss pricing or budget. Say confirmed package details are not available here, then help with fit or process. Do not present live times unless the lead explicitly asks to schedule."
     if cta_state.get("suppress_meeting_cta"):
         return "Continue helping or ask one useful missing question; do not repeat the meeting CTA this turn."
+    if lead_question_detected:
+        return "Answer the question from the most specific available context before any qualification or meeting suggestion."
     if intent_level == "HIGH_INTENT":
         return "Use known form details, ask one important missing question, and only offer booking as a soft next step if natural."
     if intent_level == "MEDIUM_INTENT":
         return "Clarify the need or answer the question before suggesting any meeting."
-    if lead_question_detected:
-        return "Answer the question and invite one next clarification, not a meeting."
     return "Educate and keep the lead warm with one simple question."
 
 
 def _attach_behavior_runtime(response: AgentResponse, context: dict[str, Any]) -> None:
     cta_state = dict(context.get("cta_state") or {})
-    reply_suggests_meeting = _message_suggests_meeting(response.reply_text)
+    reply_suggests_meeting = _message_invites_meeting(response.reply_text)
     if response.tool_call.name == "find_slots" or response.runtime_payload.get("booking_offer"):
         reply_suggests_meeting = True
         cta_label = "live_availability"
@@ -688,6 +782,10 @@ def _attach_behavior_runtime(response: AgentResponse, context: dict[str, Any]) -
     response.runtime_payload["planner_confidence"] = response.confidence
     response.runtime_payload["planner_reasoning_summary"] = response.reasoning_summary
     response.runtime_payload["uses_knowledge_context"] = response.uses_knowledge_context
+    response.runtime_payload["knowledge_retrieval"] = context.get(
+        "knowledge_retrieval",
+        {"context_available": False, "selected_sources": []},
+    )
     response.runtime_payload["important_missing_fields"] = context.get("important_missing_fields", [])
     lead_summary = dict(context.get("internal_lead_summary") or {})
     if lead_summary:
@@ -712,8 +810,45 @@ def _attach_behavior_runtime(response: AgentResponse, context: dict[str, Any]) -
 
 
 def _finalize_response_with_context(response: AgentResponse, context: dict[str, Any]) -> AgentResponse:
+    guarded_text, guardrail_events, reply_replaced = (
+        _apply_response_guardrails_with_events(
+            response.reply_text,
+            context,
+        )
+    )
+    response.reply_text = guarded_text
+    if bool(response.runtime_payload.get("scoping_call_offer_forced")):
+        # Identity/pricing guardrails run after planner policy and may replace
+        # the entire draft. Reassert the required visible consent question as
+        # a final postcondition, with suffix-preserving length control.
+        response.reply_text = (
+            _answer_then_explicit_expert_meeting_offer(response.reply_text, context)
+            if bool(context.get("lead_question_detected"))
+            else _explicit_expert_meeting_offer(context)
+        )
+    existing_events = response.runtime_payload.get("guardrail_events")
+    merged_events = [
+        str(event)[:80]
+        for event in (existing_events if isinstance(existing_events, list) else [])
+        if str(event).strip()
+    ]
+    legacy_reason = str(
+        response.runtime_payload.get("reply_guardrail_reason") or ""
+    ).strip()
+    if legacy_reason and legacy_reason not in merged_events:
+        merged_events.append(legacy_reason[:80])
+    for event in guardrail_events:
+        if event not in merged_events:
+            merged_events.append(event)
+    if merged_events:
+        response.runtime_payload["guardrail_events"] = merged_events[:8]
+    if reply_replaced:
+        # The final delivered copy is a deterministic policy bridge, not the
+        # source-grounded answer proposed by the model.
+        response.uses_knowledge_context = False
+    # Runtime/CTA diagnostics must describe the delivered reply, after policy
+    # replacements and language normalization, rather than the model draft.
     _attach_behavior_runtime(response, context)
-    response.reply_text = _apply_response_guardrails(response.reply_text, context)
     return _finalize_response(response)
 
 
@@ -786,6 +921,17 @@ def _lead_asked_question(text: str) -> bool:
         return False
     if "?" in str(text or "") or _PRICING_PATTERN.search(normalized):
         return True
+    if re.match(r"^(?:parlez|expliquez|dites)[ -]moi\b", normalized):
+        return True
+    if re.match(
+        r"^(?:"
+        r"avez[ -]vous|pouvez[ -]vous|savez[ -]vous|faites[ -]vous|offrez[ -]vous|"
+        r"est[ -]ce|est[ -]il|est[ -]elle|peut[ -]on|"
+        r"comment|combien|quand|pourquoi|qui|que|quoi|quel|quelle|quels|quelles|ou"
+        r")\b",
+        normalized,
+    ):
+        return True
     return normalized.startswith(
         (
             "what ",
@@ -814,10 +960,45 @@ def _message_suggests_meeting(text: str) -> bool:
     return bool(_MEETING_CTA_PATTERN.search(normalized))
 
 
+def _message_invites_meeting(text: str) -> bool:
+    """Return true only when visible copy actually asks the lead to schedule.
+
+    Meeting vocabulary alone is intentionally insufficient: explaining what a
+    scoping call is must not make a later bare "yes" count as booking consent.
+    """
+
+    normalized = _normalize_text(text)
+    if not normalized or not _message_suggests_meeting(normalized):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:"
+            r"would you (?:like|want)|do you want|shall i|may i|can i|"
+            r"i can (?:also )?(?:help (?:you )?)?(?:book|schedule|find|share|send|line up|set up)|"
+            r"we can (?:book|schedule|set up|line up)|"
+            r"reply with|which (?:time|option|slot)[^?]{0,40}(?:works|suits|fits)|"
+            r"voulez-vous|souhaitez-vous|aimeriez-vous|puis-je|"
+            r"je peux (?:aussi )?vous (?:aider|proposer|montrer|envoyer)|"
+            r"repondez|quel creneau|quelle (?:heure|option|disponibilite)"
+            r")\b",
+            normalized,
+        )
+    )
+
+
+def _latest_outbound_invites_meeting(history: Sequence[Message]) -> bool:
+    """Recognize a pending invitation the lead could actually see."""
+
+    last_outbound = _latest_outbound_from_history(history)
+    if not last_outbound:
+        return False
+    return _message_invites_meeting(str(last_outbound.get("body") or ""))
+
+
 def _count_meeting_suggestions(history: Sequence[Message]) -> int:
     count = 0
     for message in history:
-        if message.direction == MessageDirection.OUTBOUND and _message_suggests_meeting(message.body or ""):
+        if message.direction == MessageDirection.OUTBOUND and _message_invites_meeting(message.body or ""):
             count += 1
     return count
 
@@ -837,11 +1018,11 @@ def _cta_label_for_text(text: str) -> str | None:
     normalized = _normalize_text(text)
     if not normalized:
         return None
-    if "availability" in normalized or "times" in normalized or "calendar" in normalized:
+    if any(token in normalized for token in ("availability", "times", "calendar", "disponibilite", "creneau", "calendrier")):
         return "availability_offer"
-    if "call" in normalized:
+    if "call" in normalized or "appel" in normalized:
         return "call_suggestion"
-    if "meeting" in normalized or "appointment" in normalized:
+    if any(token in normalized for token in ("meeting", "appointment", "rendez-vous", "rencontre")):
         return "meeting_suggestion"
     if "connect" in normalized or "coordinate" in normalized:
         return "connect_with_team"
@@ -870,12 +1051,87 @@ def _strip_meeting_cta(text: str, *, fallback: str) -> str:
         clean,
         flags=re.IGNORECASE,
     )
+    # Preserve a factual answer when the model appends a French or English
+    # meeting invitation in the same sentence. The broad sentence filter below
+    # remains the safety net for unsupported availability/booking-only copy.
+    clean = re.sub(
+        r"[,;:]?\s*(?:"
+        r"would you (?:like|want)|do you want|shall i|"
+        r"can i (?:help|show|find|book|schedule)|"
+        r"voulez-vous|souhaitez-vous|aimeriez-vous|"
+        r"est-ce que vous (?:voulez|souhaitez)|"
+        r"(?:je peux|puis-je) (?:aussi )?vous (?:proposer|montrer|aider)"
+        r")[^.?!]*(?:meeting|appointment|call|availability|available times|book|schedule|"
+        r"rendez[- ]vous|rencontre|appel|disponibilit[ée]s?|cr[ée]neaux?|r[ée]server|planifier)"
+        r"[^.?!]*(?:[.?!]|$)",
+        " ",
+        clean,
+        flags=re.IGNORECASE,
+    )
     clean = re.sub(r"\s+([,.!?])", r"\1", clean)
     clean = re.sub(r"\s{2,}", " ", clean).strip()
     parts = re.split(r"(?<=[.!?])\s+", clean)
-    kept = [part.strip() for part in parts if part.strip() and not _message_suggests_meeting(part)]
+    kept = [part.strip() for part in parts if part.strip() and not _message_invites_meeting(part)]
     stripped = " ".join(kept).strip()
     return stripped or fallback
+
+
+def _strip_booking_completion_claim(text: str, *, fallback: str) -> str:
+    """Remove an unauthorized booking claim while retaining separate factual copy."""
+
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return fallback
+    completion_pattern = re.compile(
+        r"\b(booked|booking confirmed|confirmed your|locked (?:it|that) in|scheduled|"
+        r"r[ée]serv[ée]|confirm[ée])\b",
+        re.IGNORECASE,
+    )
+    parts = re.split(r"(?<=[.!?])\s+", clean)
+    kept = [part.strip() for part in parts if part.strip() and not completion_pattern.search(part)]
+    stripped = " ".join(kept).strip()
+    return stripped or fallback
+
+
+def _qualified_scoping_call_offer_due(context: dict[str, Any]) -> bool:
+    """Require the first consent-first expert-call offer on outbound turn two.
+
+    A known need plus high intent is enough. Optional qualification details may
+    improve the expert handoff, but they must not turn the SMS exchange into an
+    interrogation or postpone the useful next step.
+    """
+
+    cta_state = context.get("cta_state") if isinstance(context.get("cta_state"), dict) else {}
+    memory = (
+        context.get("qualification_memory")
+        if isinstance(context.get("qualification_memory"), dict)
+        else {}
+    )
+    internal_summary = (
+        context.get("internal_lead_summary")
+        if isinstance(context.get("internal_lead_summary"), dict)
+        else {}
+    )
+    core_need_known = bool(
+        str(memory.get("service_needed") or "").strip()
+        or str(internal_summary.get("service_interest") or "").strip()
+    )
+    return bool(
+        int(context.get("outbound_turn_count") or 0) >= 1
+        and str(context.get("intent_level") or "") == "HIGH_INTENT"
+        and core_need_known
+        and not bool(context.get("already_booked"))
+        and str(context.get("current_state") or "").upper()
+        != ConversationStateEnum.BOOKED.value
+        and not bool(context.get("call_refusal"))
+        and not bool(context.get("handoff_intent"))
+        and not bool(context.get("explicit_booking_intent"))
+        and not bool(context.get("scheduling_intent_detected"))
+        and not bool(context.get("booked_confirmation_intent"))
+        and not bool(cta_state.get("meeting_rejected"))
+        and not bool(cta_state.get("suppress_meeting_cta"))
+        and int(cta_state.get("meeting_suggested_count") or 0) == 0
+    )
 
 
 def _meeting_cta_allowed_for_turn(context: dict[str, Any]) -> bool:
@@ -890,7 +1146,48 @@ def _meeting_cta_allowed_for_turn(context: dict[str, Any]) -> bool:
         return True
     if context.get("pricing_question") and not context.get("pricing_context_available"):
         return _soft_call_cta_allowed(context)
+    if _qualified_scoping_call_offer_due(context):
+        return True
     return False
+
+
+def _explicit_expert_meeting_question(context: dict[str, Any]) -> str:
+    business_name = str(context.get("business_name") or "").strip()
+    language = normalize_language(str(context.get("response_language") or "en"))
+    if language == "fr":
+        expert = f"un expert chez {business_name}" if business_name else "un expert de l'équipe"
+        return f"Voulez-vous que je vous aide à réserver un appel de cadrage avec {expert}?"
+    expert = f"an expert at {business_name}" if business_name else "an expert on the team"
+    return f"Would you like me to help book a scoping call with {expert}?"
+
+
+def _explicit_expert_meeting_offer(context: dict[str, Any]) -> str:
+    language = normalize_language(str(context.get("response_language") or "en"))
+    prefix = "C'est noté." if language == "fr" else "Got it."
+    return f"{prefix} {_explicit_expert_meeting_question(context)}"
+
+
+def _answer_then_explicit_expert_meeting_offer(
+    text: str,
+    context: dict[str, Any],
+) -> str:
+    answer = _strip_meeting_cta(text, fallback="").strip()
+    # Once the lead is qualified, the single useful question is consent for
+    # the expert call—not another optional qualification question.
+    answer = answer.replace("?", ".")
+    answer = re.sub(r"\s+([,.!])", r"\1", answer)
+    answer = re.sub(r"\.{2,}", ".", answer).strip(" .")
+    question = _explicit_expert_meeting_question(context)
+    if not answer:
+        return _explicit_expert_meeting_offer(context)
+    max_answer_chars = max(0, _MAX_AGENT_REPLY_CHARS - len(question) - 2)
+    if len(answer) > max_answer_chars:
+        clipped = answer[: max(0, max_answer_chars - 1)].rstrip()
+        if " " in clipped:
+            clipped = clipped.rsplit(" ", 1)[0] or clipped
+        answer = f"{clipped.rstrip(' .')}…"
+    separator = " " if answer.endswith(("!", "…")) else ". "
+    return f"{answer}{separator}{question}"
 
 
 def _non_booking_bridge_reply(context: dict[str, Any]) -> str:
@@ -905,6 +1202,8 @@ def _non_booking_bridge_reply(context: dict[str, Any]) -> str:
                 "Je n'ai pas de détails de prix ou de forfait confirmés ici. "
                 "En général, ça dépend de l'étendue, du délai, de la zone desservie, du niveau de service et des besoins particuliers."
             )
+            if _qualified_scoping_call_offer_due(context):
+                return f"{base} {_explicit_expert_meeting_question(context)}"
             if _soft_call_cta_allowed(context):
                 return f"{base} L'équipe peut clarifier ça pendant un appel de consultation; voulez-vous que je vous aide à organiser ça?"
             return f"{base} Je peux aussi vous aider à clarifier l'adéquation ou le processus ici."
@@ -923,6 +1222,8 @@ def _non_booking_bridge_reply(context: dict[str, Any]) -> str:
             "I do not have confirmed package or pricing details here. "
             "It usually depends on scope, timeline, service area, package level, and any special requirements."
         )
+        if _qualified_scoping_call_offer_due(context):
+            return f"{base} {_explicit_expert_meeting_question(context)}"
         if _soft_call_cta_allowed(context):
             return f"{base} The team can review that on a consultation call; would you like me to help set that up?"
         return f"{base} I can also help clarify fit or process here."
@@ -934,17 +1235,38 @@ def _non_booking_bridge_reply(context: dict[str, Any]) -> str:
     return "That makes sense. What would be most helpful to clarify first?"
 
 
-def _apply_response_guardrails(text: str, context: dict[str, Any]) -> str:
+def _apply_response_guardrails(
+    text: str,
+    context: dict[str, Any],
+) -> str:
+    """Backward-compatible text-only response guardrail API."""
+
+    guarded_text, _, _ = _apply_response_guardrails_with_events(text, context)
+    return guarded_text
+
+
+def _apply_response_guardrails_with_events(
+    text: str,
+    context: dict[str, Any],
+) -> tuple[str, list[str], bool]:
     clean = " ".join(str(text or "").split()).strip()
     if not clean:
-        return clean
+        return clean, [], False
     if _reply_has_identity_violation(clean):
-        return _identity_reply(context)
+        return _identity_reply(context), ["identity_violation_replaced"], True
     clean = _remove_redundant_acknowledged_fact_clauses(clean, context)
+    pricing_replaced = bool(
+        _reply_has_budget_language(clean)
+        or (
+            not context.get("pricing_context_available")
+            and _reply_has_pricing_language(clean)
+        )
+    )
     clean = _remove_disallowed_pricing_language(clean, context)
     clean = _ensure_initial_intro(clean, context)
     clean = _enforce_response_language(clean, context)
-    return clean
+    events = ["disallowed_pricing_replaced"] if pricing_replaced else []
+    return clean, events, pricing_replaced
 
 
 def _enforce_response_language(text: str, context: dict[str, Any]) -> str:
@@ -1080,7 +1402,18 @@ def _ensure_initial_intro(text: str, context: dict[str, Any]) -> str:
         return text
     prefix = _initial_intro_prefix(context)
     normalized = _normalize_text(text)
-    if "hermes" in normalized and "assistant for" in normalized:
+    identity = context.get("agent_identity") if isinstance(context.get("agent_identity"), dict) else {}
+    assistant_name = _normalize_text(identity.get("name") or _ASSISTANT_NAME)
+    assistant_intro_present = bool(
+        assistant_name
+        and assistant_name in normalized
+        and (
+            "assistant for" in normalized
+            or re.search(r"\bassistant(?:e)?\s+(?:de|chez|pour)\b", normalized)
+            or re.search(rf"\b(?:ici|je suis|i m|i am|this is)\s+{re.escape(assistant_name)}\b", normalized)
+        )
+    )
+    if assistant_intro_present:
         return text
     if normalized.startswith(_normalize_text(prefix)):
         return text
@@ -1131,9 +1464,93 @@ def _remove_redundant_acknowledged_fact_clauses(text: str, context: dict[str, An
     clean = direct_preamble.sub("", clean)
     clean = re.sub(r"\s+([,.!?])", r"\1", clean)
     clean = re.sub(r"\s{2,}", " ", clean).strip(" ,")
+    clean = _compact_repetitive_question_preamble(clean, context=context, fact_terms=fact_terms)
     if clean and clean[0].islower():
         clean = clean[0].upper() + clean[1:]
     return clean or text
+
+
+_RECAP_CUES = (
+    "as you mentioned",
+    "c est bien note",
+    "c est note",
+    "given",
+    "got it",
+    "j ai bien note",
+    "j ai note",
+    "parfait",
+    "since",
+    "thanks",
+    "avec",
+    "bien note",
+    "comme",
+    "merci",
+    "vu",
+)
+
+_QUESTION_START_PATTERN = re.compile(
+    r"\b(?:"
+    r"are you|can you|could you|do you|does|how|is there|what|when|where|which|who|would you|"
+    r"avez-vous|etes-vous|est-ce|faut-il|quand|quel(?:le)?s?|qui|souhaitez-vous|voulez-vous|y a-t-il"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _compact_repetitive_question_preamble(
+    text: str,
+    *,
+    context: dict[str, Any],
+    fact_terms: Sequence[str],
+) -> str:
+    """Keep the next question while dropping an already-known project recap."""
+
+    if "?" not in text:
+        return text
+    normalized = _normalize_text(text)
+    if not any(cue in normalized for cue in _RECAP_CUES):
+        return text
+    mentioned_terms = {
+        term
+        for term in fact_terms
+        if len(term) >= 7 and _normalize_text(term) in normalized
+    }
+    if len(mentioned_terms) < 2:
+        return text
+
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+    question_index = next((index for index in range(len(sentences) - 1, -1, -1) if "?" in sentences[index]), None)
+    if question_index is None:
+        return text
+    question = sentences[question_index]
+    if ":" in question:
+        trailing = question.rsplit(":", 1)[1].strip()
+        if "?" in trailing:
+            question = trailing
+    else:
+        normalized_question = _normalize_text(question)
+        match = _QUESTION_START_PATTERN.search(normalized_question)
+        if match and match.start() > 0:
+            # Accent folding preserves character positions for the supported
+            # French/English copy closely enough for question-starter slicing.
+            question = question[match.start() :].strip(" ,:;-")
+
+    if not question or "?" not in question:
+        return text
+    if question[0].islower():
+        question = question[0].upper() + question[1:]
+
+    acknowledgment = ""
+    for candidate in reversed(sentences[:question_index]):
+        candidate_norm = _normalize_text(candidate)
+        if len(candidate) <= 45 and not any(term in candidate_norm for term in mentioned_terms):
+            acknowledgment = candidate
+            break
+    if not acknowledgment:
+        acknowledgment = "C'est noté." if normalize_language(str(context.get("response_language") or "en")) == "fr" else "Got it."
+    if acknowledgment[-1:] not in ".!?":
+        acknowledgment += "."
+    return f"{acknowledgment} {question}".strip()
 
 
 def _acknowledged_fact_terms(context: dict[str, Any]) -> list[str]:
@@ -1145,7 +1562,7 @@ def _acknowledged_fact_terms(context: dict[str, Any]) -> list[str]:
         if not isinstance(fact, dict) or str(fact.get("key") or "") not in acknowledged:
             continue
         terms.extend(_fact_terms({key: str(value) for key, value in fact.items()}))
-    return list(dict.fromkeys(_normalize_text(term) for term in terms if _normalize_text(term)))
+    return list(dict.fromkeys(_normalize_text(term)[:160] for term in terms if _normalize_text(term)))[:80]
 
 
 def _stringify_answer(value: Any) -> str:
@@ -1165,18 +1582,78 @@ def _extract_from_form_answers(answers: dict[str, Any]) -> QualificationMemory:
         text = " ".join(str(value or "").split()).strip()
         if not text:
             continue
-        if any(token in key_norm for token in ("service", "offering", "product", "problem", "challenge", "scope", "request", "need", "project", "goal", "interest")):
+        if _key_has_semantic_token(
+            key_norm,
+            (
+                "service",
+                "offering",
+                "product",
+                "problem",
+                "challenge",
+                "scope",
+                "request",
+                "need",
+                "project",
+                "goal",
+                "interest",
+                "besoin",
+                "projet",
+                "selectionner",
+            ),
+        ):
             extracted.setdefault("service_needed", text)
-        if any(token in key_norm for token in ("timeline", "start", "deadline", "urgency", "date")):
+        timeline_key = _key_has_semantic_token(
+            key_norm,
+            ("timeline", "start", "deadline", "date", "delai", "echeance", "realisation"),
+        )
+        urgency_key = _key_has_semantic_token(key_norm, ("urgency", "urgent", "urgence"))
+        if timeline_key or urgency_key:
             extracted.setdefault("timeline", text)
-            extracted.setdefault("urgency_driver", text)
-        if any(token in key_norm for token in ("location", "market", "region", "city", "site", "address")):
+            if urgency_key:
+                # A dedicated urgency answer is more informative than a generic
+                # deadline and should replace it as the urgency driver.
+                extracted["urgency_driver"] = text
+            else:
+                extracted.setdefault("urgency_driver", text)
+        if _key_has_semantic_token(
+            key_norm,
+            ("location", "market", "region", "city", "site", "address", "lieu", "ville", "adresse"),
+        ):
             extracted.setdefault("locations", text)
-        if any(token in key_norm for token in ("decision", "approv", "stakeholder", "attendee", "join", "role")):
+        if _key_has_semantic_token(
+            key_norm,
+            (
+                "decision",
+                "approv",
+                "stakeholder",
+                "attendee",
+                "role",
+                "decideur",
+                "decisionnaire",
+                "approb",
+                "responsable",
+                "participant",
+            ),
+        ):
             extracted.setdefault("decision_makers", text)
         partial = _extract_from_text(text)
         extracted.update({k: v for k, v in partial.model_dump(exclude_none=True).items() if v not in (None, "")})
     return QualificationMemory.model_validate(extracted)
+
+
+def _key_has_semantic_token(key: str, tokens: Sequence[str]) -> bool:
+    """Match form-key concepts as words, not accidental substrings.
+
+    This notably prevents the French attachment verb ``joindre`` from being
+    interpreted as the English qualification concept ``join``.
+    """
+
+    normalized_key = _normalize_text(key).replace("-", " ")
+    return any(
+        bool(re.search(rf"\b{re.escape(_normalize_text(token))}[a-z0-9]*\b", normalized_key))
+        for token in tokens
+        if _normalize_text(token)
+    )
 
 
 def _extract_from_messages(history: Sequence[Message]) -> QualificationMemory:
@@ -1274,11 +1751,62 @@ def _extract_asked_question_keys(history: Sequence[Message]) -> list[QuestionKey
     return keys
 
 
+def _latest_outbound_question_key(history: Sequence[Message]) -> QuestionKey | None:
+    latest = _latest_outbound_from_history(history)
+    if not latest:
+        return None
+    raw_payload = latest.get("raw_payload")
+    raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
+    agent_payload = raw_payload.get("agent") if isinstance(raw_payload.get("agent"), dict) else {}
+    stored_key = agent_payload.get("next_question_key")
+    if stored_key in _QUESTION_SPEC_BY_KEY:
+        return stored_key
+    return _infer_question_key_from_text(str(latest.get("body") or ""))
+
+
+def _is_unknown_qualification_answer(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return True
+    return bool(
+        re.search(
+            r"\b(?:"
+            r"je (?:ne )?sais pas|pas sur|aucune idee|a confirmer|je dois verifier|"
+            r"on ne sait pas|i don'?t know|not sure|no idea|to be confirmed|"
+            r"i need to (?:check|confirm)|need to (?:check|confirm)"
+            r")\b",
+            normalized,
+        )
+    )
+
+
 def _infer_question_key_from_text(text: str) -> QuestionKey | None:
     normalized = _normalize_text(text)
-    if "decision-maker" in normalized or "decision maker" in normalized or "anyone else join" in normalized:
+    if any(
+        phrase in normalized
+        for phrase in (
+            "decision-maker",
+            "decision maker",
+            "anyone else join",
+            "personne qui prend la decision",
+            "personne qui valide",
+            "quelqu un d autre",
+        )
+    ):
         return "decision_makers"
-    if "deadline" in normalized or "key date" in normalized or "approval timeline" in normalized or "driving this" in normalized:
+    if any(
+        phrase in normalized
+        for phrase in (
+            "deadline",
+            "key date",
+            "approval timeline",
+            "driving this",
+            "date importante",
+            "date de livraison",
+            "quelle echeance",
+            "quel delai",
+        )
+    ):
         return "urgency_driver"
     return None
 
@@ -1295,7 +1823,9 @@ def _recommended_next_question_key(*, memory: QualificationMemory, asked_questio
 
 
 def _normalize_text(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    normalized = unicodedata.normalize("NFKD", str(text or "").strip())
+    folded = "".join(character for character in normalized if not unicodedata.combining(character)).casefold()
+    cleaned = re.sub(r"\s+", " ", folded)
     cleaned = re.sub(r"[^a-z0-9@+:/?.,\- ]", " ", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
@@ -1323,9 +1853,9 @@ def _replace_question(text: str, question: str) -> str:
 
 def _trim_sms_text(text: str) -> str:
     clean = " ".join(str(text or "").split()).strip()
-    if len(clean) <= 320:
+    if len(clean) <= _MAX_AGENT_REPLY_CHARS:
         return clean
-    return clean[:317].rstrip() + "..."
+    return clean[: _MAX_AGENT_REPLY_CHARS - 3].rstrip() + "..."
 
 
 def _ensure_single_question(text: str) -> str:
@@ -1347,12 +1877,7 @@ def _has_booking_intent(text: str, *, allow_generic_confirmation: bool = False) 
     normalized = _normalize_text(text)
     if not normalized:
         return False
-    generic_affirmation = bool(
-        re.fullmatch(
-            r"(yes|yeah|yep|sure|ok|okay|sounds good|works|works for me|go ahead|oui|certainement|ca marche|ça marche|d'accord|parfait|super)[.! ]*",
-            normalized,
-        )
-    )
+    generic_affirmation = _is_generic_booking_affirmation(normalized)
     strong_booking_signal = bool(
         re.search(
             r"\b(book|booking|lock|schedule|scheduled|set it up|set a call|confirm|appointment|meeting|call|calendar|"
@@ -1375,6 +1900,34 @@ def _has_booking_intent(text: str, *, allow_generic_confirmation: bool = False) 
             "book a call",
             "set a call",
             "send me times",
+            "avez-vous un creneau",
+            "avez vous un creneau",
+            "quelles sont vos disponibilites",
+            "envoyez-moi des creneaux",
+            "envoyez moi des creneaux",
+            "peut-on planifier",
+            "peut on planifier",
+        )
+    )
+
+
+def _is_generic_booking_affirmation(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    # Natural confirmations often contain conversational punctuation
+    # ("Yes, go ahead"), which must not prevent consent from being recognized.
+    normalized = re.sub(r"[,.!?;:]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return bool(
+        re.fullmatch(
+            r"(?:"
+            r"yes(?: please| go ahead)?|yeah(?: go ahead)?|yep|sure(?: go ahead)?|"
+            r"ok|okay|sounds good|works|works for me|go ahead|"
+            r"oui(?:\s+(?:svp|s il vous plait|allez[- ]y|volontiers|bien sur|je veux|ca me va))?|"
+            r"allez[- ]y|allons[- ]y|certainement|volontiers|ca marche|d accord|parfait|super"
+            r")",
+            normalized,
         )
     )
 

@@ -154,14 +154,14 @@ async def _bounded_request_body(request: Request) -> bytes:
         if declared_length < 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Content-Length")
         if declared_length > _MAX_WEBHOOK_BODY_BYTES:
-            raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Webhook payload is too large")
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Webhook payload is too large")
 
     chunks: list[bytes] = []
     size = 0
     async for chunk in request.stream():
         size += len(chunk)
         if size > _MAX_WEBHOOK_BODY_BYTES:
-            raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Webhook payload is too large")
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Webhook payload is too large")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -199,22 +199,22 @@ def _parse_bounded_json(raw_body: bytes) -> dict[str, Any]:
         value, depth = stack.pop()
         nodes += 1
         if nodes > _MAX_JSON_NODES:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Webhook payload has too many fields")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Webhook payload has too many fields")
         if depth > _MAX_JSON_DEPTH:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Webhook payload is nested too deeply")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Webhook payload is nested too deeply")
         if isinstance(value, dict):
             if len(value) > _MAX_OBJECT_FIELDS:
-                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Webhook object has too many fields")
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Webhook object has too many fields")
             for key, item in value.items():
                 if len(str(key).encode("utf-8")) > 128:
-                    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Webhook field name is too long")
+                    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Webhook field name is too long")
                 stack.append((item, depth + 1))
         elif isinstance(value, list):
             if len(value) > _MAX_LIST_ITEMS:
-                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Webhook list has too many items")
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Webhook list has too many items")
             stack.extend((item, depth + 1) for item in value)
         elif isinstance(value, str) and len(value.encode("utf-8")) > _MAX_FIELD_BYTES:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Webhook field value is too long")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Webhook field value is too long")
     return payload
 
 
@@ -719,7 +719,7 @@ def _validated_candidate_stats(source: str, normalized_payload: dict[str, Any]) 
     try:
         return validate_webhook_candidates(normalize_webhook_payload(source=source, payload=normalized_payload))
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 def _latest_inbound_event(

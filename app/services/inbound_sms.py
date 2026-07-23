@@ -335,6 +335,49 @@ def _store_agent_memory(
     lead.raw_payload = payload
 
 
+def safe_agent_diagnostics(runtime_payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep retrieval/policy observability useful without storing prompts or URLs."""
+
+    raw_retrieval = runtime_payload.get("knowledge_retrieval")
+    retrieval = raw_retrieval if isinstance(raw_retrieval, dict) else {}
+    raw_sources = retrieval.get("selected_sources")
+    selected_sources: list[dict[str, Any]] = []
+    for raw_source in raw_sources if isinstance(raw_sources, list) else []:
+        if not isinstance(raw_source, dict) or len(selected_sources) >= 6:
+            continue
+        try:
+            source_id = int(raw_source.get("source_id") or 0)
+            score = round(float(raw_source.get("score") or 0.0), 3)
+        except (TypeError, ValueError):
+            continue
+        selected_sources.append(
+            {
+                "source_id": source_id,
+                "title": str(raw_source.get("title") or "")[:180],
+                "score": score,
+                "status": str(raw_source.get("status") or "")[:24],
+            }
+        )
+
+    raw_events = runtime_payload.get("guardrail_events")
+    if not isinstance(raw_events, list) and runtime_payload.get("reply_guardrail_reason"):
+        raw_events = [runtime_payload["reply_guardrail_reason"]]
+    guardrail_events = [
+        str(event)[:80]
+        for event in (raw_events if isinstance(raw_events, list) else [])[:8]
+        if str(event).strip()
+    ]
+    return {
+        "conversation_act": str(runtime_payload.get("conversation_act") or "")[:64] or None,
+        "uses_knowledge_context": bool(runtime_payload.get("uses_knowledge_context")),
+        "knowledge_retrieval": {
+            "context_available": bool(retrieval.get("context_available")),
+            "selected_sources": selected_sources,
+        },
+        "guardrail_events": guardrail_events,
+    }
+
+
 def already_processed_inbound_message(*, db: Session, lead_id: int, inbound_message_id: int) -> bool:
     recent_outbound = db.scalars(
         select(Message)
@@ -545,7 +588,7 @@ def _persist_and_deliver_confirmed_booking(
         created_at=turn_time,
         sms_service=sms_service,
     )
-    lead.last_outbound_at = turn_time
+    lead.last_outbound_at = datetime.now(timezone.utc)
     db.add(
         AuditLog(
             client_id=client.id,
@@ -642,7 +685,7 @@ def _apply_booking_selection_result(
 
     previous_state = lead.conversation_state
     lead.conversation_state = result.next_state
-    lead.last_outbound_at = turn_time
+    lead.last_outbound_at = datetime.now(timezone.utc)
     _auto_update_crm_stage(
         db=db,
         lead=lead,
@@ -891,7 +934,7 @@ def _apply_handoff_decision(
 
     previous_state = lead.conversation_state
     lead.conversation_state = ConversationStateEnum.HANDOFF
-    lead.last_outbound_at = turn_time
+    lead.last_outbound_at = datetime.now(timezone.utc)
     _auto_update_crm_stage(
         db=db,
         lead=lead,
@@ -1253,6 +1296,7 @@ def process_inbound_turn(
             "intent_score": runtime_payload.get("intent_score"),
             "cta_state": runtime_payload.get("cta_state"),
             "lead_summary": runtime_payload.get("lead_summary"),
+            **safe_agent_diagnostics(runtime_payload),
         },
         "actions": [action_item.model_dump() for action_item in agent_response.actions],
         "pending_step_before": pending_step_before or None,
@@ -1311,7 +1355,7 @@ def process_inbound_turn(
 
     previous_state = lead.conversation_state
     lead.conversation_state = next_state
-    lead.last_outbound_at = turn_time
+    lead.last_outbound_at = datetime.now(timezone.utc)
     _auto_update_crm_stage(
         db=db,
         lead=lead,
