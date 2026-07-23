@@ -16,7 +16,7 @@ LANGUAGE_LOCALES = {
 
 _FRENCH_HINT_RE = re.compile(
     r"\b(bonjour|salut|merci|rappel|appel|soumission|pi[eè]ce|d[ée]lai|"
-    r"urgent|besoin|plan|fichier|entreprise|disponible|disponibilit[ée]s?|"
+    r"urgent|besoin|plan|fichier|entreprise|projet|parlez|expliquez|dites|disponible|disponibilit[ée]s?|"
     r"demain|aujourd'hui|oui|non|quelles?|cr[ée]neaux?|prochain|semaine)\b|"
     r"\b\d{1,2}\s*h\s*\d{0,2}\b|[àâçéèêëîïôûùüÿñæœ]",
     re.IGNORECASE,

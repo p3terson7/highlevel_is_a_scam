@@ -1,3 +1,78 @@
+      function outboundRequestKey(scope, fingerprint) {
+        state.outboundRequestKeys = state.outboundRequestKeys || {};
+        const storageKey = `lead-ui-outbound-request:${scope}`;
+        const fingerprintToken = digestOutboundFingerprint(fingerprint);
+        let existing = state.outboundRequestKeys[scope];
+        try {
+          existing = JSON.parse(sessionStorage.getItem(storageKey) || "null") || existing;
+        } catch (_error) {
+          // The in-memory record still protects retries if session storage is unavailable.
+        }
+        if (existing?.fingerprint === fingerprintToken && existing.key) return existing.key;
+        const randomPart = window.crypto?.randomUUID?.()
+          || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        const key = `ui-${scope.replace(/[^A-Za-z0-9._:-]+/g, "-")}-${randomPart}`.slice(0, 128);
+        const record = { fingerprint: fingerprintToken, key };
+        state.outboundRequestKeys[scope] = record;
+        try {
+          sessionStorage.setItem(storageKey, JSON.stringify(record));
+        } catch (_error) {
+          // The generated key remains valid in memory for this attempt.
+        }
+        return key;
+      }
+
+      function clearOutboundRequestKey(scope) {
+        if (state.outboundRequestKeys) delete state.outboundRequestKeys[scope];
+        try {
+          sessionStorage.removeItem(`lead-ui-outbound-request:${scope}`);
+        } catch (_error) {
+          // Best-effort cache cleanup.
+        }
+      }
+
+      function digestOutboundFingerprint(value) {
+        let first = 0x811c9dc5;
+        let second = 0x9e3779b9;
+        for (let index = 0; index < value.length; index += 1) {
+          const code = value.charCodeAt(index);
+          first = Math.imul(first ^ code, 0x01000193);
+          second = Math.imul(second ^ code, 0x85ebca6b);
+        }
+        return `${value.length}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
+      }
+
+      function offerNewOutboundAttempt(scope, surface) {
+        state.blockedOutboundAttempt = { scope, surface };
+        const buttonId = surface === "thread"
+          ? "threadNewOutboundAttemptButton"
+          : "contactDrawerNewOutboundAttemptButton";
+        document.getElementById(buttonId)?.classList.remove("hidden");
+      }
+
+      function dismissNewOutboundAttempt(surface) {
+        if (state.blockedOutboundAttempt?.surface === surface) state.blockedOutboundAttempt = null;
+        const buttonId = surface === "thread"
+          ? "threadNewOutboundAttemptButton"
+          : "contactDrawerNewOutboundAttemptButton";
+        document.getElementById(buttonId)?.classList.add("hidden");
+      }
+
+      function startNewOutboundAttempt(surface) {
+        const attempt = state.blockedOutboundAttempt;
+        if (!attempt || attempt.surface !== surface) return;
+        const confirmed = window.confirm(
+          "Verify the conversation and provider activity first. Start a new outbound attempt only if the previous message was not sent."
+        );
+        if (!confirmed) return;
+        clearOutboundRequestKey(attempt.scope);
+        dismissNewOutboundAttempt(surface);
+        const message = "A new outbound attempt is ready. Review the message, then send again.";
+        if (surface === "thread") setText("threadManualStatus", message);
+        else setText("contactDrawerStatus", message);
+        showNotice(message, "warn");
+      }
+
       async function saveClient() {
         try {
           const payload = clientFormPayload(state.creatingClient);
@@ -65,11 +140,12 @@
         renderSettings();
         renderTestLab();
         saveLocalState();
+        window.dispatchEvent(new CustomEvent("lead-ui-client-change", { detail: { clientKey } }));
       }
 
       async function saveRuntimeSettings() {
         const payload = {
-          openai_model: document.getElementById("settingsOpenAiModel").value.trim() || "gpt-4.1-mini",
+          openai_model: document.getElementById("settingsOpenAiModel").value.trim() || "gpt-5.4-mini",
           ai_provider_mode: document.getElementById("settingsAiMode").value,
         };
         const maybeSet = [
@@ -95,15 +171,6 @@
           setText("settingsRuntimeStatus", `Save failed: ${error.message}`);
           showNotice(`Runtime save failed: ${error.message}`, "err");
         }
-      }
-
-      function toggleOpenAiKeyVisibility() {
-        const input = document.getElementById("settingsOpenAiKey");
-        if (!input) return;
-        const shouldReveal = input.type === "password";
-        input.type = shouldReveal ? "text" : "password";
-        setText("settingsOpenAiRevealButton", shouldReveal ? "Hide" : "Reveal");
-        setText("settingsOpenAiKeyStatus", shouldReveal ? "Key visible. Hide it again before sharing your screen." : "");
       }
 
       async function saveAiContextSettings() {
@@ -668,6 +735,9 @@
 
       async function sendManualMessage() {
         if (!state.activeLeadId) return;
+        const leadId = state.activeLeadId;
+        const sendButton = document.getElementById("threadSendManualButton");
+        if (sendButton?.disabled) return;
         const body = document.getElementById("threadManualMessage").value.trim();
         const mediaInput = document.getElementById("threadMediaInput");
         const mediaFile = mediaInput?.files?.[0] || null;
@@ -677,66 +747,100 @@
           return;
         }
         const sandboxThread = isActiveSandboxThread();
+        const requestScope = `manual-${leadId}`;
+        const requestFingerprint = JSON.stringify({
+          body,
+          pauseAgent,
+          media: mediaFile ? [mediaFile.name, mediaFile.type, mediaFile.size, mediaFile.lastModified] : null,
+        });
+        const requestKey = sandboxThread ? "" : outboundRequestKey(requestScope, requestFingerprint);
         if (sandboxThread && mediaFile) {
           setText("threadManualStatus", "Media attachments are not available in sandbox mode.");
           return;
         }
+        dismissNewOutboundAttempt("thread");
+        if (sendButton) sendButton.disabled = true;
+        let result;
         try {
-          let result;
           if (mediaFile) {
             const formData = new FormData();
             formData.append("body", body);
             formData.append("media", mediaFile);
-            result = await apiJson(`/ui/api/conversations/${state.activeLeadId}/messages/manual-media`, {
+            result = await apiJson(`/ui/api/conversations/${leadId}/messages/manual-media`, {
               method: "POST",
+              headers: { "Idempotency-Key": requestKey },
               body: formData,
             });
-            if (pauseAgent) {
-              await apiJson(`/ui/api/conversations/${state.activeLeadId}/agent-control`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  paused: true,
-                  reason: "manual_media_reply_takeover",
-                  note: "Paused automatically after a manual media message.",
-                }),
-              });
-            }
           } else {
             const endpoint = sandboxThread
-              ? `/ui/api/conversations/${state.activeLeadId}/sandbox/messages`
-              : `/ui/api/conversations/${state.activeLeadId}/messages/manual`;
+              ? `/ui/api/conversations/${leadId}/sandbox/messages`
+              : `/ui/api/conversations/${leadId}/messages/manual`;
             result = await apiJson(endpoint, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                ...(requestKey ? { "Idempotency-Key": requestKey } : {}),
+              },
               body: JSON.stringify({ body, pause_agent: pauseAgent }),
             });
           }
-          document.getElementById("threadManualMessage").value = "";
-          if (document.getElementById("threadPauseAfterSend")) {
-            document.getElementById("threadPauseAfterSend").checked = false;
-          }
-          clearThreadMediaSelection();
-          if (sandboxThread) {
-            state.sandboxLeadId = state.activeLeadId;
-            saveLocalState();
-          }
-          setText("threadManualStatus", sandboxThread ? "AI replied in sandbox." : (mediaFile ? "Media sent." : "Sent."));
-          if (state.session?.role === "client") {
-            await loadConversations();
-            await loadCrmLeads();
-            await openThread(state.activeLeadId);
-          } else {
-            await Promise.all([loadConversations(), openThread(state.activeLeadId), loadCrmLeads(), loadLogs(state.selectedClientKey), loadDashboard()]);
-          }
-          if (sandboxThread) {
-            writeTestLabOutput(result);
-          }
-          showNotice(sandboxThread ? "Sandbox turn completed." : "Manual message sent.", "ok");
         } catch (error) {
           setText("threadManualStatus", `Send failed: ${error.message}`);
           showNotice(`${sandboxThread ? "Sandbox turn" : "Manual message"} failed: ${error.message}`, "err");
+          if (!sandboxThread) offerNewOutboundAttempt(requestScope, "thread");
+          if (sendButton) sendButton.disabled = false;
+          return;
         }
+
+        // The outbound operation is now confirmed. Later control or refresh failures
+        // must not be reported as send failures, which would encourage duplicates.
+        if (!sandboxThread) clearOutboundRequestKey(requestScope);
+        document.getElementById("threadManualMessage").value = "";
+        if (document.getElementById("threadPauseAfterSend")) {
+          document.getElementById("threadPauseAfterSend").checked = false;
+        }
+        clearThreadMediaSelection();
+        if (sandboxThread) {
+          state.sandboxLeadId = leadId;
+          saveLocalState();
+        }
+
+        let completionStatus = sandboxThread ? "AI replied in sandbox." : (mediaFile ? "Media sent." : "Sent.");
+        let completionTone = "ok";
+        if (mediaFile && pauseAgent) {
+          try {
+            await apiJson(`/ui/api/conversations/${leadId}/agent-control`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                paused: true,
+                reason: "manual_media_reply_takeover",
+                note: "Paused automatically after a manual media message.",
+              }),
+            });
+            completionStatus = "Media sent and AI paused.";
+          } catch (error) {
+            completionStatus = `Media sent, but AI could not be paused: ${error.message}`;
+            completionTone = "warn";
+          }
+        }
+
+        try {
+          if (state.session?.role === "client") {
+            await loadConversations();
+            await loadCrmLeads();
+            await openThread(leadId);
+          } else {
+            await Promise.all([loadConversations(), openThread(leadId), loadCrmLeads(), loadLogs(state.selectedClientKey), loadDashboard()]);
+          }
+        } catch (error) {
+          completionStatus = `${completionStatus} The workspace could not refresh: ${error.message}`;
+          completionTone = "warn";
+        }
+        if (sandboxThread) writeTestLabOutput(result);
+        setText("threadManualStatus", completionStatus);
+        showNotice(completionStatus, completionTone);
+        if (sendButton) sendButton.disabled = false;
       }
 
       function findLeadForActions(leadId) {
@@ -838,6 +942,7 @@
             <div class="actions">
               <button class="primary small" data-action="contact-drawer-send" ${canSend ? "" : "disabled"}>Send message</button>
               <button class="small ghost" data-action="contact-drawer-open-thread">Open thread</button>
+              <button id="contactDrawerNewOutboundAttemptButton" class="small warn hidden" data-action="contact-drawer-new-outbound-attempt">Start a new outbound attempt</button>
             </div>
             <div id="contactDrawerStatus" class="meta-text">${canSend ? "" : escapeHtml(lead.opted_out ? "This contact opted out." : "No phone number available.")}</div>
           </div>
@@ -868,19 +973,33 @@
           setText("contactDrawerStatus", "Message body is required.");
           return;
         }
+        const requestScope = `drawer-manual-${leadId}`;
+        const requestKey = outboundRequestKey(requestScope, JSON.stringify({ body, pauseAgent }));
+        dismissNewOutboundAttempt("drawer");
         try {
           await apiJson(`/ui/api/conversations/${leadId}/messages/manual`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", "Idempotency-Key": requestKey },
             body: JSON.stringify({ body, pause_agent: pauseAgent }),
           });
-          setText("contactDrawerStatus", pauseAgent ? "Message sent. AI paused for this contact." : "Message sent.");
+        } catch (error) {
+          setText("contactDrawerStatus", `Send failed: ${error.message}`);
+          showNotice(`Manual message failed: ${error.message}`, "err");
+          offerNewOutboundAttempt(requestScope, "drawer");
+          return;
+        }
+
+        clearOutboundRequestKey(requestScope);
+        const successMessage = pauseAgent ? "Message sent. AI paused for this contact." : "Message sent.";
+        setText("contactDrawerStatus", successMessage);
+        try {
           await refreshAfterContactAction(leadId);
           renderContactActionDrawer();
           showNotice("Manual message sent.", "ok");
         } catch (error) {
-          setText("contactDrawerStatus", `Send failed: ${error.message}`);
-          showNotice(`Manual message failed: ${error.message}`, "err");
+          const warning = `${successMessage} The workspace could not refresh: ${error.message}`;
+          setText("contactDrawerStatus", warning);
+          showNotice(warning, "warn");
         }
       }
 
@@ -945,17 +1064,29 @@
       async function sendBookingLinkFromContactDrawer() {
         const leadId = Number(state.contactActionDrawer?.leadId || 0) || 0;
         if (!leadId) return;
+        const requestScope = `booking-link-${leadId}`;
+        const message = "Here is the booking link whenever you are ready.";
+        const requestKey = outboundRequestKey(requestScope, message);
+        dismissNewOutboundAttempt("drawer");
         try {
           await apiJson(`/ui/api/conversations/${leadId}/actions/booking-link`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message: "Here is the booking link whenever you are ready." }),
+            headers: { "Content-Type": "application/json", "Idempotency-Key": requestKey },
+            body: JSON.stringify({ message }),
           });
+        } catch (error) {
+          showNotice(`Booking link failed: ${error.message}`, "err");
+          offerNewOutboundAttempt(requestScope, "drawer");
+          return;
+        }
+
+        clearOutboundRequestKey(requestScope);
+        try {
           await refreshAfterContactAction(leadId);
           renderContactActionDrawer();
           showNotice("Booking link sent.", "ok");
         } catch (error) {
-          showNotice(`Booking link failed: ${error.message}`, "err");
+          showNotice(`Booking link sent, but the workspace could not refresh: ${error.message}`, "warn");
         }
       }
 

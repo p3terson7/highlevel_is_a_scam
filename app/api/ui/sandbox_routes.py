@@ -1,10 +1,106 @@
 from fastapi import APIRouter
+
+from app.services.sandbox_admission import admit_sandbox_action
+
 from .shared import *
 
 router = APIRouter()
 
 _SANDBOX_MODES = {"gpt_only", "gpt_zapier"}
 _ZAPIER_BOOKING_EVENTS = {"zapier_booking_webhook_sent", "zapier_booking_webhook_failed"}
+_SANDBOX_START_LIMIT = 10
+_SANDBOX_START_WINDOW = timedelta(minutes=10)
+_SANDBOX_MESSAGE_LIMIT = 30
+_SANDBOX_MESSAGE_WINDOW = timedelta(minutes=1)
+
+
+def _sandbox_initial_seed_text(lead: Lead) -> str:
+    """Describe a Test Lab submission without pretending it came from Meta."""
+
+    normalized_answers = normalize_form_answers(lead.form_answers or {})
+    details: list[str] = []
+    # Put the qualification summary first. Knowledge retrieval intentionally
+    # prioritizes the opening query tokens, so generic sandbox metadata must not
+    # crowd the lead's actual service and project terms out of candidate search.
+    summary = build_lead_summary_text(normalized_answers, limit=6)
+    if summary and summary != "No qualification details captured yet.":
+        details.append(f"summary={summary}")
+    if lead.full_name:
+        details.append(f"name={lead.full_name}")
+    if lead.city:
+        details.append(f"city={lead.city}")
+    if lead.email:
+        details.append(f"email={lead.email}")
+
+    context_blob = " | ".join(details) if details else "no extra lead details"
+    return (
+        f"Lead context: {context_blob}. "
+        "New test lead submitted through the AI sandbox. "
+        "This is the first outbound message after the Test Lab submission. "
+    )
+
+
+def _run_sandbox_opening_turn(
+    *,
+    db: Session,
+    client: Client,
+    lead: Lead,
+    llm_agent: Any,
+    inbound_text: str,
+):
+    """Run the opening turn with tenant knowledge while supporting legacy test doubles."""
+
+    run_turn = getattr(llm_agent, "run_turn", None)
+    if callable(run_turn):
+        return run_turn(
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            history=[],
+            booking_service=None,
+            db=db,
+        )
+    return llm_agent.next_reply(
+        client=client,
+        lead=lead,
+        inbound_text=inbound_text,
+        history=[],
+    )
+
+
+def _enforce_sandbox_admission(
+    *,
+    settings: Settings,
+    client_id: int,
+    limit: int,
+    window: timedelta,
+    action: str,
+) -> None:
+    """Reserve a tenant-scoped sandbox budget before invoking the LLM."""
+
+    window_seconds = max(1, int(window.total_seconds()))
+    admission = admit_sandbox_action(
+        settings=settings,
+        client_id=client_id,
+        action=action,
+        limit=limit,
+        window_seconds=window_seconds,
+    )
+    if admission.admitted:
+        return
+
+    if admission.reason == "coordination_unavailable":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"AI sandbox {action} is temporarily unavailable. Try again shortly.",
+            headers={"Retry-After": "30"},
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"AI sandbox {action} limit reached for this workspace. Try again shortly.",
+        headers={"Retry-After": str(window_seconds)},
+    )
 
 
 def _sandbox_booking_debug(message: Message | None) -> dict[str, Any] | None:
@@ -111,6 +207,14 @@ def ui_owner_start_ai_sandbox(
     if provided_phone and not normalized_phone:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Phone number is invalid")
 
+    _enforce_sandbox_admission(
+        settings=settings,
+        client_id=client.id,
+        limit=_SANDBOX_START_LIMIT,
+        window=_SANDBOX_START_WINDOW,
+        action="start",
+    )
+
     effective_runtime = get_effective_runtime_map_for_client(
         settings=settings,
         overrides=load_runtime_overrides(db),
@@ -164,8 +268,14 @@ def ui_owner_start_ai_sandbox(
         )
     )
 
-    ai_seed = _meta_initial_seed_text(lead)
-    ai_response = llm_agent.next_reply(client=client, lead=lead, inbound_text=ai_seed, history=[])
+    ai_seed = _sandbox_initial_seed_text(lead)
+    ai_response = _run_sandbox_opening_turn(
+        db=db,
+        client=client,
+        lead=lead,
+        llm_agent=llm_agent,
+        inbound_text=ai_seed,
+    )
     body = ai_response.reply_text.strip()
     if not body:
         first_name = lead.full_name.split(" ")[0] if lead.full_name else "there"
@@ -210,6 +320,7 @@ def ui_owner_start_ai_sandbox(
             "intent_score": (ai_response.runtime_payload or {}).get("intent_score"),
             "cta_state": (ai_response.runtime_payload or {}).get("cta_state"),
             "lead_summary": (ai_response.runtime_payload or {}).get("lead_summary"),
+            **safe_agent_diagnostics(dict(ai_response.runtime_payload or {})),
         },
         "actions": [action.model_dump() for action in ai_response.actions],
         "seed_context": ai_seed,
@@ -301,6 +412,14 @@ def ui_send_ai_sandbox_message(
     if not lead.client:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
 
+    _enforce_sandbox_admission(
+        settings=settings,
+        client_id=lead.client_id,
+        limit=_SANDBOX_MESSAGE_LIMIT,
+        window=_SANDBOX_MESSAGE_WINDOW,
+        action="message",
+    )
+
     now = datetime.now(timezone.utc)
     inbound_message = Message(
         lead_id=lead.id,
@@ -336,6 +455,10 @@ def ui_send_ai_sandbox_message(
             created_at=now,
         )
     )
+    # Persist the inbound turn before any provider-side effect reserves work
+    # in its independent outbox transaction (required for SQLite as well as a
+    # coherent crash-recovery boundary).
+    db.commit()
 
     effective_runtime = get_effective_runtime_map_for_client(
         settings=settings,

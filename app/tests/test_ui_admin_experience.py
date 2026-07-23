@@ -1,29 +1,62 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 from sqlalchemy import select
 
+from app.api.ui import shell as ui_shell
 from app.api.ui import sandbox_routes
-from app.db.models import AuditLog, CalendarBooking, Client, Lead, LeadSource, MessageAttachment
+from app.db.models import (
+    AuditLog,
+    CalendarBooking,
+    Client,
+    ConversationState,
+    KnowledgeChunk,
+    KnowledgeSource,
+    Lead,
+    LeadSource,
+    Message,
+    MessageAttachment,
+    MessageDirection,
+    OutboundRequest,
+)
 from app.db.session import get_session_factory
 from app.services import zapier_booking
+from app.services.llm_agent import LLMAgent
+
 
 def _admin_headers() -> dict[str, str]:
-    return {"X-Admin-Token": "test-admin-token"}
+    return {"X-Admin-Token": "test-admin-token-32-characters-long!"}
 
 
 def _portal_headers(token: str) -> dict[str, str]:
     return {"X-Portal-Token": token}
 
 
+@pytest.fixture(autouse=True)
+def _clear_ui_rollout_flags(monkeypatch) -> None:
+    for flag in (
+        "UI_REACT_ISLAND_ENABLED",
+        "UI_REACT_APP_SHELL_ENABLED",
+        "UI_LEGACY_SHELL_ENABLED",
+    ):
+        monkeypatch.delenv(flag, raising=False)
+
+
 def test_ui_shell_and_session_endpoint(test_context):
     page = test_context.client.get("/ui")
     assert page.status_code == 200
     assert "Lead Ops Console" in page.text
-    assert "Operator workspace" in page.text
-    assert "Conversations" in page.text
+    assert (
+        '<div id="react-root" data-react-app-shell="true"></div>' in page.text
+        or "Operator workspace" in page.text
+    )
+    assert page.headers["x-content-type-options"] == "nosniff"
+    assert page.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
 
     session = test_context.client.get("/ui/api/session", headers=_admin_headers())
     assert session.status_code == 200
@@ -34,15 +67,200 @@ def test_ui_shell_and_session_endpoint(test_context):
 
 
 def test_ui_home_and_deep_links_render_shell(test_context):
-    for path in ["/", "/dashboard", "/calendar", "/settings", "/ui", "/ui/dashboard", "/not-a-real-page"]:
+    for path in ["/", "/dashboard", "/inbox", "/pipeline", "/records", "/calendar", "/settings", "/ui", "/ui/dashboard"]:
         page = test_context.client.get(path)
         assert page.status_code == 200
         assert "Lead Ops Console" in page.text
-        assert "Operator workspace" in page.text
+        assert (
+            '<div id="react-root" data-react-app-shell="true"></div>' in page.text
+            or "Operator workspace" in page.text
+        )
 
     missing_api = test_context.client.get("/ui/api/not-a-real-endpoint")
+    missing_page = test_context.client.get("/not-a-real-page", headers={"Accept": "text/html"})
+    missing_ui_page = test_context.client.get("/ui/not-a-real-page", headers={"Accept": "text/html"})
     assert missing_api.status_code == 404
+    assert missing_page.status_code == 404
+    assert missing_ui_page.status_code == 404
     assert "Lead Ops Console" not in missing_api.text
+    assert "Lead Ops Console" not in missing_page.text
+
+
+def test_ui_shell_fails_closed_when_react_build_is_missing(test_context, monkeypatch):
+    monkeypatch.setenv("UI_REACT_APP_SHELL_ENABLED", "true")
+    missing_dist = ui_shell._REPO_DIR / ".missing-frontend-dist-for-test"
+    monkeypatch.setattr(ui_shell, "_FRONTEND_DIST_DIR", missing_dist)
+    monkeypatch.setattr(ui_shell, "_FRONTEND_MANIFEST_FILE", missing_dist / ".vite" / "manifest.json")
+
+    page = test_context.client.get("/ui")
+
+    assert page.status_code == 503
+    assert "React frontend build unavailable" in page.text
+    assert 'data-react-island="' not in page.text
+    assert "/ui/react-assets/" not in page.text
+    assert page.headers["cache-control"] == "no-store, max-age=0"
+
+
+def test_ui_shell_defaults_to_react_when_build_exists(test_context, tmp_path, monkeypatch):
+    dist_dir = tmp_path / "dist"
+    asset_dir = dist_dir / "assets"
+    manifest_dir = dist_dir / ".vite"
+    asset_dir.mkdir(parents=True)
+    manifest_dir.mkdir()
+    (asset_dir / "app-shell-default.js").write_text("console.log('react app shell default');", encoding="utf-8")
+    (asset_dir / "app-shell-default.css").write_text("#react-root { min-height: 100vh; }", encoding="utf-8")
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "src/main.tsx": {
+                    "file": "assets/app-shell-default.js",
+                    "css": ["assets/app-shell-default.css"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ui_shell, "_FRONTEND_DIST_DIR", dist_dir)
+    monkeypatch.setattr(ui_shell, "_FRONTEND_MANIFEST_FILE", manifest_dir / "manifest.json")
+
+    page = test_context.client.get("/ui")
+
+    assert page.status_code == 200
+    assert "Operator workspace" not in page.text
+    assert '<div id="react-root" data-react-app-shell="true"></div>' in page.text
+    assert "/ui/react-assets/assets/app-shell-default.js" in page.text
+    assert "/ui/react-assets/assets/app-shell-default.css" in page.text
+    assert "ui-core.js" not in page.text
+
+
+def test_ui_shell_can_force_legacy_shell_when_build_exists(test_context, tmp_path, monkeypatch):
+    dist_dir = tmp_path / "dist"
+    asset_dir = dist_dir / "assets"
+    manifest_dir = dist_dir / ".vite"
+    asset_dir.mkdir(parents=True)
+    manifest_dir.mkdir()
+    (asset_dir / "app-shell-default.js").write_text("console.log('react app shell default');", encoding="utf-8")
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps({"src/main.tsx": {"file": "assets/app-shell-default.js"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UI_REACT_APP_SHELL_ENABLED", "true")
+    monkeypatch.setenv("UI_LEGACY_SHELL_ENABLED", "true")
+    monkeypatch.setattr(ui_shell, "_FRONTEND_DIST_DIR", dist_dir)
+    monkeypatch.setattr(ui_shell, "_FRONTEND_MANIFEST_FILE", manifest_dir / "manifest.json")
+
+    page = test_context.client.get("/ui")
+
+    assert page.status_code == 200
+    assert "Operator workspace" in page.text
+    assert '<div id="react-root" data-react-app-shell="true"></div>' not in page.text
+    assert "/ui/react-assets/" not in page.text
+    assert 'for="clientProviderZapierSecret">CRM intake webhook secret</label>' in page.text
+    assert 'for="clientProviderZapierBookingSecret">Zapier booking signing secret</label>' in page.text
+    assert "Zapier webhook secret" not in page.text
+
+
+def test_ui_shell_mounts_react_island_when_enabled(test_context, tmp_path, monkeypatch):
+    dist_dir = tmp_path / "dist"
+    asset_dir = dist_dir / "assets"
+    manifest_dir = dist_dir / ".vite"
+    asset_dir.mkdir(parents=True)
+    manifest_dir.mkdir()
+    (asset_dir / "app-abc123.js").write_text("console.log('react island');", encoding="utf-8")
+    (asset_dir / "app-abc123.css").write_text("#react-root { display: contents; }", encoding="utf-8")
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "src/main.tsx": {
+                    "file": "assets/app-abc123.js",
+                    "css": ["assets/app-abc123.css"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UI_REACT_ISLAND_ENABLED", "true")
+    monkeypatch.setenv("UI_REACT_APP_SHELL_ENABLED", "false")
+    monkeypatch.setattr(ui_shell, "_FRONTEND_DIST_DIR", dist_dir)
+    monkeypatch.setattr(ui_shell, "_FRONTEND_MANIFEST_FILE", manifest_dir / "manifest.json")
+
+    page = test_context.client.get("/ui")
+
+    assert page.status_code == 200
+    for island in ["dashboard", "clients", "inbox", "pipeline", "records", "calendar", "tasks", "logs", "settings", "test-lab"]:
+        assert f'class="react-island-root react-{island}-root" data-react-island="{island}"' in page.text
+    assert '<link rel="stylesheet" href="/ui/react-assets/assets/app-abc123.css" />' in page.text
+    assert '<script type="module" src="/ui/react-assets/assets/app-abc123.js"></script>' in page.text
+
+    script = test_context.client.get("/ui/react-assets/assets/app-abc123.js")
+    assert script.status_code == 200
+    assert "react island" in script.text
+    assert "immutable" in script.headers["cache-control"]
+
+    style = test_context.client.get("/ui/react-assets/assets/app-abc123.css")
+    assert style.status_code == 200
+    assert "#react-root" in style.text
+    assert "immutable" in style.headers["cache-control"]
+
+
+def test_ui_shell_mounts_full_react_app_shell_when_enabled(test_context, tmp_path, monkeypatch):
+    dist_dir = tmp_path / "dist"
+    asset_dir = dist_dir / "assets"
+    manifest_dir = dist_dir / ".vite"
+    asset_dir.mkdir(parents=True)
+    manifest_dir.mkdir()
+    (asset_dir / "app-shell-abc123.js").write_text("console.log('react app shell');", encoding="utf-8")
+    (asset_dir / "app-shell-abc123.css").write_text("#react-root { min-height: 100vh; }", encoding="utf-8")
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "src/main.tsx": {
+                    "file": "assets/app-shell-abc123.js",
+                    "css": ["assets/app-shell-abc123.css"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UI_REACT_APP_SHELL_ENABLED", "true")
+    monkeypatch.setattr(ui_shell, "_FRONTEND_DIST_DIR", dist_dir)
+    monkeypatch.setattr(ui_shell, "_FRONTEND_MANIFEST_FILE", manifest_dir / "manifest.json")
+
+    page = test_context.client.get("/ui")
+
+    assert page.status_code == 200
+    assert '<body data-theme="dark">' in page.text
+    assert '<div class="app-background" aria-hidden="true"></div>' in page.text
+    assert '<div id="react-root" data-react-app-shell="true"></div>' in page.text
+    assert '<link rel="stylesheet" href="/ui/assets/ui.css" />' in page.text
+    assert '<link rel="stylesheet" href="/ui/react-assets/assets/app-shell-abc123.css" />' in page.text
+    assert '<script type="module" src="/ui/react-assets/assets/app-shell-abc123.js"></script>' in page.text
+    assert 'data-react-island="' not in page.text
+    assert "ui-core.js" not in page.text
+    assert "Operator workspace" not in page.text
+
+
+def test_ui_shell_full_app_flag_takes_precedence_over_island_flag(test_context, tmp_path, monkeypatch):
+    dist_dir = tmp_path / "dist"
+    asset_dir = dist_dir / "assets"
+    manifest_dir = dist_dir / ".vite"
+    asset_dir.mkdir(parents=True)
+    manifest_dir.mkdir()
+    (asset_dir / "app-shell.js").write_text("console.log('react app shell');", encoding="utf-8")
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps({"src/main.tsx": {"file": "assets/app-shell.js"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UI_REACT_ISLAND_ENABLED", "true")
+    monkeypatch.setenv("UI_REACT_APP_SHELL_ENABLED", "true")
+    monkeypatch.setattr(ui_shell, "_FRONTEND_DIST_DIR", dist_dir)
+    monkeypatch.setattr(ui_shell, "_FRONTEND_MANIFEST_FILE", manifest_dir / "manifest.json")
+
+    page = test_context.client.get("/ui")
+
+    assert page.status_code == 200
+    assert '<div id="react-root" data-react-app-shell="true"></div>' in page.text
+    assert 'data-react-island="' not in page.text
 
 
 def test_dashboard_omits_stringified_none_for_ai_error(test_context):
@@ -79,8 +297,21 @@ def test_dashboard_returns_breakdowns_for_admin_and_client_scope(test_context):
     assert "new_last_24_hours" in admin_payload["stats"]
     assert isinstance(admin_payload["recent_leads"], list)
 
+    scoped_dashboard = test_context.client.get(
+        "/ui/api/dashboard?client_key=demo-roofing",
+        headers=_admin_headers(),
+    )
+    assert scoped_dashboard.status_code == 200
+    scoped_payload = scoped_dashboard.json()
+    assert scoped_payload["scope"]["role"] == "admin"
+    assert scoped_payload["scope"]["client_key"] == "demo-roofing"
+    assert scoped_payload["stats"]["clients_total"] == 1
+    assert all(item["client_key"] == "demo-roofing" for item in scoped_payload["recent_leads"])
+    assert all(item["client_name"] == "Northwind Roofing Co." for item in scoped_payload["upcoming"]["tasks"])
+    assert all(item["client_name"] == "Northwind Roofing Co." for item in scoped_payload["upcoming"]["meetings"])
+
     login = test_context.client.post(
-        "/ui/api/login/client",
+        "/ui/api/login/client/token",
         json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
     )
     assert login.status_code == 200
@@ -198,6 +429,144 @@ def test_ui_can_start_custom_test_lab_sandbox_thread(test_context):
     assert any(item["event_type"] == "ui_sandbox_initial_ai_sms" for item in thread_payload["audit_events"])
 
 
+def test_test_lab_opening_reply_uses_selected_clients_website_knowledge(
+    test_context,
+    monkeypatch,
+):
+    captured_prompts: list[dict] = []
+    now = datetime.now(timezone.utc)
+    session_factory = get_session_factory()
+    with session_factory() as db:
+        selected_client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert selected_client is not None
+        selected_client.knowledge_profile_context = (
+            "Selected tenant profile: precision metrology specialists."
+        )
+        other_client = Client(
+            client_key="other-knowledge-tenant",
+            business_name="Other Knowledge Tenant",
+            knowledge_profile_context="Other tenant profile must never appear.",
+        )
+        db.add(other_client)
+        db.flush()
+
+        selected_source = KnowledgeSource(
+            client_id=selected_client.id,
+            url="https://selected.example/metrology",
+            normalized_url="https://selected.example/metrology",
+            final_url="https://selected.example/metrology",
+            title="Selected precision metrology",
+            status="ok",
+            extracted_text="Selected-source fact: zirconium turbine metrology fixtures are supported.",
+            text_excerpt="Selected-source fact: zirconium turbine metrology fixtures are supported.",
+            last_success_at=now,
+        )
+        other_source = KnowledgeSource(
+            client_id=other_client.id,
+            url="https://other.example/metrology",
+            normalized_url="https://other.example/metrology",
+            final_url="https://other.example/metrology",
+            title="Other tenant metrology",
+            status="ok",
+            extracted_text="Other-tenant secret: zirconium turbine metrology fixtures are forbidden.",
+            text_excerpt="Other-tenant secret: zirconium turbine metrology fixtures are forbidden.",
+            last_success_at=now,
+        )
+        db.add_all([selected_source, other_source])
+        db.flush()
+        db.add_all(
+            [
+                KnowledgeChunk(
+                    client_id=selected_client.id,
+                    source_id=selected_source.id,
+                    chunk_index=0,
+                    content=selected_source.extracted_text,
+                    search_text=selected_source.extracted_text.casefold(),
+                ),
+                KnowledgeChunk(
+                    client_id=other_client.id,
+                    source_id=other_source.id,
+                    chunk_index=0,
+                    content=other_source.extracted_text,
+                    search_text=other_source.extracted_text.casefold(),
+                ),
+            ]
+        )
+        selected_client_id = selected_client.id
+        selected_source_id = selected_source.id
+        db.commit()
+
+    class OpeningKnowledgeProvider:
+        name = "test-lab-opening-knowledge"
+
+        def generate_json(self, system_prompt: str, user_prompt: str):
+            _ = system_prompt
+            prompt = json.loads(user_prompt)
+            captured_prompts.append(prompt)
+            return {
+                "reply_text": "Yes, our precision metrology team can help.",
+                "next_state": "QUALIFYING",
+                "collected_fields": prompt["qualification_memory"],
+                "next_question_key": None,
+                "action": "none",
+                "uses_knowledge_context": True,
+                "tool_call": {"name": "none", "args": {}},
+            }
+
+    monkeypatch.setattr(
+        sandbox_routes,
+        "build_llm_agent",
+        lambda *args, **kwargs: LLMAgent(provider=OpeningKnowledgeProvider()),
+    )
+
+    response = test_context.client.post(
+        f"/ui/api/owner/{test_context.client_key}/sandbox/start",
+        headers=_admin_headers(),
+        json={
+            "mode": "gpt_only",
+            "full_name": "Knowledge Sandbox Lead",
+            "form_answers": [
+                {
+                    "question": "Project scope",
+                    "answer": "Zirconium turbine metrology fixture",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(captured_prompts) == 1
+    opening_prompt = captured_prompts[0]
+    assert "selected tenant profile" in opening_prompt["business_profile_context"].lower()
+    assert "selected-source fact" in opening_prompt["knowledge_context"].lower()
+    assert "other tenant" not in opening_prompt["business_profile_context"].lower()
+    assert "other-tenant secret" not in opening_prompt["knowledge_context"].lower()
+    assert "ai sandbox" in opening_prompt["latest_inbound_message"].lower()
+    assert "meta lead ads" not in opening_prompt["latest_inbound_message"].lower()
+
+    with session_factory() as db:
+        lead = db.get(Lead, response.json()["lead_id"])
+        assert lead is not None
+        assert lead.client_id == selected_client_id
+        outbound = db.scalar(
+            select(Message)
+            .where(
+                Message.lead_id == lead.id,
+                Message.direction == MessageDirection.OUTBOUND,
+            )
+            .order_by(Message.id.desc())
+        )
+        assert outbound is not None
+        agent_trace = (outbound.raw_payload or {})["agent"]
+        assert agent_trace["uses_knowledge_context"] is True
+        assert agent_trace["knowledge_retrieval"]["selected_sources"][0][
+            "source_id"
+        ] == selected_source_id
+        assert "url" not in agent_trace["knowledge_retrieval"]["selected_sources"][0]
+
+
 def test_test_lab_future_modes_are_explicitly_disabled(test_context):
     response = test_context.client.post(
         f"/ui/api/owner/{test_context.client_key}/sandbox/start",
@@ -286,7 +655,7 @@ def test_ai_sandbox_gpt_zapier_mode_posts_booking_payload(test_context, monkeypa
     assert payload["calendar_event"]["end_datetime"] == "2026-03-09T15:30:00+00:00"
     assert payload["email_confirmation"]["to"] == "zapier-sandbox@example.com"
     assert booked_payload["zapier_booking_webhook"]["status"] == "sent"
-    assert booked_payload["zapier_booking_webhook"]["payload"]["lead"]["email"] == "zapier-sandbox@example.com"
+    assert booked_payload["zapier_booking_webhook"]["payload"] is None
 
     with session_factory() as db:
         sent = db.scalar(
@@ -396,7 +765,7 @@ def test_client_portal_can_launch_test_lead_without_admin_token(test_context):
     assert seed.status_code == 200
 
     login = test_context.client.post(
-        "/ui/api/login/client",
+        "/ui/api/login/client/token",
         json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
     )
     assert login.status_code == 200
@@ -448,9 +817,11 @@ def test_conversation_thread_notes_and_actions(test_context):
     assert note.status_code == 200
     assert note.json()["note"]["body"] == "Priority lead for front desk follow-up."
 
+    booking_headers = {**_admin_headers(), "Idempotency-Key": "booking-link-ui-test-001"}
+    booking_sent_before = len(test_context.fake_sms.sent)
     booking = test_context.client.post(
         f"/ui/api/conversations/{lead_id}/actions/booking-link",
-        headers=_admin_headers(),
+        headers=booking_headers,
         json={},
     )
     assert booking.status_code == 200
@@ -458,6 +829,14 @@ def test_conversation_thread_notes_and_actions(test_context):
     assert booking_payload["state"] == "BOOKING_SENT"
     assert test_context.fake_sms.sent
     assert "https://demo.harbor-medspa.example/consult" in test_context.fake_sms.sent[-1]["body"]
+    booking_retry = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/actions/booking-link",
+        headers=booking_headers,
+        json={},
+    )
+    assert booking_retry.status_code == 200
+    assert booking_retry.json() == booking_payload
+    assert len(test_context.fake_sms.sent) == booking_sent_before + 1
 
     handoff_target = test_context.client.get(
         "/ui/api/conversations?client_key=demo-legal&state=QUALIFYING",
@@ -821,15 +1200,44 @@ def test_owner_workspace_can_send_manual_message_with_client_provider(test_conte
         db.commit()
         lead_id = lead.id
 
+    idempotent_headers = {**_admin_headers(), "Idempotency-Key": "manual-message-ui-test-001"}
+    invalid_key = "manual-message-ui-invalid-001"
+    invalid = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/messages/manual",
+        headers={**_admin_headers(), "Idempotency-Key": invalid_key},
+        json={"body": "   "},
+    )
+    assert invalid.status_code == 400
+    with session_factory() as db:
+        assert db.scalar(select(OutboundRequest).where(OutboundRequest.idempotency_key == invalid_key)) is None
+
+    sent_before = len(test_context.fake_sms.sent)
     manual = test_context.client.post(
         f"/ui/api/conversations/{lead_id}/messages/manual",
-        headers=_admin_headers(),
+        headers=idempotent_headers,
         json={"body": "Checking in personally before we get you scheduled."},
     )
     assert manual.status_code == 200
     manual_payload = manual.json()
     assert manual_payload["state"] == "GREETED"
     assert "Checking in personally" in test_context.fake_sms.sent[-1]["body"]
+
+    repeated = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/messages/manual",
+        headers=idempotent_headers,
+        json={"body": "Checking in personally before we get you scheduled."},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json() == manual_payload
+    assert len(test_context.fake_sms.sent) == sent_before + 1
+
+    conflicting = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/messages/manual",
+        headers=idempotent_headers,
+        json={"body": "A different message must not reuse the same key."},
+    )
+    assert conflicting.status_code == 409
+    assert len(test_context.fake_sms.sent) == sent_before + 1
 
     thread = test_context.client.get(
         f"/ui/api/conversations/{lead_id}/thread",
@@ -868,11 +1276,13 @@ def test_owner_workspace_can_send_manual_media_message(test_context):
         db.commit()
         lead_id = lead.id
 
+    media_headers = {**_admin_headers(), "Idempotency-Key": "manual-media-ui-test-001"}
+    media_sent_before = len(test_context.fake_sms.sent)
     response = test_context.client.post(
         f"/ui/api/conversations/{lead_id}/messages/manual-media",
-        headers=_admin_headers(),
+        headers=media_headers,
         data={"body": "Voici la photo de la pièce."},
-        files={"media": ("piece.jpg", b"fake-image-bytes", "image/jpeg")},
+        files={"media": ("piece.jpg", b"\xff\xd8\xfffake-image-bytes", "image/jpeg")},
     )
     assert response.status_code == 200
     payload = response.json()
@@ -881,10 +1291,21 @@ def test_owner_workspace_can_send_manual_media_message(test_context):
     assert payload["attachments"][0]["url"].startswith("/media/public/")
     assert test_context.fake_sms.sent[-1]["media_urls"][0].startswith("https://owner-demo.ngrok-free.app/media/public/")
 
+    repeated = test_context.client.post(
+        f"/ui/api/conversations/{lead_id}/messages/manual-media",
+        headers=media_headers,
+        data={"body": "Voici la photo de la pièce."},
+        files={"media": ("piece.jpg", b"\xff\xd8\xfffake-image-bytes", "image/jpeg")},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json() == payload
+    assert len(test_context.fake_sms.sent) == media_sent_before + 1
+
     media_response = test_context.client.get(payload["attachments"][0]["url"])
     assert media_response.status_code == 200
-    assert media_response.content == b"fake-image-bytes"
+    assert media_response.content == b"\xff\xd8\xfffake-image-bytes"
     assert media_response.headers["content-type"].startswith("image/jpeg")
+    assert media_response.headers["cache-control"] == "private, no-store, max-age=0"
 
     thread = test_context.client.get(
         f"/ui/api/conversations/{lead_id}/thread",
@@ -900,6 +1321,12 @@ def test_owner_workspace_can_send_manual_media_message(test_context):
         attachment = db.scalar(select(MessageAttachment).where(MessageAttachment.lead_id == lead_id))
         assert attachment is not None
         assert attachment.content_type == "image/jpeg"
+        assert attachment.public_expires_at is not None
+        attachment.public_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+
+    expired = test_context.client.get(payload["attachments"][0]["url"])
+    assert expired.status_code == 404
 
 
 def test_owner_portal_can_view_and_update_ai_context(test_context):
@@ -907,7 +1334,7 @@ def test_owner_portal_can_view_and_update_ai_context(test_context):
     assert seed.status_code == 200
 
     login = test_context.client.post(
-        "/ui/api/login/client",
+        "/ui/api/login/client/token",
         json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
     )
     assert login.status_code == 200
@@ -950,7 +1377,7 @@ def test_client_portal_login_is_scoped_to_own_leads_and_cannot_delete_conversati
     assert seed.status_code == 200
 
     login = test_context.client.post(
-        "/ui/api/login/client",
+        "/ui/api/login/client/token",
         json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
     )
     assert login.status_code == 200
@@ -1003,7 +1430,7 @@ def test_client_portal_can_archive_and_restore_conversation(test_context):
     assert seed.status_code == 200
 
     login = test_context.client.post(
-        "/ui/api/login/client",
+        "/ui/api/login/client/token",
         json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
     )
     assert login.status_code == 200
@@ -1187,7 +1614,7 @@ def test_crm_endpoints_are_scoped_for_client_portal(test_context):
     assert seed.status_code == 200
 
     login = test_context.client.post(
-        "/ui/api/login/client",
+        "/ui/api/login/client/token",
         json={"email": "owner@demo-roofing.demo", "password": "demo-portal-2026"},
     )
     assert login.status_code == 200
@@ -1198,6 +1625,46 @@ def test_crm_endpoints_are_scoped_for_client_portal(test_context):
     items = crm_leads.json()["items"]
     assert items
     assert all(item["client_key"] == "demo-roofing" for item in items)
+
+    own_lead_id = items[0]["lead_id"]
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.get(Lead, own_lead_id)
+        assert lead is not None
+        db.add(
+            AuditLog(
+                client_id=lead.client_id,
+                lead_id=lead.id,
+                event_type="provider_internal_error",
+                decision={"api_key": "must-not-reach-portal", "provider_payload": {"debug": True}},
+            )
+        )
+        state_row = db.scalar(select(ConversationState).where(ConversationState.lead_id == lead.id).limit(1))
+        assert state_row is not None
+        state_row.metadata_json = {
+            "source": "ui",
+            "actor_role": "system",
+            "provider_secret": "must-not-reach-portal-timeline",
+        }
+        db.commit()
+
+    own_detail = test_context.client.get(
+        f"/ui/api/crm/leads/{own_lead_id}",
+        headers=_portal_headers(token),
+    )
+    assert own_detail.status_code == 200
+    serialized = json.dumps(own_detail.json())
+    assert "provider_internal_error" not in serialized
+    assert "must-not-reach-portal" not in serialized
+
+    own_thread = test_context.client.get(
+        f"/ui/api/conversations/{own_lead_id}/thread",
+        headers=_portal_headers(token),
+    )
+    assert own_thread.status_code == 200
+    thread_serialized = json.dumps(own_thread.json())
+    assert "must-not-reach-portal-timeline" not in thread_serialized
+    assert "provider_secret" not in thread_serialized
 
     foreign_lead_id = test_context.client.get(
         "/ui/api/crm/leads?client_key=demo-legal",

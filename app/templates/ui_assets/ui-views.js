@@ -719,11 +719,8 @@
           twilio_account_sid: document.getElementById("clientProviderTwilioSid").value.trim(),
           twilio_auth_token: document.getElementById("clientProviderTwilioToken").value.trim(),
           twilio_from_number: document.getElementById("clientProviderTwilioFrom").value.trim(),
-          meta_verify_token: document.getElementById("clientProviderMetaVerify").value.trim(),
-          meta_access_token: document.getElementById("clientProviderMetaAccess").value.trim(),
-          meta_graph_api_version: document.getElementById("clientProviderMetaVersion").value.trim(),
-          linkedin_verify_token: document.getElementById("clientProviderLinkedinVerify").value.trim(),
-          zapier_webhook_secret: document.getElementById("clientProviderZapierSecret").value.trim(),
+          crm_webhook_secret: document.getElementById("clientProviderZapierSecret").value.trim(),
+          zapier_booking_webhook_secret: document.getElementById("clientProviderZapierBookingSecret").value.trim(),
           zapier_booking_webhook_url: document.getElementById("clientProviderZapierBookingWebhookUrl").value.trim(),
           public_base_url: document.getElementById("clientProviderPublicBaseUrl").value.trim(),
         };
@@ -731,8 +728,19 @@
         Object.entries(providerConfigRaw).forEach(([key, value]) => {
           if (value) providerConfig[key] = value;
         });
-        if (providerConfig.meta_access_token && !providerConfig.meta_graph_api_version) {
-          providerConfig.meta_graph_api_version = "v22.0";
+        const clearTwilioCredentials = !state.creatingClient
+          && Boolean(document.getElementById("clientClearTwilioCredentials")?.checked);
+        const clearZapierCredentials = !state.creatingClient
+          && Boolean(document.getElementById("clientClearZapierCredentials")?.checked);
+        if (clearTwilioCredentials) {
+          delete providerConfig.twilio_account_sid;
+          delete providerConfig.twilio_auth_token;
+          delete providerConfig.twilio_from_number;
+        }
+        if (clearZapierCredentials) {
+          delete providerConfig.crm_webhook_secret;
+          delete providerConfig.zapier_booking_webhook_secret;
+          delete providerConfig.zapier_booking_webhook_url;
         }
         const existingBookingConfig = (
           !state.creatingClient
@@ -764,6 +772,23 @@
           template_overrides: templateOverrides,
           is_active: document.getElementById("clientIsActive").value === "true",
         };
+        if (!state.creatingClient) {
+          const clearProviderKeys = [];
+          if (clearTwilioCredentials) {
+            clearProviderKeys.push("twilio_account_sid", "twilio_auth_token", "twilio_from_number");
+          }
+          if (clearZapierCredentials) {
+            clearProviderKeys.push(
+              "crm_webhook_secret",
+              "zapier_booking_webhook_secret",
+              "zapier_webhook_secret",
+              "zapier_booking_webhook_url",
+            );
+          } else if (providerConfig.crm_webhook_secret) {
+            clearProviderKeys.push("zapier_webhook_secret");
+          }
+          if (clearProviderKeys.length) payload.provider_config_clear_keys = clearProviderKeys;
+        }
         const portalPassword = document.getElementById("clientPortalPassword").value;
         if (portalPassword.trim()) payload.portal_password = portalPassword;
         if (!payload.business_name) throw new Error("Business name is required.");
@@ -775,15 +800,20 @@
       }
 
       function resetClientProviderFields() {
-        document.getElementById("clientProviderTwilioSid").value = "";
-        document.getElementById("clientProviderTwilioToken").value = "";
-        document.getElementById("clientProviderTwilioFrom").value = "";
-        document.getElementById("clientProviderMetaVerify").value = "";
-        document.getElementById("clientProviderMetaAccess").value = "";
-        document.getElementById("clientProviderMetaVersion").value = "v22.0";
-        document.getElementById("clientProviderLinkedinVerify").value = "";
-        document.getElementById("clientProviderZapierSecret").value = "";
-        document.getElementById("clientProviderZapierBookingWebhookUrl").value = "";
+        [
+          "clientProviderTwilioSid",
+          "clientProviderTwilioToken",
+          "clientProviderTwilioFrom",
+          "clientProviderZapierSecret",
+          "clientProviderZapierBookingSecret",
+          "clientProviderZapierBookingWebhookUrl",
+        ].forEach((id) => {
+          const input = document.getElementById(id);
+          input.value = "";
+          input.disabled = false;
+        });
+        document.getElementById("clientClearTwilioCredentials").checked = false;
+        document.getElementById("clientClearZapierCredentials").checked = false;
         document.getElementById("clientProviderPublicBaseUrl").value = "";
         document.getElementById("clientLanguage").value = "en";
       }
@@ -864,13 +894,26 @@
         document.getElementById("clientProviderTwilioSid").value = provider.twilio_account_sid || "";
         document.getElementById("clientProviderTwilioToken").value = provider.twilio_auth_token || "";
         document.getElementById("clientProviderTwilioFrom").value = provider.twilio_from_number || "";
-        document.getElementById("clientProviderMetaVerify").value = provider.meta_verify_token || "";
-        document.getElementById("clientProviderMetaAccess").value = provider.meta_access_token || "";
-        document.getElementById("clientProviderMetaVersion").value = provider.meta_graph_api_version || "v22.0";
-        document.getElementById("clientProviderLinkedinVerify").value = provider.linkedin_verify_token || "";
-        document.getElementById("clientProviderZapierSecret").value = provider.zapier_webhook_secret || "";
+        document.getElementById("clientProviderZapierSecret").value = "";
+        document.getElementById("clientProviderZapierBookingSecret").value = "";
         document.getElementById("clientProviderZapierBookingWebhookUrl").value = provider.zapier_booking_webhook_url || "";
         document.getElementById("clientProviderPublicBaseUrl").value = provider.public_base_url || "";
+        document.getElementById("clientClearTwilioCredentials").checked = false;
+        document.getElementById("clientClearZapierCredentials").checked = false;
+        document.getElementById("clientProviderTwilioSid").disabled = false;
+        document.getElementById("clientProviderTwilioToken").disabled = false;
+        document.getElementById("clientProviderTwilioFrom").disabled = false;
+        document.getElementById("clientProviderZapierSecret").disabled = false;
+        document.getElementById("clientProviderZapierBookingSecret").disabled = false;
+        document.getElementById("clientProviderZapierBookingWebhookUrl").disabled = false;
+        const providerRuntime = data.provider_runtime || {};
+        document.getElementById("clientProviderTwilioSid").placeholder = providerRuntime.twilio_account_sid_configured ? "Configured; enter to rotate" : "AC...";
+        document.getElementById("clientProviderTwilioToken").placeholder = providerRuntime.twilio_auth_token_configured ? "Configured; enter to rotate" : "token";
+        document.getElementById("clientProviderZapierSecret").placeholder = (
+          providerRuntime.crm_webhook_secret_configured || providerRuntime.zapier_webhook_secret_configured
+        ) ? "Configured; enter to rotate" : "shared secret";
+        document.getElementById("clientProviderZapierBookingSecret").placeholder = providerRuntime.zapier_booking_webhook_secret_configured ? "Configured; enter to rotate" : "signing secret";
+        document.getElementById("clientProviderZapierBookingWebhookUrl").placeholder = providerRuntime.zapier_booking_webhook_url_configured ? "Configured; enter to rotate" : "https://hooks.zapier.com/...";
         document.getElementById("clientHandoffNumber").value = data.client.fallback_handoff_number || "";
         document.getElementById("clientConsentText").value = data.client.consent_text || "";
         document.getElementById("clientPortalDisplayName").value = data.client.portal_display_name || "";
@@ -897,7 +940,7 @@
         },
         channels: {
           title: "Channels and handoff",
-          hint: "Configure client-scoped Twilio, Meta, LinkedIn, Zapier, public URL, consent, and handoff details.",
+          hint: "Configure client-scoped Twilio, Zapier, public URL, consent, and handoff details.",
         },
         agent: {
           title: "Agent guidance",
@@ -947,6 +990,7 @@
         const enabledDays = Array.from({ length: 7 }).filter((_, index) => document.getElementById(`clientCalDay${index}Enabled`)?.checked).length;
         const aiContext = clientWizardFieldValue("clientAiContext", "");
         const questions = clientWizardFieldValue("clientQuestions", "").split("\n").map((item) => item.trim()).filter(Boolean);
+        const providerRuntime = state.clientDetail?.provider_runtime || {};
         const cards = [
           {
             title: "Business",
@@ -961,11 +1005,10 @@
           {
             title: "Channels",
             rows: [
-              ["Twilio", clientWizardStatusLabel(clientWizardFieldValue("clientProviderTwilioSid", ""))],
-              ["Meta", clientWizardStatusLabel(clientWizardFieldValue("clientProviderMetaAccess", ""))],
-              ["LinkedIn", clientWizardStatusLabel(clientWizardFieldValue("clientProviderLinkedinVerify", ""))],
-              ["Zapier", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierSecret", ""))],
-              ["Zapier booking", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierBookingWebhookUrl", ""))],
+              ["Twilio", clientWizardStatusLabel(clientWizardFieldValue("clientProviderTwilioSid", "") || providerRuntime.twilio_account_sid_configured)],
+              ["CRM intake", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierSecret", "") || providerRuntime.crm_webhook_secret_configured || providerRuntime.zapier_webhook_secret_configured)],
+              ["Zapier signing", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierBookingSecret", "") || providerRuntime.zapier_booking_webhook_secret_configured)],
+              ["Zapier booking URL", clientWizardStatusLabel(clientWizardFieldValue("clientProviderZapierBookingWebhookUrl", "") || providerRuntime.zapier_booking_webhook_url_configured)],
               ["Handoff", clientWizardStatusLabel(clientWizardFieldValue("clientHandoffNumber", ""))],
             ],
           },
@@ -1399,19 +1442,14 @@
         const isAdmin = !isClientRole();
         const runtime = state.runtime;
         if (isAdmin && runtime) {
-          const openAiKey = runtime.openai_api_key || "";
           const openAiKeyInput = document.getElementById("settingsOpenAiKey");
-          const openAiCopyButton = document.getElementById("settingsOpenAiCopyButton");
           if (openAiKeyInput) {
-            openAiKeyInput.value = openAiKey;
+            openAiKeyInput.value = "";
             openAiKeyInput.type = "password";
+            openAiKeyInput.placeholder = runtime.openai_api_key_configured ? "Configured; enter to rotate" : "sk-...";
           }
-          if (openAiCopyButton) {
-            openAiCopyButton.disabled = !openAiKey;
-          }
-          setText("settingsOpenAiRevealButton", "Reveal");
-          setText("settingsOpenAiKeyStatus", openAiKey ? "Key loaded for admins." : "No OpenAI key configured.");
-          document.getElementById("settingsOpenAiModel").value = runtime.openai_model || "gpt-4.1-mini";
+          setText("settingsOpenAiKeyStatus", runtime.openai_api_key_configured ? "Key configured. Enter a new value only to rotate it." : "No OpenAI key configured.");
+          document.getElementById("settingsOpenAiModel").value = runtime.openai_model || "gpt-5.4-mini";
           document.getElementById("settingsAiMode").value = "auto";
           document.getElementById("settingsRuntimeSummary").innerHTML = [
             renderBadge(runtime.openai_api_key_configured ? "OpenAI set" : "OpenAI missing", runtime.openai_api_key_configured ? "ok" : "warn"),
@@ -1428,11 +1466,8 @@
           "Automated booking ready",
         ].includes(item.label));
         const webhookData = detail?.webhook_urls || (clientConfig?.client_key ? {
-          meta_verify: `/webhooks/meta/${clientConfig.client_key}`,
-          meta_events: `/webhooks/meta/${clientConfig.client_key}`,
           zapier_events: `/webhooks/zapier/${clientConfig.client_key}`,
           website_form: `/webhooks/form/${clientConfig.client_key}`,
-          linkedin_events: `/webhooks/linkedin/${clientConfig.client_key}`,
           twilio_sms: `/sms/inbound/${clientConfig.client_key}`,
         } : null);
         const selectedRuntime = detail?.provider_runtime || state.ownerWorkspace?.runtime || {};
@@ -1450,7 +1485,7 @@
               },
               {
                 label: "Client channels configured",
-                detail: selectedRuntime.twilio_configured ? "SMS delivery is ready for this business." : "Add Twilio/Zapier/Meta/LinkedIn credentials in Clients > Edit.",
+                detail: selectedRuntime.twilio_configured ? "SMS delivery is ready for this business." : "Add Twilio and optional Zapier credentials in Clients > Edit.",
                 done: Boolean(selectedRuntime.twilio_configured),
               },
               {
@@ -1813,9 +1848,14 @@
             state.ownerWorkspace.knowledge = result;
           }
           renderKnowledgeSettings();
-          const okCount = (result.extraction?.pages || []).filter((page) => page.status === "ok").length;
-          setText("settingsKnowledgeStatus", `Ingested ${okCount}/${urls.length} URLs · ${result.total_chunks || 0} chunks.`);
-          showNotice("Website knowledge ingested.", "ok");
+          if (result.status === "queued") {
+            setText("settingsKnowledgeStatus", `Queued ${urls.length} URL${urls.length === 1 ? "" : "s"}. Use Refresh extraction to see progress.`);
+            showNotice("Website knowledge ingestion queued.", "ok");
+          } else {
+            const okCount = (result.extraction?.pages || []).filter((page) => page.status === "ok").length;
+            setText("settingsKnowledgeStatus", `Ingested ${okCount}/${urls.length} URLs · ${result.total_chunks || 0} chunks.`);
+            showNotice("Website knowledge ingested.", "ok");
+          }
         } catch (error) {
           setText("settingsKnowledgeStatus", `Ingest failed: ${error.message}`);
           showNotice(`Knowledge ingest failed: ${error.message}`, "err");

@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python tests and static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+
+      - name: Set up Node.js for Python UI integration tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend assets for Python UI integration tests
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run high-signal Python static checks
+        run: python -m ruff check --select E9,F63,F7,F82 app scripts evals
+
+      - name: Audit Python dependencies
+        run: python -m pip_audit -r requirements-dev.txt
+
+      - name: Run Python tests
+        env:
+          PYTHONHASHSEED: "0"
+          TZ: UTC
+        run: python -m pytest -q
+
+      - name: Run offline chatbot safety smoke gate
+        env:
+          PYTHONHASHSEED: "0"
+          TZ: UTC
+        run: >-
+          python scripts/run_chatbot_evals.py
+          --agent v3
+          --suite smoke
+          --provider replay
+          --judge off
+          --workers 2
+          --output /tmp/chatbot-evals-smoke
+
+  frontend:
+    name: Frontend checks and production build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies from lockfile
+        run: npm ci
+
+      - name: Type-check frontend
+        run: npm run typecheck
+
+      - name: Run frontend unit tests
+        run: npm run test
+
+      - name: Build production frontend
+        run: npm run build
+
+      - name: Verify FastAPI asset manifest contract
+        run: test -s dist/.vite/manifest.json
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
+
+  migrations:
+    name: PostgreSQL migration graph and drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      AUTO_CREATE_TABLES: "false"
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/highlevel_ci
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: highlevel_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d highlevel_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install migration dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip check
+
+      - name: Require a single migration head
+        run: python scripts/check_migration_heads.py
+
+      - name: Apply all migrations to an empty PostgreSQL database
+        run: python -m alembic upgrade head
+
+      - name: Detect model and migration drift
+        run: python -m alembic check

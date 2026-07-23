@@ -16,7 +16,7 @@ from app.services.stackleads_demo_seed import (
 
 
 def _admin_headers() -> dict[str, str]:
-    return {"X-Admin-Token": "test-admin-token"}
+    return {"X-Admin-Token": "test-admin-token-32-characters-long!"}
 
 
 def test_stackleads_demo_seed_creates_speed_to_lead_showcase(test_context):
@@ -35,7 +35,10 @@ def test_stackleads_demo_seed_creates_speed_to_lead_showcase(test_context):
         assert client is not None
         assert client.business_name == "StackLeads"
         assert client.portal_enabled is True
-        assert client.provider_config["zapier_booking_webhook_url"] == ZAPIER_BOOKING_WEBHOOK_URL
+        if ZAPIER_BOOKING_WEBHOOK_URL:
+            assert client.provider_config["zapier_booking_webhook_url"] == ZAPIER_BOOKING_WEBHOOK_URL
+        else:
+            assert "zapier_booking_webhook_url" not in client.provider_config
         ad_report = client.provider_config["demo_ad_campaign_reports"]
         assert ad_report["platform"] == "Facebook Lead Ads"
         assert len(ad_report["campaigns"]) == 5

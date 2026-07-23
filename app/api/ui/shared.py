@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+import hashlib
+import hmac
+import json
 from pathlib import Path
+import re
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -17,6 +21,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import Settings
 from app.core.deps import get_app_settings, get_booking_service, get_sms_service
+from app.core.security import verify_admin_token
 from app.db.models import (
     AuditLog,
     CalendarBooking,
@@ -30,6 +35,7 @@ from app.db.models import (
     Message,
     MessageAttachment,
     MessageDirection,
+    OutboundRequest,
 )
 from app.db.session import get_db
 from app.services.booking import (
@@ -62,11 +68,18 @@ from app.services.demo_seed import (
     seed_showcase_client_data,
 )
 from app.services.lead_intake import normalize_phone
-from app.services.knowledge import KnowledgeIngestionService, knowledge_payload
-from app.services.inbound_sms import process_inbound_turn
+from app.services.knowledge import knowledge_payload
+from app.services.inbound_sms import process_inbound_turn, safe_agent_diagnostics
 from app.services.llm_agent import build_llm_agent
+from app.services.message_media import refresh_attachment_public_access
 from app.services.lead_summary import build_lead_summary_lines, build_lead_summary_text, normalize_form_answers
-from app.services.portal_auth import issue_portal_token, verify_portal_password, verify_portal_token
+from app.services.portal_auth import issue_portal_token, portal_auth_version, verify_portal_password, verify_portal_token
+from app.services.ui_session_auth import current_ui_session_token, verify_ui_session_token
+from app.services.config_visibility import (
+    browser_safe_booking_config,
+    browser_safe_provider_config,
+    client_provider_configured_flags,
+)
 from app.services.runtime_config import (
     client_runtime_overrides,
     get_effective_runtime_map,
@@ -74,7 +87,6 @@ from app.services.runtime_config import (
     load_runtime_overrides,
 )
 from app.services.sms_service import SMSDeliveryError, SMSService, build_mock_sms_service, build_sms_service
-from app.workers.tasks import _meta_initial_seed_text
 
 _UI_FILE = Path(__file__).resolve().parents[1] / "templates" / "ui.html"
 _WEBHOOK_EVENT_TYPES = {
@@ -97,6 +109,44 @@ _ZAPIER_CONSOLE_EVENTS = {
 _BOOKING_STATES = {ConversationStateEnum.BOOKING_SENT, ConversationStateEnum.BOOKED}
 _CLOSED_STATES = {ConversationStateEnum.BOOKED, ConversationStateEnum.OPTED_OUT}
 _ARCHIVED_TAG = "archived"
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+_CLIENT_VISIBLE_AUDIT_EVENTS = {
+    "internal_note",
+    "crm_stage_changed",
+    "crm_stage_auto_updated",
+    "admin_booking_link_sent",
+    "portal_booking_link_sent",
+    "calendar_booking_offer_sent",
+    "calendar_booking_created",
+    "booking_confirmed",
+    "crm_task_created",
+    "crm_task_completed",
+    "crm_task_reopened",
+    "crm_task_updated",
+    "manual_outbound_sent",
+    "portal_manual_outbound_sent",
+    "agent_paused",
+    "agent_resumed",
+    "agent_reply_suppressed",
+    "ui_sandbox_started",
+    "ui_sandbox_initial_ai_sms",
+    "ui_sandbox_lead_message",
+    "admin_marked_handoff",
+    "portal_marked_handoff",
+    "conversation_archived",
+    "conversation_unarchived",
+}
+_CLIENT_VISIBLE_AUDIT_DECISION_KEYS = {
+    "actor_role",
+    "body",
+    "changed",
+    "new_stage",
+    "note",
+    "previous_stage",
+    "reason",
+    "source",
+    "status",
+}
 
 
 def _booking_ready_detail(client: Client) -> str:
@@ -113,105 +163,109 @@ def _booking_ready_detail(client: Client) -> str:
 
 
 class InternalNoteRequest(BaseModel):
-    note: str
+    note: str = Field(max_length=10_000)
 
 
 class BookingLinkActionRequest(BaseModel):
-    message: str | None = None
+    message: str | None = Field(default=None, max_length=1_600)
 
 
 class HandoffActionRequest(BaseModel):
-    note: str | None = None
+    note: str | None = Field(default=None, max_length=10_000)
 
 
 class ManualMessageRequest(BaseModel):
-    body: str
+    body: str = Field(max_length=1_600)
     pause_agent: bool = False
 
 
 class AgentControlRequest(BaseModel):
     paused: bool
-    reason: str | None = None
-    note: str | None = None
+    reason: str | None = Field(default=None, max_length=500)
+    note: str | None = Field(default=None, max_length=10_000)
 
 
 class SandboxFormAnswer(BaseModel):
-    question: str
-    answer: str
+    question: str = Field(max_length=200)
+    answer: str = Field(max_length=1_000)
 
 
 class OwnerSandboxStartRequest(BaseModel):
-    mode: str = "gpt_only"
-    full_name: str | None = None
-    phone: str | None = None
-    city: str | None = None
-    email: str | None = None
-    form_answers: list[SandboxFormAnswer] = Field(default_factory=list)
+    mode: str = Field(default="gpt_only", max_length=32)
+    full_name: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=32)
+    city: str | None = Field(default=None, max_length=128)
+    email: str | None = Field(default=None, max_length=255)
+    form_answers: list[SandboxFormAnswer] = Field(default_factory=list, max_length=25)
 
 
 class OwnerSandboxMessageRequest(BaseModel):
-    body: str
+    body: str = Field(max_length=2_000)
 
 
 class ClientPortalLoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(max_length=320)
+    password: str = Field(max_length=512)
+
+
+class AdminLoginRequest(BaseModel):
+    admin_token: str = Field(max_length=4_096)
 
 
 class OwnerAIContextUpdateRequest(BaseModel):
-    ai_context: str
-    faq_context: str | None = None
+    ai_context: str = Field(max_length=12_000)
+    faq_context: str | None = Field(default=None, max_length=12_000)
 
 
 class OwnerKnowledgeIngestRequest(BaseModel):
-    urls: list[str] = Field(default_factory=list)
+    urls: list[str] = Field(default_factory=list, max_length=12)
     replace: bool = True
 
 
 class OwnerCalendarAvailabilityRow(BaseModel):
-    day: int
-    start: str
-    end: str
+    day: int = Field(ge=0, le=6)
+    start: str = Field(max_length=16)
+    end: str = Field(max_length=16)
     enabled: bool = True
 
 
 class OwnerCalendarUpdateRequest(BaseModel):
-    slot_minutes: int = 30
-    notice_minutes: int = 120
-    horizon_days: int = 14
-    availability: list[OwnerCalendarAvailabilityRow] = Field(default_factory=list)
+    slot_minutes: int = Field(default=30, ge=5, le=480)
+    notice_minutes: int = Field(default=120, ge=0, le=100_800)
+    horizon_days: int = Field(default=14, ge=1, le=365)
+    availability: list[OwnerCalendarAvailabilityRow] = Field(default_factory=list, max_length=7)
 
 
 class CRMStageUpdateRequest(BaseModel):
-    stage: str
+    stage: str = Field(max_length=64)
 
 
 class ManualLeadCreateRequest(BaseModel):
-    client_key: str | None = None
-    full_name: str
-    phone: str | None = None
-    email: str | None = None
-    city: str | None = None
-    owner_name: str | None = None
-    crm_stage: str | None = None
-    notes: str | None = None
+    client_key: str | None = Field(default=None, max_length=128)
+    full_name: str = Field(max_length=255)
+    phone: str | None = Field(default=None, max_length=32)
+    email: str | None = Field(default=None, max_length=320)
+    city: str | None = Field(default=None, max_length=128)
+    owner_name: str | None = Field(default=None, max_length=255)
+    crm_stage: str | None = Field(default=None, max_length=64)
+    notes: str | None = Field(default=None, max_length=10_000)
 
 
 class CRMTagRequest(BaseModel):
-    tag: str
+    tag: str = Field(max_length=64)
 
 
 class CRMTaskCreateRequest(BaseModel):
-    title: str
-    description: str | None = None
-    due_date: str | None = None
+    title: str = Field(max_length=255)
+    description: str | None = Field(default=None, max_length=10_000)
+    due_date: str | None = Field(default=None, max_length=32)
 
 
 class CRMTaskUpdateRequest(BaseModel):
-    title: str | None = None
-    description: str | None = None
-    due_date: str | None = None
-    status: str | None = None
+    title: str | None = Field(default=None, max_length=255)
+    description: str | None = Field(default=None, max_length=10_000)
+    due_date: str | None = Field(default=None, max_length=32)
+    status: str | None = Field(default=None, max_length=32)
 
 
 class ConversationArchiveRequest(BaseModel):
@@ -219,20 +273,20 @@ class ConversationArchiveRequest(BaseModel):
 
 
 class ManualMeetingLeadCreateRequest(BaseModel):
-    full_name: str
-    phone: str | None = None
-    email: str | None = None
-    city: str | None = None
+    full_name: str = Field(max_length=255)
+    phone: str | None = Field(default=None, max_length=32)
+    email: str | None = Field(default=None, max_length=320)
+    city: str | None = Field(default=None, max_length=128)
 
 
 class ManualMeetingCreateRequest(BaseModel):
     lead_id: int | None = None
     new_lead: ManualMeetingLeadCreateRequest | None = None
-    start_at: str
+    start_at: str = Field(max_length=64)
     duration_minutes: int = Field(default=30, ge=5, le=480)
-    timezone: str
-    title: str
-    notes: str | None = None
+    timezone: str = Field(max_length=64)
+    title: str = Field(max_length=255)
+    notes: str | None = Field(default=None, max_length=10_000)
     create_conference_link: bool = True
     send_email_invite: bool = True
     include_meeting_link: bool = True
@@ -240,7 +294,7 @@ class ManualMeetingCreateRequest(BaseModel):
 
 
 class ManualMeetingStatusRequest(BaseModel):
-    status: str
+    status: str = Field(max_length=32)
 
 
 @dataclass(frozen=True)
@@ -249,8 +303,155 @@ class UIActor:
     client: Client | None = None
 
 
+@dataclass(frozen=True)
+class OutboundRequestReservation:
+    request_id: int | None = None
+    cached_response: dict[str, Any] | None = None
+
+
+def _reserve_outbound_request(
+    *,
+    db: Session,
+    lead: Lead,
+    idempotency_key: str | None,
+    request_kind: str,
+    request_payload: dict[str, Any],
+) -> OutboundRequestReservation:
+    key = str(idempotency_key or "").strip()
+    if not key:
+        return OutboundRequestReservation()
+    if not _IDEMPOTENCY_KEY_RE.fullmatch(key):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Idempotency-Key must be 8-128 characters using letters, numbers, '.', '_', ':' or '-'.",
+        )
+
+    fingerprint = hashlib.sha256(
+        json.dumps(request_payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+    def existing_result(existing: OutboundRequest) -> OutboundRequestReservation:
+        if existing.request_kind != request_kind or existing.request_fingerprint != fingerprint:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Idempotency-Key was already used for a different outbound request.",
+            )
+        if existing.status == "completed":
+            return OutboundRequestReservation(
+                request_id=existing.id,
+                cached_response=dict(existing.response_json or {}),
+            )
+        detail = (
+            "The previous outbound attempt failed or its delivery result is unknown; verify the conversation before retrying."
+            if existing.status in {"failed", "ambiguous"}
+            else "An outbound request with this Idempotency-Key is already in progress."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+            headers={"Retry-After": "2"} if existing.status == "pending" else None,
+        )
+
+    existing = db.scalar(
+        select(OutboundRequest).where(
+            OutboundRequest.client_id == lead.client_id,
+            OutboundRequest.idempotency_key == key,
+        )
+    )
+    if existing is not None:
+        return existing_result(existing)
+
+    reservation = OutboundRequest(
+        client_id=lead.client_id,
+        lead_id=lead.id,
+        idempotency_key=key,
+        request_kind=request_kind,
+        request_fingerprint=fingerprint,
+        status="pending",
+    )
+    db.add(reservation)
+    try:
+        # Commit the reservation before contacting the provider. If the process
+        # dies after Twilio accepts the message, a retry is blocked instead of
+        # sending a duplicate.
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(
+            select(OutboundRequest).where(
+                OutboundRequest.client_id == lead.client_id,
+                OutboundRequest.idempotency_key == key,
+            )
+        )
+        if existing is None:
+            raise
+        return existing_result(existing)
+    db.refresh(reservation)
+    return OutboundRequestReservation(request_id=reservation.id)
+
+
+def _complete_outbound_request(
+    db: Session,
+    reservation: OutboundRequestReservation,
+    *,
+    provider_message_sid: str,
+    response: dict[str, Any],
+) -> None:
+    if reservation.request_id is None:
+        return
+    record = db.get(OutboundRequest, reservation.request_id)
+    if record is None:
+        raise RuntimeError("Outbound idempotency reservation disappeared")
+    record.status = "completed"
+    record.provider_message_sid = provider_message_sid
+    record.response_json = response
+    record.error_detail = ""
+    record.updated_at = datetime.now(timezone.utc)
+
+
+def _fail_outbound_request(
+    db: Session,
+    reservation: OutboundRequestReservation,
+    *,
+    detail: Any,
+) -> None:
+    if reservation.request_id is None:
+        return
+    db.rollback()
+    record = db.get(OutboundRequest, reservation.request_id)
+    if record is None:
+        return
+    record.status = "failed"
+    record.error_detail = str(detail or "Outbound delivery failed")[:500]
+    record.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+def _visible_audit_logs(actor: UIActor, logs: list[AuditLog]) -> list[AuditLog]:
+    if actor.role == "admin":
+        return logs
+    return [log for log in logs if log.event_type in _CLIENT_VISIBLE_AUDIT_EVENTS]
+
+
+def _audit_decision_for_actor(actor: UIActor, log: AuditLog) -> dict[str, Any]:
+    decision = log.decision if isinstance(log.decision, dict) else {}
+    if actor.role == "admin":
+        return decision
+    return {key: decision[key] for key in _CLIENT_VISIBLE_AUDIT_DECISION_KEYS if key in decision}
+
+
+def _event_metadata_for_actor(actor: UIActor, metadata: dict[str, Any] | None) -> dict[str, Any]:
+    values = metadata if isinstance(metadata, dict) else {}
+    if actor.role == "admin":
+        return values
+    return {key: values[key] for key in ("actor_role", "reason", "source") if key in values}
+
+
 def _require_admin(settings: Settings, admin_token: str | None) -> None:
-    if admin_token != settings.admin_token:
+    cookie_session = verify_ui_session_token(settings, current_ui_session_token())
+    if not verify_admin_token(admin_token, settings.admin_token) and not (
+        cookie_session is not None and cookie_session.role == "admin"
+    ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
 
 
@@ -261,7 +462,7 @@ def _resolve_ui_actor(
     admin_token: str | None,
     portal_token: str | None,
 ) -> UIActor:
-    if admin_token == settings.admin_token:
+    if verify_admin_token(admin_token, settings.admin_token):
         return UIActor(role="admin")
 
     if portal_token:
@@ -274,6 +475,31 @@ def _resolve_ui_actor(
         if not client.portal_enabled or not client.portal_password_hash:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Portal access is disabled")
         if client.client_key != token_payload.client_key or client.portal_email.strip().lower() != token_payload.email:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Portal session is stale")
+        current_auth_version = portal_auth_version(client.portal_password_hash)
+        if not current_auth_version or not hmac.compare_digest(token_payload.auth_version, current_auth_version):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Portal session is stale")
+        return UIActor(role="client", client=client)
+
+    cookie_session = verify_ui_session_token(settings, current_ui_session_token())
+    if cookie_session is not None and cookie_session.role == "admin":
+        return UIActor(role="admin")
+    if cookie_session is not None and cookie_session.role == "client":
+        client = db.scalar(select(Client).where(Client.id == cookie_session.client_id))
+        if client is None or not client.is_active:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Portal client is unavailable")
+        if not client.portal_enabled or not client.portal_password_hash:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Portal access is disabled")
+        if (
+            client.client_key != cookie_session.client_key
+            or client.portal_email.strip().lower() != cookie_session.email
+        ):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Portal session is stale")
+        current_auth_version = portal_auth_version(client.portal_password_hash)
+        if not current_auth_version or not hmac.compare_digest(
+            cookie_session.auth_version,
+            current_auth_version,
+        ):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Portal session is stale")
         return UIActor(role="client", client=client)
 
@@ -403,11 +629,8 @@ def _serialize_calendar_booking(booking: CalendarBooking, lead: Lead | None = No
 
 def _webhook_urls(client_key: str) -> dict[str, str]:
     return {
-        "meta_verify": f"/webhooks/meta/{client_key}",
-        "meta_events": f"/webhooks/meta/{client_key}",
         "zapier_events": f"/webhooks/zapier/{client_key}",
         "website_form": f"/webhooks/form/{client_key}",
-        "linkedin_events": f"/webhooks/linkedin/{client_key}",
         "twilio_sms": f"/sms/inbound/{client_key}",
     }
 
@@ -426,7 +649,7 @@ def _effective_runtime(settings: Settings, db: Session, client: Client | None = 
 def _runtime_summary(settings: Settings, db: Session, client: Client | None = None) -> dict[str, Any]:
     effective = _effective_runtime(settings, db, client=client)
     has_client_overrides = bool(client_runtime_overrides(client))
-    return {
+    summary = {
         "twilio_configured": bool(
             effective["twilio_account_sid"] and effective["twilio_auth_token"] and effective["twilio_from_number"]
         ),
@@ -435,12 +658,11 @@ def _runtime_summary(settings: Settings, db: Session, client: Client | None = No
         "openai_model": effective["openai_model"],
         "ai_provider_mode": effective["ai_provider_mode"],
         "public_base_url": effective["public_base_url"],
-        "meta_verify_token_configured": bool(effective["meta_verify_token"]),
-        "meta_access_token_configured": bool(effective["meta_access_token"]),
-        "linkedin_verify_token_configured": bool(effective["linkedin_verify_token"]),
         "source": "client" if has_client_overrides else "global",
         "has_client_overrides": has_client_overrides,
     }
+    summary.update(client_provider_configured_flags(client.provider_config if client is not None else None))
+    return summary
 
 
 def _sms_service_for_client(
@@ -451,9 +673,17 @@ def _sms_service_for_client(
     client: Client | None,
 ) -> SMSService:
     provider_overrides = client_runtime_overrides(client)
-    if not all(provider_overrides.get(key) for key in ("twilio_account_sid", "twilio_auth_token", "twilio_from_number")):
+    twilio_keys = ("twilio_account_sid", "twilio_auth_token", "twilio_from_number")
+    has_twilio_override = any(provider_overrides.get(key) for key in twilio_keys)
+    has_callback_override = bool(provider_overrides.get("public_base_url")) and (
+        getattr(sms_service, "provider_kind", "") == "twilio"
+    )
+    if not has_twilio_override and not has_callback_override:
         return sms_service
-    return build_sms_service(settings, runtime_overrides=_effective_runtime(settings, db, client=client))
+    effective = _effective_runtime(settings, db, client=client)
+    if not all(effective.get(key) for key in twilio_keys):
+        return sms_service
+    return build_sms_service(settings, runtime_overrides=effective)
 
 
 def _lead_display_name(lead: Lead) -> str:
@@ -716,8 +946,22 @@ def _attachments_by_message(db: Session, message_ids: list[int]) -> dict[int, li
         .order_by(MessageAttachment.created_at.asc(), MessageAttachment.id.asc())
     ).all()
     grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    refreshed = False
+    refresh_before = datetime.now(timezone.utc) + timedelta(minutes=2)
     for attachment in rows:
+        expires_at = attachment.public_expires_at
+        if expires_at is None:
+            refresh_attachment_public_access(attachment)
+            refreshed = True
+        else:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= refresh_before:
+                refresh_attachment_public_access(attachment)
+                refreshed = True
         grouped[attachment.message_id].append(_serialize_attachment(attachment))
+    if refreshed:
+        db.commit()
     return grouped
 
 
@@ -859,6 +1103,17 @@ def _manual_delivery_mode(settings: Settings, db: Session, client: Client | None
     return "twilio" if _runtime_summary(settings, db, client=client)["twilio_configured"] else "mock"
 
 
+def _validate_outbound_message(lead: Lead, body: str) -> str:
+    cleaned_body = body.strip()
+    if not cleaned_body:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Message body is required")
+    if lead.opted_out:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lead has opted out")
+    if not lead.phone:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lead has no phone number")
+    return cleaned_body
+
+
 def _send_outbound_message(
     *,
     db: Session,
@@ -871,13 +1126,7 @@ def _send_outbound_message(
     audit_decision: dict[str, Any] | None = None,
     advance_new_to_greeted: bool = False,
 ) -> tuple[str, ConversationStateEnum]:
-    cleaned_body = body.strip()
-    if not cleaned_body:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Message body is required")
-    if lead.opted_out:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lead has opted out")
-    if not lead.phone:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lead has no phone number")
+    cleaned_body = _validate_outbound_message(lead, body)
 
     provider_sid = _send_sms_or_http_error(sms_service=sms_service, to_number=lead.phone, body=cleaned_body)
     db.add(
@@ -1077,8 +1326,8 @@ def _client_preview_payload(db: Session, settings: Settings, client: Client) -> 
             "qualification_questions": client.qualification_questions,
             "booking_url": client.booking_url,
             "booking_mode": client.booking_mode,
-            "booking_config": client.booking_config,
-            "provider_config": client.provider_config,
+            "booking_config": browser_safe_booking_config(client.booking_config),
+            "provider_config": browser_safe_provider_config(client.provider_config),
             "fallback_handoff_number": client.fallback_handoff_number,
             "consent_text": client.consent_text,
             "portal_display_name": client.portal_display_name,
@@ -1132,8 +1381,8 @@ def _owner_workspace_payload(db: Session, settings: Settings, client: Client) ->
             "business_name": client.business_name,
             "booking_url": client.booking_url,
             "booking_mode": client.booking_mode,
-            "booking_config": client.booking_config,
-            "provider_config": client.provider_config,
+            "booking_config": browser_safe_booking_config(client.booking_config),
+            "provider_config": browser_safe_provider_config(client.provider_config),
             "fallback_handoff_number": client.fallback_handoff_number,
             "timezone": client.timezone,
             "tone": client.tone,

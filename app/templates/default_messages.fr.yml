@@ -2,6 +2,7 @@ initial_sms: "Bonjour {first_name}, merci d’avoir contacté {business_name}. J
 after_hours: "Merci d’avoir écrit à {business_name}. Nous sommes hors ligne pour le moment et nous vous répondrons pendant les heures d’ouverture."
 follow_up: "Petit suivi de {business_name}: si vous êtes prêt, vous pouvez choisir un moment ici {booking_url}"
 stop_confirmation: "Vous êtes désabonné et ne recevrez plus de messages. Répondez START pour vous réabonner."
+start_confirmation: "Vous êtes réabonné. Répondez STOP en tout temps pour vous désabonner."
 help_response: "Merci d’avoir contacté {business_name}. Répondez STOP pour vous désabonner. Dites-nous votre objectif et nous pouvons aider à planifier un appel."
 booking_prompt: "Parfait. Choisissez un moment qui vous convient: {booking_url}"
 booked_confirmation: "Parfait, c’est confirmé. Au plaisir de vous parler bientôt."

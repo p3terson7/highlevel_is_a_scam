@@ -165,8 +165,16 @@ def ui_crm_create_lead(
         city=(payload.city or "").strip(),
         owner_name=(payload.owner_name or "").strip(),
         form_answers={},
-        raw_payload={"source": "ui_manual_lead", "created_by": actor.role},
-        consented=True,
+        raw_payload={
+            "source": "ui_manual_lead",
+            "created_by": actor.role,
+            "consent_evidence": {
+                "granted": False,
+                "status": "not_provided",
+                "source_fields": [],
+            },
+        },
+        consented=False,
         opted_out=False,
         conversation_state=ConversationStateEnum.NEW,
         crm_stage=crm_stage,
@@ -231,6 +239,7 @@ def ui_crm_lead_detail(
         .where(AuditLog.lead_id == lead.id)
         .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
     ).all()
+    visible_audit_logs = _visible_audit_logs(actor, list(audit_logs))
     tasks = db.scalars(
         select(LeadTask)
         .where(LeadTask.lead_id == lead.id)
@@ -261,7 +270,7 @@ def ui_crm_lead_detail(
                 "reason": state_row.reason,
             }
         )
-    for log in audit_logs:
+    for log in visible_audit_logs:
         if log.event_type in {"crm_stage_changed", "crm_stage_auto_updated"}:
             timeline.append(
                 {
@@ -277,7 +286,7 @@ def ui_crm_lead_detail(
                     "type": "booking_event",
                     "created_at": log.created_at.isoformat(),
                     "label": log.event_type,
-                    "decision": log.decision,
+                    "decision": _audit_decision_for_actor(actor, log),
                 }
             )
         elif log.event_type == "internal_note":
@@ -374,9 +383,9 @@ def ui_crm_lead_detail(
                 "id": log.id,
                 "event_type": log.event_type,
                 "created_at": log.created_at.isoformat(),
-                "decision": log.decision,
+                "decision": _audit_decision_for_actor(actor, log),
             }
-            for log in audit_logs[-25:]
+            for log in visible_audit_logs[-25:]
         ],
         "stages": CRM_STAGES,
     }

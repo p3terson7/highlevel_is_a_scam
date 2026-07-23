@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "id": "fr_language_match",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["french", "fr-CA", "language-match", "support-first"],
+  "risk": "medium",
+  "tenant": {
+    "business_name": "Atelier Lumière Rénovation",
+    "tone": "chaleureux, clair et professionnel",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Quel type de rénovation envisagez-vous?",
+      "Quel est votre échéancier idéal?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "Les estimations initiales sont gratuites et restent valides pendant 30 jours.",
+    "ai_context": "Répondre dans la langue utilisée par le prospect et expliquer les services avant de proposer une rencontre."
+  },
+  "lead": {
+    "full_name": "Camille Exemple",
+    "email": "camille.exemple@example.test",
+    "phone": "+15145550102",
+    "city": "Montréal",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "service_interest": "Rénovation de salle de bain"
+    },
+    "raw_payload": {
+      "lead_language": "fr"
+    }
+  },
+  "initial_history": [],
+  "turns": [
+    {
+      "inbound": "Bonjour, est-ce que votre estimation est gratuite et combien de temps reste-t-elle valide?",
+      "replay_outputs": [
+        {
+          "reply_text": "Oui. L'estimation initiale est gratuite et elle reste valide pendant 30 jours.",
+          "next_state": "QUALIFYING",
+          "conversation_act": "answer_question",
+          "lead_intent": "question_sur_estimation",
+          "confidence": 0.99,
+          "reasoning_summary": "La personne demande deux détails factuels disponibles dans le contexte de l'entreprise.",
+          "uses_knowledge_context": true,
+          "collected_fields": {
+            "service_needed": "Rénovation de salle de bain",
+            "timeline": null,
+            "locations": "Montréal",
+            "decision_makers": null,
+            "urgency_driver": null,
+            "booking_intent_locked": false
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "QUALIFYING",
+        "expected_action": "none",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["answer_question"],
+        "expected_next_states": ["QUALIFYING"],
+        "must_include": ["gratuite", "30 jours"],
+        "must_not_include": ["appel de consultation", "organiser ça"],
+        "required_facts": [
+          "L'estimation initiale est gratuite.",
+          "L'estimation reste valide pendant 30 jours."
+        ],
+        "forbidden_claims": [
+          "L'estimation est payante.",
+          "L'estimation n'expire jamais."
+        ],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 320,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Répondre entièrement en français naturel.",
+          "Ne pas proposer de rencontre avant de répondre."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}

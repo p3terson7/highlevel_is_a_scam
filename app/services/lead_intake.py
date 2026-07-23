@@ -4,15 +4,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.logging import get_logger
 from app.db.models import Client, Lead, LeadSource
 from app.services.lead_summary import filter_question_form_answers, normalize_form_answers
-
-logger = get_logger(__name__)
 
 _IDENTITY_CONTEXT_KEYS = (
     "id",
@@ -50,6 +46,18 @@ _EXTERNAL_ID_KEYS = (
     "lead_gen_form_response",
 )
 
+_CONSENT_FIELD_KEYS = (
+    "sms_consent",
+    "consent_sms",
+    "consent_to_sms",
+    "sms_opt_in",
+    "contact_by_sms",
+)
+_CONSENT_TRUE_VALUES = {"1", "true", "yes", "on", "accepted", "checked", "opted_in"}
+_CONSENT_FALSE_VALUES = {"0", "false", "no", "off", "declined", "unchecked", "not_granted"}
+MAX_WEBHOOK_LEADS_PER_REQUEST = 10
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 @dataclass
 class NormalizedLead:
@@ -60,7 +68,73 @@ class NormalizedLead:
     city: str
     form_answers: dict[str, Any]
     raw_payload: dict[str, Any]
-    consented: bool = True
+    consented: bool = False
+
+
+def _consent_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in _CONSENT_TRUE_VALUES:
+        return True
+    if normalized in _CONSENT_FALSE_VALUES:
+        return False
+    return None
+
+
+def _consent_evidence(*sources: Any) -> tuple[bool, dict[str, Any]]:
+    signals: list[tuple[str, bool]] = []
+    metadata: dict[str, str] = {}
+
+    for source_index, source in enumerate(sources):
+        if not isinstance(source, dict):
+            continue
+
+        nested = source.get("consent")
+        if isinstance(nested, dict):
+            for key in ("sms", *_CONSENT_FIELD_KEYS):
+                if key not in nested:
+                    continue
+                signal = _consent_value(nested.get(key))
+                if signal is not None:
+                    signals.append((f"source_{source_index}.consent.{key}", signal))
+            for key in ("captured_at", "text", "method", "form"):
+                value = str(nested.get(key) or "").strip()
+                if value and key not in metadata:
+                    metadata[key] = value[:512]
+
+        for key in _CONSENT_FIELD_KEYS:
+            if key not in source:
+                continue
+            signal = _consent_value(source.get(key))
+            if signal is not None:
+                signals.append((f"source_{source_index}.{key}", signal))
+
+    if not signals:
+        return False, {"granted": False, "status": "not_provided", "source_fields": []}
+
+    granted = all(signal for _, signal in signals)
+    evidence: dict[str, Any] = {
+        "granted": granted,
+        "status": "granted" if granted else "declined_or_conflicting",
+        "source_fields": [key for key, _ in signals][:12],
+    }
+    evidence.update(metadata)
+    return granted, evidence
+
+
+def _raw_payload_with_consent(payload: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
+    return {**payload, "consent_evidence": evidence}
+
+
+def _question_form_answers(raw_answers: dict[str, Any]) -> dict[str, Any]:
+    answers = filter_question_form_answers(raw_answers)
+    for key in _CONSENT_FIELD_KEYS:
+        answers.pop(key, None)
+    answers.pop("consent", None)
+    return answers
 
 
 def normalize_phone(raw_phone: str | None) -> str:
@@ -163,62 +237,8 @@ def _meta_field_data_to_dict(field_data: Any) -> dict[str, Any]:
     return output
 
 
-def fetch_meta_lead_details(
-    leadgen_id: str,
-    client: Client,
-    *,
-    access_token: str = "",
-    api_version: str = "v22.0",
-    timeout_seconds: int = 20,
-) -> dict[str, Any]:
-    if not leadgen_id or not access_token:
-        return {}
-
-    clean_version = (api_version or "v22.0").strip().lstrip("/")
-    url = f"https://graph.facebook.com/{clean_version}/{leadgen_id}"
-    try:
-        response = httpx.get(
-            url,
-            params={
-                "fields": "field_data,created_time",
-                "access_token": access_token,
-            },
-            timeout=timeout_seconds,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            return {}
-        return payload
-    except Exception as exc:
-        logger.warning(
-            "meta_lead_details_fetch_failed",
-            extra={
-                "client_key": client.client_key,
-                "leadgen_id": leadgen_id,
-                "error": str(exc),
-            },
-        )
-        return {}
-
-
-def fetch_linkedin_lead_details(linkedin_lead_id: str, client: Client) -> dict[str, Any]:
-    """
-    Placeholder for a real LinkedIn Lead Gen API call.
-    In production, fetch full lead details when notifications only include IDs.
-    """
-    _ = client
-    _ = linkedin_lead_id
-    return {}
-
-
 def normalize_meta_payload(
     payload: dict[str, Any],
-    client: Client,
-    *,
-    access_token: str = "",
-    api_version: str = "v22.0",
-    timeout_seconds: int = 20,
 ) -> list[NormalizedLead]:
     candidates: list[NormalizedLead] = []
 
@@ -230,6 +250,7 @@ def normalize_meta_payload(
         form_answers = normalize_form_answers(form_answers)
         identity = _identity_context(form_answers, lead_payload, payload)
         name, phone, email, city = _extract_common_fields(identity)
+        consented, consent_evidence = _consent_evidence(lead_payload, payload, form_answers)
         candidates.append(
             NormalizedLead(
                 external_lead_id=_extract_external_id(lead_payload, payload, form_answers),
@@ -237,9 +258,9 @@ def normalize_meta_payload(
                 phone=phone,
                 email=email,
                 city=city,
-                form_answers=filter_question_form_answers(form_answers),
-                raw_payload=lead_payload,
-                consented=True,
+                form_answers=_question_form_answers(form_answers),
+                raw_payload=_raw_payload_with_consent(lead_payload, consent_evidence),
+                consented=consented,
             )
         )
 
@@ -252,21 +273,11 @@ def normalize_meta_payload(
             leadgen_id = str(value.get("leadgen_id") or value.get("lead_id") or "").strip()
             form_answers = _meta_field_data_to_dict(value.get("field_data"))
 
-            # If webhook only includes lead ID, this is where a real API fetch is plugged in.
-            if not form_answers and leadgen_id:
-                fetched = fetch_meta_lead_details(
-                    leadgen_id,
-                    client,
-                    access_token=access_token,
-                    api_version=api_version,
-                    timeout_seconds=timeout_seconds,
-                )
-                form_answers = _meta_field_data_to_dict(fetched.get("field_data"))
-                value = {**value, **fetched}
             form_answers = normalize_form_answers(form_answers)
 
             identity = _identity_context(form_answers, value)
             name, phone, email, city = _extract_common_fields(identity)
+            consented, consent_evidence = _consent_evidence(value, payload, form_answers)
             candidates.append(
                 NormalizedLead(
                     external_lead_id=leadgen_id or None,
@@ -274,9 +285,9 @@ def normalize_meta_payload(
                     phone=phone,
                     email=email,
                     city=city,
-                    form_answers=filter_question_form_answers(form_answers),
-                    raw_payload=value,
-                    consented=True,
+                    form_answers=_question_form_answers(form_answers),
+                    raw_payload=_raw_payload_with_consent(value, consent_evidence),
+                    consented=consented,
                 )
             )
 
@@ -290,6 +301,7 @@ def normalize_meta_payload(
             form_answers = normalize_form_answers(form_answers)
             identity = _identity_context(form_answers, item)
             name, phone, email, city = _extract_common_fields(identity)
+            consented, consent_evidence = _consent_evidence(item, payload, form_answers)
             candidates.append(
                 NormalizedLead(
                     external_lead_id=_extract_external_id(item, form_answers),
@@ -297,16 +309,16 @@ def normalize_meta_payload(
                     phone=phone,
                     email=email,
                     city=city,
-                    form_answers=filter_question_form_answers(form_answers),
-                    raw_payload=item,
-                    consented=True,
+                    form_answers=_question_form_answers(form_answers),
+                    raw_payload=_raw_payload_with_consent(item, consent_evidence),
+                    consented=consented,
                 )
             )
 
     return candidates
 
 
-def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[NormalizedLead]:
+def normalize_linkedin_payload(payload: dict[str, Any]) -> list[NormalizedLead]:
     candidates: list[NormalizedLead] = []
 
     elements = payload.get("elements", []) if isinstance(payload.get("elements"), list) else []
@@ -324,10 +336,6 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
         if not isinstance(lead_data, dict):
             lead_data = element.get("formResponse") if isinstance(element.get("formResponse"), dict) else {}
 
-        if not lead_data and lead_id:
-            # Plug LinkedIn lead fetch here when notification contains ID only.
-            lead_data = fetch_linkedin_lead_details(lead_id, client)
-
         answers = lead_data.get("form_answers", lead_data)
         if not isinstance(answers, dict):
             answers = {}
@@ -335,6 +343,7 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
 
         identity = _identity_context(answers, lead_data, element)
         name, phone, email, city = _extract_common_fields(identity)
+        consented, consent_evidence = _consent_evidence(lead_data, element, payload, answers)
         candidates.append(
             NormalizedLead(
                 external_lead_id=lead_id or _extract_external_id(lead_data, answers),
@@ -342,9 +351,9 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
                 phone=phone,
                 email=email,
                 city=city,
-                form_answers=filter_question_form_answers(answers),
-                raw_payload=element,
-                consented=True,
+                form_answers=_question_form_answers(answers),
+                raw_payload=_raw_payload_with_consent(element, consent_evidence),
+                consented=consented,
             )
         )
 
@@ -356,6 +365,7 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
         answers = normalize_form_answers(answers)
         identity = _identity_context(answers, lead_data, payload)
         name, phone, email, city = _extract_common_fields(identity)
+        consented, consent_evidence = _consent_evidence(lead_data, payload, answers)
         candidates.append(
             NormalizedLead(
                 external_lead_id=_extract_external_id(lead_data, payload, answers),
@@ -363,9 +373,9 @@ def normalize_linkedin_payload(payload: dict[str, Any], client: Client) -> list[
                 phone=phone,
                 email=email,
                 city=city,
-                form_answers=filter_question_form_answers(answers),
-                raw_payload=lead_data,
-                consented=True,
+                form_answers=_question_form_answers(answers),
+                raw_payload=_raw_payload_with_consent(lead_data, consent_evidence),
+                consented=consented,
             )
         )
 
@@ -382,6 +392,7 @@ def normalize_simple_payload(payload: dict[str, Any]) -> list[NormalizedLead]:
     answers = normalize_form_answers(answers)
     identity = _identity_context(answers, lead_data, payload)
     name, phone, email, city = _extract_common_fields(identity)
+    consented, consent_evidence = _consent_evidence(lead_data, payload, answers)
     return [
         NormalizedLead(
             external_lead_id=_extract_external_id(lead_data, payload, answers),
@@ -389,9 +400,9 @@ def normalize_simple_payload(payload: dict[str, Any]) -> list[NormalizedLead]:
             phone=phone,
             email=email,
             city=city,
-            form_answers=filter_question_form_answers(answers),
-            raw_payload=lead_data,
-            consented=True,
+            form_answers=_question_form_answers(answers),
+            raw_payload=_raw_payload_with_consent(lead_data, consent_evidence),
+            consented=consented,
         )
     ]
 
@@ -399,25 +410,49 @@ def normalize_simple_payload(payload: dict[str, Any]) -> list[NormalizedLead]:
 def normalize_webhook_payload(
     source: str,
     payload: dict[str, Any],
-    client: Client,
-    *,
-    meta_access_token: str = "",
-    meta_api_version: str = "v22.0",
-    request_timeout_seconds: int = 20,
 ) -> list[NormalizedLead]:
     if source == LeadSource.META.value:
-        return normalize_meta_payload(
-            payload,
-            client,
-            access_token=meta_access_token,
-            api_version=meta_api_version,
-            timeout_seconds=request_timeout_seconds,
-        )
+        return normalize_meta_payload(payload)
     if source == LeadSource.LINKEDIN.value:
-        return normalize_linkedin_payload(payload, client)
+        return normalize_linkedin_payload(payload)
     if source == LeadSource.MANUAL.value:
         return normalize_simple_payload(payload)
     return []
+
+
+def validate_webhook_candidates(candidates: list[NormalizedLead]) -> dict[str, int]:
+    if not candidates:
+        raise ValueError("Payload does not contain a lead")
+    if len(candidates) > MAX_WEBHOOK_LEADS_PER_REQUEST:
+        raise ValueError(f"Payload exceeds the {MAX_WEBHOOK_LEADS_PER_REQUEST}-lead batch limit")
+
+    limits = {
+        "external_lead_id": 255,
+        "full_name": 255,
+        "phone": 32,
+        "email": 255,
+        "city": 128,
+    }
+    for index, candidate in enumerate(candidates):
+        for field, limit in limits.items():
+            value = getattr(candidate, field)
+            if value is not None and len(str(value)) > limit:
+                raise ValueError(f"Lead {index + 1} field '{field}' exceeds {limit} characters")
+
+        phone_digits = re.sub(r"\D", "", candidate.phone)
+        phone_valid = not candidate.phone or 8 <= len(phone_digits) <= 15
+        email_valid = not candidate.email or bool(_EMAIL_RE.fullmatch(candidate.email))
+        if not phone_valid:
+            raise ValueError(f"Lead {index + 1} has an invalid phone number")
+        if not email_valid:
+            raise ValueError(f"Lead {index + 1} has an invalid email address")
+        if not candidate.phone and not candidate.email:
+            raise ValueError(f"Lead {index + 1} must include a phone number or email address")
+
+    return {
+        "candidate_count": len(candidates),
+        "consented_count": sum(1 for candidate in candidates if candidate.consented),
+    }
 
 
 def _source_enum(source: str) -> LeadSource:
@@ -452,6 +487,17 @@ def upsert_lead(
             .limit(1)
         )
 
+    if lead is None and normalized.email:
+        lead = db.scalar(
+            select(Lead)
+            .where(
+                Lead.client_id == client.id,
+                Lead.email == normalized.email,
+            )
+            .order_by(Lead.created_at.desc())
+            .limit(1)
+        )
+
     if lead is None:
         lead = Lead(
             client_id=client.id,
@@ -480,7 +526,21 @@ def upsert_lead(
             lead.city = normalized.city
 
         lead.form_answers = {**(lead.form_answers or {}), **(normalized.form_answers or {})}
-        lead.raw_payload = normalized.raw_payload or lead.raw_payload
+        existing_raw_payload = dict(lead.raw_payload or {})
+        incoming_raw_payload = dict(normalized.raw_payload or {})
+        incoming_consent = incoming_raw_payload.get("consent_evidence")
+        incoming_consent_status = (
+            str(incoming_consent.get("status") or "")
+            if isinstance(incoming_consent, dict)
+            else ""
+        )
+        if lead.consented and incoming_consent_status == "not_provided":
+            # A source that simply omits the field must not erase previously
+            # captured permission. An explicit decline/conflict below does.
+            incoming_raw_payload.pop("consent_evidence", None)
+        lead.raw_payload = {**existing_raw_payload, **incoming_raw_payload}
+        if incoming_consent_status != "not_provided":
+            lead.consented = bool(normalized.consented)
 
     db.flush()
 

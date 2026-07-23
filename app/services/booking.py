@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, time as dt_time, timezone
+from datetime import date, datetime, timedelta, time as dt_time, timezone
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo
 
@@ -16,8 +16,15 @@ from app.db.models import CalendarBooking, Client, ConversationStateEnum, Lead, 
 from app.db.session import get_session_factory
 from app.services.booking_copy import render_booking_slot_reply
 from app.services.booking_planner import plan_booking_slots
-from app.services.booking_request import build_booking_time_request
+from app.services.booking_request import BookingTimeRequest, build_booking_time_request
 from app.services.i18n import client_language, format_datetime_for_language, normalize_language
+from app.services.outbound_requests import (
+    complete_outbound_request,
+    fail_outbound_request,
+    fingerprint_payload,
+    reserve_outbound_request,
+)
+from app.services.secret_storage import reveal_secret
 
 _CALENDLY_API_BASE = "https://api.calendly.com"
 _EMAIL_RE = re.compile(r"(?P<email>[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", re.IGNORECASE)
@@ -51,7 +58,16 @@ _RESCHEDULE_DECLINE_RE = re.compile(
 
 
 class BookingProviderError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        detail: str,
+        *,
+        ambiguous: bool = False,
+        provider_status: int | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.ambiguous = ambiguous
+        self.provider_status = provider_status
 
 
 @dataclass(frozen=True)
@@ -110,7 +126,7 @@ def automated_booking_enabled(client: Client) -> bool:
     config = client.booking_config or {}
     if mode == "calendly":
         return (
-            bool(str(config.get("calendly_personal_access_token", "")).strip())
+            bool(reveal_secret(config.get("calendly_personal_access_token")))
             and bool(str(config.get("calendly_event_type_uri", "")).strip())
         )
     if mode in _INTERNAL_MODE_ALIASES:
@@ -568,7 +584,7 @@ class BookingService:
         if specific_request:
             expanded_limit = max(expanded_limit, 240)
         if provider == _INTERNAL_PROVIDER:
-            slots = self._list_internal_slots(client=client, limit=expanded_limit, db=db)
+            slots = self._list_internal_slots(client=client, limit=expanded_limit, db=db, request=request)
         else:
             slots = self._list_calendly_slots(client=client, limit=expanded_limit)
         all_available_slots = list(slots)
@@ -673,7 +689,7 @@ class BookingService:
         if offer_provider == _INTERNAL_PROVIDER or booking_mode_label(client) in _INTERNAL_MODE_ALIASES:
             booking = self._book_internal_slot(client=client, lead=lead, slot=matched, db=db)
         else:
-            booking = self._book_calendly_slot(client=client, lead=lead, slot=matched)
+            booking = self._book_calendly_slot(client=client, lead=lead, slot=matched, db=db)
 
         was_rescheduled = bool(booking.get("rescheduled_from_booking_ids") or booking.get("rescheduled_from_event_uri"))
         language = client_language(client, lead=lead)
@@ -795,7 +811,71 @@ class BookingService:
                     transition_reason="calendar_booking_offer_repeated",
                 )
         else:
-            booking = self._book_calendly_slot(client=client, lead=lead, slot=matched)
+            try:
+                booking = self._book_calendly_slot(client=client, lead=lead, slot=matched, db=db)
+            except BookingProviderError as exc:
+                language = client_language(client, lead=lead, inbound_text=inbound_text)
+                if exc.ambiguous:
+                    reply = (
+                        "Je n'ai pas pu confirmer le résultat de la réservation. "
+                        "Notre équipe va vérifier avant toute nouvelle tentative et vous recontactera."
+                        if language == "fr"
+                        else "I couldn't confirm whether the booking completed. "
+                        "Our team will verify it before any new attempt and follow up with you."
+                    )
+                    return BookingSelectionResult(
+                        handled=True,
+                        reply_text=reply,
+                        next_state=ConversationStateEnum.HANDOFF,
+                        raw_payload={
+                            "pending_step": None,
+                            "booking_confirmation_unknown": True,
+                            "booking_provider_status": exc.provider_status,
+                        },
+                        audit_event_type="calendar_booking_confirmation_unknown",
+                        audit_decision={
+                            "inbound": inbound_text,
+                            "provider": "calendly",
+                            "provider_status": exc.provider_status,
+                            "delivery_result_unknown": True,
+                        },
+                        transition_reason="calendar_booking_confirmation_unknown",
+                    )
+
+                if not lead.email.strip():
+                    reply = (
+                        "J'ai besoin de votre adresse courriel pour confirmer ce créneau. Envoyez-la ici et je reprendrai la réservation."
+                        if language == "fr"
+                        else "I need your email address to confirm that time. Send it here and I'll resume the booking."
+                    )
+                    return BookingSelectionResult(
+                        handled=True,
+                        reply_text=reply,
+                        next_state=ConversationStateEnum.BOOKING_SENT,
+                        raw_payload={
+                            "booking_offer": latest_offer,
+                            "pending_step": "slot_selection_pending",
+                        },
+                        audit_event_type="calendar_booking_email_requested",
+                        audit_decision={"inbound": inbound_text, "provider": "calendly"},
+                        transition_reason="calendar_booking_email_requested",
+                    )
+
+                refreshed = self.offer_slots(client=client, lead=lead, db=db)
+                return BookingSelectionResult(
+                    handled=True,
+                    reply_text=refreshed.reply_text,
+                    next_state=ConversationStateEnum.BOOKING_SENT,
+                    raw_payload=refreshed.raw_payload,
+                    audit_event_type="calendar_booking_offer_repeated",
+                    audit_decision={
+                        "inbound": inbound_text,
+                        "provider": "calendly",
+                        "provider_status": exc.provider_status,
+                        "reason": "booking_rejected",
+                    },
+                    transition_reason="calendar_booking_offer_repeated",
+                )
         return self._booking_created_result(client=client, lead=lead, matched=matched, booking=booking, offer_provider=offer_provider, inbound_text=inbound_text)
 
     def handle_reschedule_confirmation(
@@ -1016,7 +1096,7 @@ class BookingService:
     def _calendly_config(self, client: Client) -> dict[str, str]:
         config = client.booking_config or {}
         return {
-            "calendly_personal_access_token": str(config.get("calendly_personal_access_token", "")).strip(),
+            "calendly_personal_access_token": reveal_secret(config.get("calendly_personal_access_token")),
             "calendly_event_type_uri": str(config.get("calendly_event_type_uri", "")).strip(),
         }
 
@@ -1067,33 +1147,117 @@ class BookingService:
                 break
         return slots
 
-    def _book_calendly_slot(self, *, client: Client, lead: Lead, slot: dict[str, Any]) -> dict[str, Any]:
+    def _book_calendly_slot(
+        self,
+        *,
+        client: Client,
+        lead: Lead,
+        slot: dict[str, Any],
+        db: Session | None = None,
+    ) -> dict[str, Any]:
         config = self._calendly_config(client)
         if not lead.email.strip():
             raise BookingProviderError("Lead email is required before booking.")
 
+        start_time = str(slot.get("start_time", "")).strip()
         payload = {
             "event_type": config["calendly_event_type_uri"],
-            "start_time": str(slot.get("start_time", "")).strip(),
+            "start_time": start_time,
             "invitee": {
                 "email": lead.email.strip(),
                 "name": lead.full_name.strip() or lead.phone or "Lead",
                 "timezone": client.timezone or "UTC",
             },
         }
-        response = self._request(
-            token=config["calendly_personal_access_token"],
-            method="POST",
-            path="/invitees",
-            json=payload,
-        )
-        resource = response.get("resource", response)
-        return {
-            "event_uri": str(resource.get("event", "")).strip(),
-            "invitee_uri": str(resource.get("uri", "")).strip(),
-            "reschedule_url": str(resource.get("reschedule_url", "")).strip(),
-            "cancel_url": str(resource.get("cancel_url", "")).strip(),
-        }
+        reservation = None
+        if db is not None:
+            existing_calendar_booking = {}
+            lead_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+            raw_calendar_booking = lead_payload.get("calendar_booking")
+            if isinstance(raw_calendar_booking, dict):
+                existing_calendar_booking = raw_calendar_booking
+            prior_booking = existing_calendar_booking.get("booking")
+            prior_event_uri = (
+                str(prior_booking.get("event_uri") or "").strip()
+                if isinstance(prior_booking, dict)
+                else ""
+            )
+            operation = {
+                "client_id": client.id,
+                "lead_id": lead.id,
+                "event_type": config["calendly_event_type_uri"],
+                "start_time": start_time,
+                "prior_event_uri": prior_event_uri,
+            }
+            operation_hash = fingerprint_payload(operation)
+            reservation = reserve_outbound_request(
+                db=db,
+                lead=lead,
+                idempotency_key=f"calendly-booking:{lead.id}:{operation_hash[:40]}",
+                request_kind="calendly_booking_create",
+                fingerprint_data=operation,
+                pending_response={"provider": "calendly", "start_time": start_time},
+                retry_failed=True,
+            )
+            if not reservation.should_send:
+                cached_booking = reservation.response.get("booking")
+                if reservation.status == "completed" and isinstance(cached_booking, dict):
+                    return dict(cached_booking)
+                raise BookingProviderError(
+                    "A previous booking attempt has no definitive provider result.",
+                    ambiguous=True,
+                )
+
+        try:
+            response = self._request(
+                token=config["calendly_personal_access_token"],
+                method="POST",
+                path="/invitees",
+                json=payload,
+            )
+            resource = response.get("resource", response)
+            booking = {
+                "event_uri": str(resource.get("event", "")).strip(),
+                "invitee_uri": str(resource.get("uri", "")).strip(),
+                "reschedule_url": str(resource.get("reschedule_url", "")).strip(),
+                "cancel_url": str(resource.get("cancel_url", "")).strip(),
+            }
+            if reservation is not None and db is not None:
+                complete_outbound_request(
+                    db=db,
+                    request_id=reservation.request_id,
+                    provider_reference=booking["invitee_uri"] or booking["event_uri"],
+                    response={"booking": booking},
+                )
+                db.commit()
+            return booking
+        except BookingProviderError as exc:
+            if reservation is not None and db is not None:
+                fail_outbound_request(
+                    db=db,
+                    request_id=reservation.request_id,
+                    detail=exc,
+                    ambiguous=exc.ambiguous,
+                    response={
+                        "provider": "calendly",
+                        "start_time": start_time,
+                        "provider_status": exc.provider_status,
+                    },
+                )
+            raise
+        except Exception as exc:
+            if reservation is not None and db is not None:
+                fail_outbound_request(
+                    db=db,
+                    request_id=reservation.request_id,
+                    detail=exc,
+                    ambiguous=True,
+                    response={"provider": "calendly", "start_time": start_time},
+                )
+            raise BookingProviderError(
+                "The booking provider may have accepted the request, but the result could not be stored.",
+                ambiguous=True,
+            ) from exc
 
     def _list_internal_slots(
         self,
@@ -1101,6 +1265,7 @@ class BookingService:
         client: Client,
         limit: int,
         db: Session | None,
+        request: BookingTimeRequest | None = None,
     ) -> list[BookingSlot]:
         config = _internal_calendar_config(client)
         availability_rows = [row for row in config["availability"] if bool(row.get("enabled"))]
@@ -1133,7 +1298,42 @@ class BookingService:
                 start_at=window_start_utc,
                 end_at=window_end_utc,
             )
-            for day_offset in range(horizon_days + 1):
+            day_offsets = list(range(horizon_days + 1))
+            if request is not None:
+                requested_dates = set(request.requested_dates)
+                requested_weekdays = {value.lower() for value in request.requested_weekdays}
+                avoided_weekdays = {value.lower() for value in request.avoid_weekdays}
+
+                range_start: date | None = None
+                range_end: date | None = None
+                try:
+                    if request.date_range_start:
+                        range_start = date.fromisoformat(request.date_range_start)
+                    if request.date_range_end:
+                        range_end = date.fromisoformat(request.date_range_end)
+                except ValueError:
+                    range_start = None
+                    range_end = None
+
+                def request_priority(day_offset: int) -> tuple[int, int]:
+                    local_date = now_local.date() + timedelta(days=day_offset)
+                    weekday = local_date.strftime("%A").lower()
+                    if requested_dates:
+                        return (0 if local_date.isoformat() in requested_dates else 1, day_offset)
+                    if range_start is not None and range_end is not None:
+                        return (0 if range_start <= local_date <= range_end else 1, day_offset)
+                    if requested_weekdays:
+                        return (0 if weekday in requested_weekdays else 1, day_offset)
+                    if avoided_weekdays:
+                        return (1 if weekday in avoided_weekdays else 0, day_offset)
+                    return (0, day_offset)
+
+                # Generate days matching the user's request first. A dense
+                # always-open calendar can otherwise hit the result cap before
+                # a requested date later in the horizon is reached.
+                day_offsets.sort(key=request_priority)
+
+            for day_offset in day_offsets:
                 local_date = now_local.date() + timedelta(days=day_offset)
                 day_rows = [row for row in availability_rows if _to_int(row.get("day"), default=-1) == local_date.weekday()]
                 if not day_rows:
@@ -1273,23 +1473,57 @@ class BookingService:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        with httpx.Client(base_url=_CALENDLY_API_BASE, timeout=self._timeout_seconds) as client:
-            response = client.request(
-                method,
-                path,
-                params=params,
-                json=json,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
+        normalized_method = method.strip().upper()
+        try:
+            with httpx.Client(
+                base_url=_CALENDLY_API_BASE,
+                timeout=max(float(self._timeout_seconds), 1.0),
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = client.request(
+                    normalized_method,
+                    path,
+                    params=params,
+                    json=json,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except httpx.RequestError as exc:
+            definitely_not_sent = isinstance(
+                exc,
+                (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
             )
+            raise BookingProviderError(
+                "Booking provider request failed before a confirmation was received.",
+                ambiguous=normalized_method not in {"GET", "HEAD"} and not definitely_not_sent,
+            ) from exc
         if response.is_error:
             detail = _provider_error_detail(response)
-            raise BookingProviderError(detail)
-        payload = response.json()
+            mutation_may_have_completed = normalized_method not in {"GET", "HEAD"} and (
+                response.status_code in {408, 425, 429} or response.status_code >= 500
+            )
+            raise BookingProviderError(
+                detail,
+                ambiguous=mutation_may_have_completed,
+                provider_status=response.status_code,
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise BookingProviderError(
+                "Unexpected booking provider response",
+                ambiguous=normalized_method not in {"GET", "HEAD"},
+                provider_status=response.status_code,
+            ) from exc
         if not isinstance(payload, dict):
-            raise BookingProviderError("Unexpected booking provider response")
+            raise BookingProviderError(
+                "Unexpected booking provider response",
+                ambiguous=normalized_method not in {"GET", "HEAD"},
+                provider_status=response.status_code,
+            )
         return payload
 
     def _latest_offer(self, history: Sequence[Message]) -> dict[str, Any] | None:

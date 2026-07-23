@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "id": "explicit_booking_uses_live_slots",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["booking", "explicit-intent", "tool-call", "provider-backed-slots"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Harbourview Accounting",
+    "tone": "professional and concise",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Which accounting service do you need?",
+      "Is there a filing deadline?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "Consultations are 30 minutes. Appointment availability must come from the connected calendar.",
+    "ai_context": "When the lead explicitly asks to schedule, use live availability and never invent a time."
+  },
+  "lead": {
+    "full_name": "Jordan Fixture",
+    "email": "jordan.fixture@example.test",
+    "phone": "+14165550105",
+    "city": "Toronto",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "service_interest": "Small business tax planning",
+      "decision_role": "Owner",
+      "timeline": "Before the August filing deadline"
+    },
+    "raw_payload": {}
+  },
+  "initial_history": [],
+  "turns": [
+    {
+      "inbound": "Yes, let's book a consultation. Tuesday afternoon works best.",
+      "replay_outputs": [
+        {
+          "reply_text": "",
+          "next_state": "BOOKING_SENT",
+          "conversation_act": "offer_slots",
+          "lead_intent": "ready_to_book_tuesday_afternoon",
+          "confidence": 0.99,
+          "reasoning_summary": "The lead explicitly requested a consultation and supplied a day and period.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Small business tax planning",
+            "timeline": "Before the August filing deadline",
+            "locations": "Toronto",
+            "decision_makers": "Owner",
+            "urgency_driver": "August filing deadline",
+            "booking_intent_locked": true
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "find_slots",
+            "args": {
+              "preferred_day": "tuesday",
+              "preferred_period": "afternoon",
+              "limit": 3
+            }
+          }
+        },
+        {
+          "reply_text": "I found two Tuesday afternoon options: 1) Tue Aug 04 at 1:00 PM or 2) Tue Aug 04 at 3:00 PM. Reply with 1 or 2.",
+          "next_state": "BOOKING_SENT",
+          "conversation_act": "offer_slots",
+          "lead_intent": "ready_to_book_tuesday_afternoon",
+          "confidence": 0.99,
+          "reasoning_summary": "The reply presents only the slots returned by the calendar tool.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Small business tax planning",
+            "timeline": "Before the August filing deadline",
+            "locations": "Toronto",
+            "decision_makers": "Owner",
+            "urgency_driver": "August filing deadline",
+            "booking_intent_locked": true
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "BOOKING_SENT",
+        "expected_action": "none",
+        "expected_pending_step": "slot_selection_pending",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["offer_slots"],
+        "expected_next_states": ["BOOKING_SENT"],
+        "must_include": ["Tue Aug 04 at 1:00 PM", "Tue Aug 04 at 3:00 PM"],
+        "must_not_include": ["booked", "confirmed"],
+        "required_facts": [
+          "Only the two slots in tool_world may be shown.",
+          "The lead must be asked to choose an option before booking."
+        ],
+        "forbidden_claims": [
+          "The meeting is already booked.",
+          "A time not returned by the calendar is available."
+        ],
+        "tool": {
+          "proposed_name": "find_slots",
+          "args_subset": {
+            "preferred_day": "tuesday",
+            "preferred_period": "afternoon"
+          },
+          "max_calls": 1
+        },
+        "visible_slot_indexes": [1, 2],
+        "max_questions": 1,
+        "max_chars": 420,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": ["find_slots"],
+        "max_tool_calls": 1,
+        "semantic_criteria": [
+          "Treat the scheduling request as explicit intent.",
+          "Present provider-backed options without claiming a booking."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": [
+      {
+        "start": "2026-08-04T13:00:00-04:00",
+        "end": "2026-08-04T13:30:00-04:00",
+        "display_time": "Tue Aug 04 at 1:00 PM"
+      },
+      {
+        "start": "2026-08-04T15:00:00-04:00",
+        "end": "2026-08-04T15:30:00-04:00",
+        "display_time": "Tue Aug 04 at 3:00 PM"
+      }
+    ]
+  }
+}

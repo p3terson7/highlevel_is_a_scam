@@ -23,6 +23,13 @@ def public_message_media(
     attachment = db.scalar(select(MessageAttachment).where(MessageAttachment.public_token == public_token))
     if attachment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found")
+    expires_at = attachment.public_expires_at
+    if expires_at is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media link expired")
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media link expired")
     try:
         path = attachment_file_path(settings, attachment)
     except MessageMediaError as exc:
@@ -33,6 +40,11 @@ def public_message_media(
         path,
         media_type=attachment.content_type or "application/octet-stream",
         filename=attachment.filename or None,
+        headers={
+            "Cache-Control": "private, no-store, max-age=0",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -133,7 +145,7 @@ def ui_conversation_thread(
                 "previous_state": state_row.previous_state.value,
                 "new_state": state_row.new_state.value,
                 "reason": state_row.reason,
-                "metadata": state_row.metadata_json,
+                "metadata": _event_metadata_for_actor(actor, state_row.metadata_json),
             }
         )
     for note in notes:
@@ -187,41 +199,13 @@ def ui_conversation_thread(
     timeline.sort(key=lambda item: item["created_at"])
 
     last_activity_at = _last_activity_at(lead, messages[-1] if messages else None)
-    client_visible_audits = {
-        "internal_note",
-        "crm_stage_changed",
-        "crm_stage_auto_updated",
-        "admin_booking_link_sent",
-        "portal_booking_link_sent",
-        "calendar_booking_offer_sent",
-        "calendar_booking_created",
-        "booking_confirmed",
-        "crm_task_created",
-        "crm_task_completed",
-        "crm_task_reopened",
-        "crm_task_updated",
-        "manual_outbound_sent",
-        "portal_manual_outbound_sent",
-        "agent_paused",
-        "agent_resumed",
-        "agent_reply_suppressed",
-        "ui_sandbox_started",
-        "ui_sandbox_initial_ai_sms",
-        "ui_sandbox_lead_message",
-        "admin_marked_handoff",
-        "portal_marked_handoff",
-        "conversation_archived",
-        "conversation_unarchived",
-    }
-    visible_audits = (
-        [log for log in audit_logs if log.event_type in client_visible_audits]
-        if actor.role == "client"
-        else [
+    visible_audits = _visible_audit_logs(actor, audit_logs)
+    if actor.role == "admin":
+        visible_audits = [
             log
-            for log in audit_logs
+            for log in visible_audits
             if log.event_type not in {"lead_normalized", "meta_webhook_received", "linkedin_webhook_received"}
         ]
-    )
     normalized_answers = normalize_form_answers(lead.form_answers or {})
 
     return {
@@ -274,7 +258,7 @@ def ui_conversation_thread(
                 "new_state": row.new_state.value,
                 "reason": row.reason,
                 "created_at": row.created_at.isoformat(),
-                "metadata": row.metadata_json,
+                "metadata": _event_metadata_for_actor(actor, row.metadata_json),
             }
             for row in state_history
         ],
@@ -285,7 +269,7 @@ def ui_conversation_thread(
                 "id": log.id,
                 "event_type": log.event_type,
                 "created_at": log.created_at.isoformat(),
-                "decision": log.decision,
+                "decision": _audit_decision_for_actor(actor, log),
             }
             for log in visible_audits[-12:]
         ],
@@ -330,6 +314,7 @@ def ui_send_booking_link(
     sms_service: SMSService = Depends(get_sms_service),
     admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
     portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
     actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
     lead = _load_lead_for_actor(db, actor, lead_id)
@@ -349,7 +334,20 @@ def ui_send_booking_link(
     now = datetime.now(timezone.utc)
     intro = payload.message.strip() if payload.message else "Here is the booking link whenever you are ready."
     body = ensure_booking_link(intro, lead.client)
-    provider_sid = _send_sms_or_http_error(sms_service=resolved_sms_service, to_number=lead.phone, body=body)
+    reservation = _reserve_outbound_request(
+        db=db,
+        lead=lead,
+        idempotency_key=idempotency_key,
+        request_kind="booking_link",
+        request_payload={"lead_id": lead.id, "body": body, "actor_role": actor.role},
+    )
+    if reservation.cached_response is not None:
+        return reservation.cached_response
+    try:
+        provider_sid = _send_sms_or_http_error(sms_service=resolved_sms_service, to_number=lead.phone, body=body)
+    except HTTPException as exc:
+        _fail_outbound_request(db, reservation, detail=exc.detail)
+        raise
     db.add(
         Message(
             lead_id=lead.id,
@@ -400,8 +398,15 @@ def ui_send_booking_link(
             created_at=now,
         )
     )
+    response = {"status": "ok", "provider_sid": provider_sid, "body": body, "state": lead.conversation_state.value}
+    _complete_outbound_request(
+        db,
+        reservation,
+        provider_message_sid=provider_sid,
+        response=response,
+    )
     db.commit()
-    return {"status": "ok", "provider_sid": provider_sid, "body": body, "state": lead.conversation_state.value}
+    return response
 
 
 @router.post("/ui/api/conversations/{lead_id}/messages/manual")
@@ -413,9 +418,11 @@ def ui_send_manual_message(
     sms_service: SMSService = Depends(get_sms_service),
     admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
     portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
     actor = _resolve_ui_actor(db=db, settings=settings, admin_token=admin_token, portal_token=portal_token)
     lead = _load_lead_for_actor(db, actor, lead_id)
+    cleaned_body = _validate_outbound_message(lead, payload.body)
     resolved_sms_service = _sms_service_for_client(
         sms_service=sms_service,
         settings=settings,
@@ -423,17 +430,35 @@ def ui_send_manual_message(
         client=lead.client,
     )
     now = datetime.now(timezone.utc)
-    provider_sid, state_value = _send_outbound_message(
+    reservation = _reserve_outbound_request(
         db=db,
-        sms_service=resolved_sms_service,
         lead=lead,
-        body=payload.body,
-        created_at=now,
-        raw_payload={"source": "owner_workspace", "action": "manual_message", "actor_role": actor.role},
-        audit_event_type="manual_outbound_sent" if actor.role == "admin" else "portal_manual_outbound_sent",
-        audit_decision={"source": "owner_workspace", "actor_role": actor.role},
-        advance_new_to_greeted=True,
+        idempotency_key=idempotency_key,
+        request_kind="manual_message",
+        request_payload={
+            "lead_id": lead.id,
+            "body": cleaned_body,
+            "pause_agent": payload.pause_agent,
+            "actor_role": actor.role,
+        },
     )
+    if reservation.cached_response is not None:
+        return reservation.cached_response
+    try:
+        provider_sid, state_value = _send_outbound_message(
+            db=db,
+            sms_service=resolved_sms_service,
+            lead=lead,
+            body=cleaned_body,
+            created_at=now,
+            raw_payload={"source": "owner_workspace", "action": "manual_message", "actor_role": actor.role},
+            audit_event_type="manual_outbound_sent" if actor.role == "admin" else "portal_manual_outbound_sent",
+            audit_decision={"source": "owner_workspace", "actor_role": actor.role},
+            advance_new_to_greeted=True,
+        )
+    except HTTPException as exc:
+        _fail_outbound_request(db, reservation, detail=exc.detail)
+        raise
     if payload.pause_agent:
         set_agent_control(
             lead,
@@ -452,8 +477,7 @@ def ui_send_manual_message(
                 created_at=now,
             )
         )
-    db.commit()
-    return {
+    response = {
         "status": "ok",
         "lead_id": lead.id,
         "provider_sid": provider_sid,
@@ -461,6 +485,14 @@ def ui_send_manual_message(
         "delivery_mode": _manual_delivery_mode(settings, db, client=lead.client),
         "agent_control": get_agent_control(lead),
     }
+    _complete_outbound_request(
+        db,
+        reservation,
+        provider_message_sid=provider_sid,
+        response=response,
+    )
+    db.commit()
+    return response
 
 
 @router.post("/ui/api/conversations/{lead_id}/messages/manual-media")
@@ -489,8 +521,27 @@ async def ui_send_manual_media_message(
             detail="Public base URL is required before Twilio can send uploaded media.",
         )
 
-    content = await media.read()
+    max_bytes = max(int(settings.message_media_max_bytes or 0), 1)
+    content = await media.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Attachment is too large")
     now = datetime.now(timezone.utc)
+    reservation = _reserve_outbound_request(
+        db=db,
+        lead=lead,
+        idempotency_key=request.headers.get("Idempotency-Key"),
+        request_kind="manual_media_message",
+        request_payload={
+            "lead_id": lead.id,
+            "body": body.strip(),
+            "filename": media.filename or "",
+            "content_type": media.content_type or "",
+            "content_sha256": hashlib.sha256(content).hexdigest(),
+            "actor_role": actor.role,
+        },
+    )
+    if reservation.cached_response is not None:
+        return reservation.cached_response
     message = Message(
         lead_id=lead.id,
         client_id=lead.client_id,
@@ -513,6 +564,7 @@ async def ui_send_manual_media_message(
             raw_payload={"source": "owner_upload", "actor_role": actor.role},
         )
     except MessageMediaError as exc:
+        _fail_outbound_request(db, reservation, detail=str(exc))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     attachment = create_message_attachment(message=message, lead=lead, stored=stored)
@@ -526,12 +578,22 @@ async def ui_send_manual_media_message(
         db=db,
         client=lead.client,
     )
-    provider_sid = _send_mms_or_http_error(
-        sms_service=resolved_sms_service,
-        to_number=lead.phone,
-        body=message.body,
-        media_urls=media_urls,
-    )
+    try:
+        provider_sid = _send_mms_or_http_error(
+            sms_service=resolved_sms_service,
+            to_number=lead.phone,
+            body=message.body,
+            media_urls=media_urls,
+        )
+    except HTTPException as exc:
+        try:
+            attachment_file_path(settings, attachment).unlink(missing_ok=True)
+        except (MessageMediaError, OSError):
+            # Delivery has already failed. File cleanup is best-effort and must
+            # not hide the provider error returned to the operator.
+            pass
+        _fail_outbound_request(db, reservation, detail=exc.detail)
+        raise
     attachment.provider_media_url = provider_media_url
     message.provider_message_sid = provider_sid
     serialized_attachment = _serialize_attachment(attachment)
@@ -580,8 +642,7 @@ async def ui_send_manual_media_message(
             created_at=now,
         )
     )
-    db.commit()
-    return {
+    response = {
         "status": "ok",
         "lead_id": lead.id,
         "provider_sid": provider_sid,
@@ -589,6 +650,14 @@ async def ui_send_manual_media_message(
         "delivery_mode": delivery_mode,
         "attachments": [serialized_attachment],
     }
+    _complete_outbound_request(
+        db,
+        reservation,
+        provider_message_sid=provider_sid,
+        response=response,
+    )
+    db.commit()
+    return response
 
 
 @router.post("/ui/api/conversations/{lead_id}/actions/handoff")

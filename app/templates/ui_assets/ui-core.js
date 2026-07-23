@@ -25,6 +25,7 @@
           leadId: null,
           source: "",
         },
+        blockedOutboundAttempt: null,
         thread: null,
         selectedClientKey: localStorage.getItem("lead-ui-selected-client") || "",
         activeLeadId: Number(localStorage.getItem("lead-ui-active-lead") || 0) || null,
@@ -74,19 +75,23 @@
       };
 
       function adminToken() {
-        return localStorage.getItem("lead-ui-admin-token") || "";
+        localStorage.removeItem("lead-ui-admin-token");
+        return "";
       }
 
       function portalToken() {
-        return localStorage.getItem("lead-ui-portal-token") || "";
+        localStorage.removeItem("lead-ui-portal-token");
+        return "";
       }
 
       function setAdminToken(token) {
-        localStorage.setItem("lead-ui-admin-token", token);
+        void token;
+        localStorage.removeItem("lead-ui-admin-token");
       }
 
       function setPortalToken(token) {
-        localStorage.setItem("lead-ui-portal-token", token);
+        void token;
+        localStorage.removeItem("lead-ui-portal-token");
       }
 
       function clearAdminToken() {
@@ -101,6 +106,15 @@
         clearAdminToken();
         clearPortalToken();
         localStorage.removeItem("lead-ui-portal-email");
+        try {
+          const keys = Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index));
+          keys.forEach((key) => {
+            if (key?.startsWith("lead-ui-outbound-request:")) sessionStorage.removeItem(key);
+          });
+        } catch (_error) {
+          // Best-effort cleanup when browser storage is unavailable.
+        }
+        state.outboundRequestKeys = {};
       }
 
       function saveLocalState() {
@@ -137,19 +151,36 @@
         localStorage.setItem("lead-ui-auth-mode", state.authMode);
       }
 
-      function authHeaders(extra = {}) {
-        if (state.authMode === "client") {
-          const token = portalToken();
-          return token ? { ...extra, "X-Portal-Token": token } : extra;
+      function csrfToken() {
+        const match = document.cookie.split(";").map((value) => value.trim()).find((value) => value.startsWith("leadops_csrf="));
+        if (!match) return "";
+        try {
+          return decodeURIComponent(match.slice("leadops_csrf=".length));
+        } catch (_) {
+          return "";
         }
-        const token = adminToken();
-        return token ? { ...extra, "X-Admin-Token": token } : extra;
+      }
+
+      function authHeaders(extra = {}, method = "GET") {
+        const headers = { ...extra };
+        Object.keys(headers).forEach((name) => {
+          const normalized = name.toLowerCase();
+          if (normalized === "x-admin-token" || normalized === "x-portal-token") {
+            delete headers[name];
+          }
+        });
+        if (["POST", "PUT", "PATCH", "DELETE"].includes(String(method || "GET").toUpperCase())) {
+          const token = csrfToken();
+          if (token) headers["X-CSRF-Token"] = token;
+        }
+        return headers;
       }
 
       async function apiJson(path, options = {}) {
         const response = await fetch(path, {
           ...options,
-          headers: authHeaders({ ...(options.headers || {}) }),
+          credentials: "same-origin",
+          headers: authHeaders({ ...(options.headers || {}) }, options.method),
         });
         const text = await response.text();
         let payload = text;
@@ -941,9 +972,18 @@
           setText("loginStatus", "Admin token is required.");
           return;
         }
-        setAdminToken(token);
-        clearPortalToken();
         try {
+          const result = await fetch("/ui/api/login/admin", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ admin_token: token }),
+          });
+          const payload = await result.json();
+          if (!result.ok) throw new Error(payload.detail || "Login failed");
+          clearAdminToken();
+          clearPortalToken();
+          document.getElementById("loginToken").value = "";
           await bootstrap();
           document.getElementById("loginOverlay").classList.add("hidden");
           setText("loginStatus", "");
@@ -967,6 +1007,7 @@
         try {
           const result = await fetch("/ui/api/login/client", {
             method: "POST",
+            credentials: "same-origin",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email, password }),
           });
@@ -974,7 +1015,7 @@
           if (!result.ok) {
             throw new Error(payload.detail || "Login failed");
           }
-          setPortalToken(payload.token);
+          clearPortalToken();
           localStorage.setItem("lead-ui-portal-email", email);
           await bootstrap();
           document.getElementById("loginOverlay").classList.add("hidden");

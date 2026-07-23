@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "id": "ambiguous_slot_requires_clarification",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["booking", "ambiguous-slot", "clarification", "write-safety"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Juniper Legal Intake",
+    "tone": "calm and precise",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "What type of matter do you need help with?",
+      "Is there an upcoming deadline?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "Consultations are 30 minutes. A selected slot must be unambiguous before booking.",
+    "ai_context": "Never choose a slot on the lead's behalf. Ask for clarification when more than one offered option is referenced."
+  },
+  "lead": {
+    "full_name": "Robin Example",
+    "email": "robin.example@example.test",
+    "phone": "+14165550108",
+    "city": "Toronto",
+    "state": "BOOKING_SENT",
+    "form_answers": {
+      "service_interest": "Contract review",
+      "decision_role": "Business owner",
+      "timeline": "This month"
+    },
+    "raw_payload": {
+      "pending_step": "slot_selection_pending",
+      "qualification_memory": {
+        "service_needed": "Contract review",
+        "timeline": "This month",
+        "decision_makers": "Business owner",
+        "booking_intent_locked": true
+      }
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "I found two options: 1) Tue Aug 04 at 1:00 PM or 2) Tue Aug 04 at 3:00 PM. Reply with 1 or 2.",
+      "raw_payload": {
+        "agent": {
+          "action": "none"
+        },
+        "booking_offer": {
+          "provider": "internal",
+          "slots": [
+            {
+              "index": 1,
+              "start_time": "2026-08-04T13:00:00-04:00",
+              "end_time": "2026-08-04T13:30:00-04:00",
+              "display_time": "Tue Aug 04 at 1:00 PM"
+            },
+            {
+              "index": 2,
+              "start_time": "2026-08-04T15:00:00-04:00",
+              "end_time": "2026-08-04T15:30:00-04:00",
+              "display_time": "Tue Aug 04 at 3:00 PM"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "Either 1 or 2 works for me; choose whichever you prefer.",
+      "replay_outputs": [
+        {
+          "decision": "ask_clarification",
+          "selected_slot_index": null,
+          "selected_slot_start_time": null,
+          "reply_text": "I don't want to choose the wrong time for you. Which should I reserve: option 1 at 1:00 PM or option 2 at 3:00 PM?",
+          "reasoning_summary": "The lead referenced two valid slots but did not make a unique selection."
+        }
+      ],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "BOOKING_SENT",
+        "expected_action": "none",
+        "expected_pending_step": "slot_selection_pending",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["ask_clarifying_question"],
+        "expected_next_states": ["BOOKING_SENT"],
+        "any_of": ["Which time", "Which should I reserve"],
+        "must_not_include": ["confirmed", "has been booked"],
+        "required_facts": [
+          "Both offered options remain available for the lead to choose."
+        ],
+        "forbidden_claims": [
+          "Either slot has been booked.",
+          "The lead selected option 1.",
+          "The lead selected option 2."
+        ],
+        "forbidden_tools": ["book_slot", "mark_booked"],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 320,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Ask the lead to make one unambiguous choice.",
+          "Never select or book a slot on the lead's behalf."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": [
+      {
+        "start": "2026-08-04T13:00:00-04:00",
+        "end": "2026-08-04T13:30:00-04:00",
+        "display_time": "Tue Aug 04 at 1:00 PM"
+      },
+      {
+        "start": "2026-08-04T15:00:00-04:00",
+        "end": "2026-08-04T15:30:00-04:00",
+        "display_time": "Tue Aug 04 at 3:00 PM"
+      }
+    ]
+  }
+}

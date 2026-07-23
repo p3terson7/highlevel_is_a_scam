@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -8,11 +9,33 @@ from app.db.models import Message, MessageDirection
 
 DELIVERY_KEY = "delivery"
 
-_WARNING_STATUSES = {"failed", "undelivered"}
+_WARNING_STATUSES = {"canceled", "failed", "undelivered"}
 _OK_STATUSES = {"delivered"}
 _PENDING_STATUSES = {"accepted", "queued", "scheduled", "sending"}
 _SENT_STATUSES = {"sent"}
 _SIMULATED_PREFIXES = ("MOCK-", "SANDBOX-", "DEMO-", "PRECISCAN-DEMO-", "STACKLEADS-DEMO-")
+_ALLOWED_CALLBACK_STATUSES = _WARNING_STATUSES | _OK_STATUSES | _PENDING_STATUSES | _SENT_STATUSES
+_TERMINAL_STATUSES = _WARNING_STATUSES | _OK_STATUSES | {"simulated"}
+_STATUS_RANK = {
+    "sent_to_provider": 0,
+    "unverified": 0,
+    "accepted": 1,
+    "scheduled": 2,
+    "queued": 3,
+    "sending": 4,
+    "sent": 5,
+    "delivered": 6,
+    "canceled": 6,
+    "failed": 6,
+    "undelivered": 6,
+}
+
+
+@dataclass(frozen=True)
+class DeliveryCallbackResult:
+    delivery: dict[str, Any]
+    applied: bool
+    reason: str
 
 
 def twilio_status_callback_url(settings: Settings, runtime_overrides: Mapping[str, str] | None = None) -> str:
@@ -121,12 +144,37 @@ def apply_twilio_delivery_callback(
     *,
     payload: Mapping[str, Any],
     now: datetime | None = None,
-) -> dict[str, Any]:
+) -> DeliveryCallbackResult:
     raw_payload = dict(message.raw_payload or {})
     previous = raw_payload.get(DELIVERY_KEY) if isinstance(raw_payload.get(DELIVERY_KEY), dict) else {}
     provider_status = str(payload.get("MessageStatus") or payload.get("SmsStatus") or "").strip().lower()
-    error_code = str(payload.get("ErrorCode") or "").strip()
-    error_message = str(payload.get("ErrorMessage") or "").strip()
+    previous_status = str(previous.get("provider_status") or previous.get("status") or "").strip().lower()
+    current_delivery = _normalize_delivery_record(previous) if previous else (delivery_status_for_message(message) or {})
+
+    if provider_status not in _ALLOWED_CALLBACK_STATUSES:
+        return DeliveryCallbackResult(delivery=current_delivery, applied=False, reason="unsupported_status")
+    if provider_status == previous_status:
+        enriched = _enrich_warning_error_detail(
+            current_delivery,
+            payload=payload,
+            now=now,
+        )
+        if enriched is not None:
+            raw_payload[DELIVERY_KEY] = enriched
+            message.raw_payload = raw_payload
+            return DeliveryCallbackResult(
+                delivery=enriched,
+                applied=True,
+                reason="error_detail_enriched",
+            )
+        return DeliveryCallbackResult(delivery=current_delivery, applied=False, reason="duplicate")
+    if previous_status in _TERMINAL_STATUSES:
+        return DeliveryCallbackResult(delivery=current_delivery, applied=False, reason="terminal_status")
+    if _STATUS_RANK.get(provider_status, -1) < _STATUS_RANK.get(previous_status, 0):
+        return DeliveryCallbackResult(delivery=current_delivery, applied=False, reason="status_regression")
+
+    error_code = _bounded_text(payload.get("ErrorCode"), limit=64)
+    error_message = _bounded_text(payload.get("ErrorMessage"), limit=500)
     normalized = _status_record(
         provider_status=provider_status,
         provider_message_sid=message.provider_message_sid,
@@ -146,14 +194,80 @@ def apply_twilio_delivery_callback(
             }
         )
         normalized["history"] = history[-8:]
-    normalized["raw_callback"] = {
-        key: str(payload.get(key) or "")
-        for key in ("MessageSid", "SmsSid", "MessageStatus", "SmsStatus", "ErrorCode", "ErrorMessage", "To", "From")
-        if key in payload
-    }
+    normalized["raw_callback"] = _bounded_callback_payload(payload)
     raw_payload[DELIVERY_KEY] = normalized
     message.raw_payload = raw_payload
-    return normalized
+    return DeliveryCallbackResult(delivery=normalized, applied=True, reason="applied")
+
+
+def _enrich_warning_error_detail(
+    current: Mapping[str, Any],
+    *,
+    payload: Mapping[str, Any],
+    now: datetime | None,
+) -> dict[str, Any] | None:
+    """Fill provider error fields that were absent from an earlier callback.
+
+    Twilio can repeat the same terminal status with more complete error fields.
+    Existing non-empty values remain authoritative so replays cannot rewrite a
+    recorded failure, while a byte-for-byte duplicate remains a no-op.
+    """
+
+    status = str(current.get("provider_status") or current.get("status") or "").strip().lower()
+    if status not in _WARNING_STATUSES:
+        return None
+
+    current_code = _bounded_text(current.get("error_code"), limit=64)
+    current_message = _bounded_text(current.get("error_message"), limit=500)
+    incoming_code = _bounded_text(payload.get("ErrorCode"), limit=64)
+    incoming_message = _bounded_text(payload.get("ErrorMessage"), limit=500)
+    error_code = current_code or incoming_code
+    error_message = current_message or incoming_message
+    if error_code == current_code and error_message == current_message:
+        return None
+
+    enriched = dict(current)
+    enriched.update(
+        {
+            "error_code": error_code,
+            "error_message": error_message,
+            "description": _description_for_status(
+                status,
+                error_code=error_code,
+                error_message=error_message,
+            ),
+            "description_fr": _description_for_status_fr(
+                status,
+                error_code=error_code,
+                error_message=error_message,
+            ),
+            "updated_at": _iso(now),
+        }
+    )
+    previous_callback = current.get("raw_callback")
+    enriched["raw_callback"] = {
+        **(dict(previous_callback) if isinstance(previous_callback, Mapping) else {}),
+        **_bounded_callback_payload(payload),
+    }
+    return enriched
+
+
+def _bounded_callback_payload(payload: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        key: _bounded_text(payload.get(key), limit=500)
+        for key in (
+            "AccountSid",
+            "MessageSid",
+            "SmsSid",
+            "MessageStatus",
+            "SmsStatus",
+            "ErrorCode",
+            "ErrorMessage",
+            "To",
+            "From",
+        )
+        if key in payload
+    }
 
 
 def _normalize_delivery_record(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -256,6 +370,8 @@ def _description_for_status(status: str, *, error_code: str = "", error_message:
         detail = error_message or "Twilio failed before the SMS could be delivered."
         suffix = f" Error code: {error_code}." if error_code else ""
         return f"{detail}{suffix}"
+    if status == "canceled":
+        return "Twilio canceled the SMS before delivery."
     if status in _PENDING_STATUSES:
         return "The SMS is still moving through Twilio or the carrier network."
     if status in _SENT_STATUSES:
@@ -273,6 +389,8 @@ def _description_for_status_fr(status: str, *, error_code: str = "", error_messa
         detail = _translate_twilio_error(error_message) or "Twilio a échoué avant que le SMS puisse être livré."
         suffix = f" Code d'erreur: {error_code}." if error_code else ""
         return f"{detail}{suffix}"
+    if status == "canceled":
+        return "Twilio a annulé le SMS avant sa livraison."
     if status in _PENDING_STATUSES:
         return "Le SMS circule encore dans le réseau Twilio ou chez l'opérateur."
     if status in _SENT_STATUSES:
@@ -289,6 +407,10 @@ def _translate_twilio_error(error_message: str) -> str:
         "landline or unreachable carrier": "Le numéro semble être un téléphone fixe ou un numéro injoignable.",
     }
     return known.get(text.lower(), text)
+
+
+def _bounded_text(value: Any, *, limit: int) -> str:
+    return str(value or "").strip()[: max(int(limit), 0)]
 
 
 def _iso(value: datetime | None) -> str:

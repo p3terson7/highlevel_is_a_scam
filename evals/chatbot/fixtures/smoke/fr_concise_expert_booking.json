@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "id": "fr_concise_expert_booking",
+  "owner": "conversation-platform",
+  "kind": "journey",
+  "tags": [
+    "french",
+    "qualification",
+    "concise",
+    "no-repeat",
+    "explicit-meeting",
+    "affirmative-booking"
+  ],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Atelier Scan Boréal",
+    "tone": "direct, chaleureux, professionnel et concis",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Quel résultat technique recherchez-vous?",
+      "Quelle échéance devez-vous respecter?",
+      "Qui valide la suite du projet?"
+    ],
+    "booking_mode": "internal",
+    "provider_config": {
+      "language": "fr"
+    },
+    "faq_context": "L'entreprise offre le scan 3D, la rétro-ingénierie, la modélisation, les dessins techniques et la validation dimensionnelle. Un expert technique confirme la faisabilité et les recommandations pendant un rendez-vous de 30 minutes.",
+    "ai_context": "Aider et qualifier le prospect sans remplacer l'expert. Une fois le besoin, l'urgence et la personne décisionnaire compris, proposer clairement et sans pression un rendez-vous avec un expert. Ne pas réciter les mêmes faits à chaque réponse."
+  },
+  "lead": {
+    "full_name": "Martin Exemple / Fonderie Boréale",
+    "email": "martin.exemple@example.test",
+    "phone": "+15145550148",
+    "city": "Québec",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "secteur_activite": "Entreprise",
+      "dimensions_objet": "45 mm x 280 mm x 280 mm, roue dentée en acier de 18 kg",
+      "delai_souhaite": "Dans les 5 jours ouvrables",
+      "demande_urgente": "Oui, arrêt partiel de production",
+      "services_requis": "Scan 3D, rétro-ingénierie et modélisation",
+      "informations_additionnelles": "Une roue dentée est brisée. La pièce doit être refaite à partir d'un fichier STEP et d'un dessin technique."
+    },
+    "raw_payload": {
+      "lead_language": "fr",
+      "qualification_memory": {
+        "service_needed": "Scan 3D, rétro-ingénierie et modélisation",
+        "timeline": "Dans les 5 jours ouvrables",
+        "locations": "Québec",
+        "decision_makers": null,
+        "urgency_driver": "Arrêt partiel de production",
+        "booking_intent_locked": false
+      }
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Bonjour Martin, ici Hermes, l'assistante de Atelier Scan Boréal. J'ai bien noté la roue dentée brisée, l'arrêt partiel de production et le besoin d'un fichier STEP avec dessin technique. Êtes-vous la personne qui coordonne la suite, ou quelqu'un d'autre doit-il être inclus?",
+      "raw_payload": {
+        "agent": {
+          "action": "ask_next_question",
+          "next_question_key": "decision_makers"
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "turn_id": "second_outbound_scoping_call",
+      "inbound": "Non, c'est juste moi.",
+      "replay_outputs": [
+        {
+          "reply_text": "Parfait, merci. Comme c'est vous qui gérez la suite, je peux vous aider à avancer rapidement sur le scan 3D et la rétro-ingénierie de la roue dentée.",
+          "next_state": "QUALIFYING",
+          "conversation_act": "nurture",
+          "lead_intent": "decisionnaire_unique",
+          "confidence": 0.99,
+          "reasoning_summary": "Le prospect confirme qu'il valide seul.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Scan 3D, rétro-ingénierie et modélisation",
+            "timeline": "Dans les 5 jours ouvrables",
+            "locations": "Québec",
+            "decision_makers": "Le prospect décide seul",
+            "urgency_driver": "Arrêt partiel de production",
+            "booking_intent_locked": false
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "QUALIFYING",
+        "expected_action": "offer_booking",
+        "allowed_actions": ["offer_booking"],
+        "allowed_conversation_acts": ["answer_then_soft_cta"],
+        "expected_next_states": ["QUALIFYING"],
+        "must_include": ["appel de cadrage", "expert"],
+        "must_not_include": [
+          "Bonjour Martin",
+          "la roue dentée brisée et le besoin d'un fichier STEP",
+          "avancer rapidement",
+          "cadrer rapidement la prise en charge"
+        ],
+        "required_facts": [
+          "The assistant explicitly offers a scoping call with an expert on the second outbound turn.",
+          "The assistant asks for consent before showing calendar availability."
+        ],
+        "forbidden_claims": [
+          "The assistant personally provides the expert's technical recommendation.",
+          "A meeting has already been booked."
+        ],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 220,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Replace vague nurture copy with one direct but low-pressure scoping-call invitation.",
+          "Do not repeat the industrial-project recap or expose live slots before acceptance."
+        ]
+      }
+    },
+    {
+      "turn_id": "accept_and_show_slots",
+      "inbound": "Oui allez-y.",
+      "replay_outputs": [
+        {
+          "reply_text": "Parfait. Vu l'arrêt partiel de production et le besoin de STEP plus validation dimensionnelle, à quoi ressemblerait un bon résultat pour vous?",
+          "next_state": "QUALIFYING",
+          "conversation_act": "ask_clarifying_question",
+          "lead_intent": "accepte_le_rendez_vous",
+          "confidence": 0.99,
+          "reasoning_summary": "Le prospect accepte la proposition de rendez-vous; les disponibilités doivent maintenant être consultées.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Scan 3D, rétro-ingénierie, fichier STEP, dessin technique et validation dimensionnelle",
+            "timeline": "Une semaine maximum",
+            "locations": "Québec",
+            "decision_makers": "Le prospect décide seul",
+            "urgency_driver": "Livraison client dans une semaine et arrêt partiel de production",
+            "booking_intent_locked": false
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        },
+        {
+          "reply_text": "Je peux vous proposer un rendez-vous de 30 minutes avec un expert : 1) mardi 21 juillet à 10 h 00 ou 2) mercredi 22 juillet à 14 h 00. Quel créneau vous convient?",
+          "next_state": "BOOKING_SENT",
+          "conversation_act": "offer_slots",
+          "lead_intent": "accepte_le_rendez_vous",
+          "confidence": 0.99,
+          "reasoning_summary": "La réponse présente uniquement les deux disponibilités retournées par le calendrier de test.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Scan 3D, rétro-ingénierie, fichier STEP, dessin technique et validation dimensionnelle",
+            "timeline": "Une semaine maximum",
+            "locations": "Québec",
+            "decision_makers": "Le prospect décide seul",
+            "urgency_driver": "Livraison client dans une semaine et arrêt partiel de production",
+            "booking_intent_locked": true
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "BOOKING_SENT",
+        "expected_action": "none",
+        "expected_pending_step": "slot_selection_pending",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["offer_slots"],
+        "expected_next_states": ["BOOKING_SENT"],
+        "must_include": [
+          "mardi 21 juillet à 10 h 00",
+          "mercredi 22 juillet à 14 h 00"
+        ],
+        "must_not_include": [
+          "À quoi ressemblerait un bon résultat",
+          "cadrer la prise en charge",
+          "déjà réservé"
+        ],
+        "required_facts": [
+          "Only the two provider-backed test slots are shown.",
+          "The lead's affirmative reply advances directly to scheduling rather than restarting qualification."
+        ],
+        "forbidden_claims": [
+          "The meeting is already booked.",
+          "A time outside the fake calendar result is available."
+        ],
+        "tool": {
+          "proposed_name": "find_slots",
+          "max_calls": 1
+        },
+        "visible_slot_indexes": [1, 2],
+        "max_questions": 1,
+        "max_chars": 300,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": ["find_slots"],
+        "max_tool_calls": 1,
+        "semantic_criteria": [
+          "Treat the brief French affirmation as acceptance of the immediately preceding meeting offer.",
+          "Show live fake-calendar options without another qualification question or a booking claim."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": [
+      {
+        "start": "2026-07-21T10:00:00-04:00",
+        "end": "2026-07-21T10:30:00-04:00",
+        "display_time": "mardi 21 juillet à 10 h 00"
+      },
+      {
+        "start": "2026-07-22T14:00:00-04:00",
+        "end": "2026-07-22T14:30:00-04:00",
+        "display_time": "mercredi 22 juillet à 14 h 00"
+      }
+    ]
+  }
+}

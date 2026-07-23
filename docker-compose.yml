@@ -3,23 +3,42 @@ x-app-environment: &app-environment
   ENV: ${ENV:-dev}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   AUTO_CREATE_TABLES: "false"
-  DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/leads_db
+  DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/leads_db
   REDIS_URL: redis://redis:6379/0
-  META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-meta-verify-token}
-  LINKEDIN_VERIFY_TOKEN: ${LINKEDIN_VERIFY_TOKEN:-linkedin-verify-token}
-  ADMIN_TOKEN: ${ADMIN_TOKEN:-change-me}
-  ENABLE_DEMO_SEED: "${ENABLE_DEMO_SEED:-true}"
+  ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+  ENABLE_DEMO_SEED: "${ENABLE_DEMO_SEED:-false}"
+  UI_REACT_ISLAND_ENABLED: "${UI_REACT_ISLAND_ENABLED:-false}"
+  UI_REACT_APP_SHELL_ENABLED: "${UI_REACT_APP_SHELL_ENABLED:-true}"
+  UI_LEGACY_SHELL_ENABLED: "${UI_LEGACY_SHELL_ENABLED:-false}"
+  UI_SECURE_COOKIES: "${UI_SECURE_COOKIES:-auto}"
+  ENABLE_LEGACY_PORTAL_TOKEN_LOGIN: "${ENABLE_LEGACY_PORTAL_TOKEN_LOGIN:-false}"
   RQ_EAGER: "${RQ_EAGER:-false}"
+  TWILIO_INBOUND_TENANT_LIMIT: "${TWILIO_INBOUND_TENANT_LIMIT:-120}"
+  TWILIO_INBOUND_ACCOUNT_LIMIT: "${TWILIO_INBOUND_ACCOUNT_LIMIT:-600}"
+  TWILIO_INBOUND_WINDOW_SECONDS: "${TWILIO_INBOUND_WINDOW_SECONDS:-60}"
   RATE_LIMIT_COUNT: "${RATE_LIMIT_COUNT:-4}"
   RATE_LIMIT_WINDOW_MINUTES: "${RATE_LIMIT_WINDOW_MINUTES:-5}"
+  AUTOMATED_SMS_DELAY_SECONDS: "${AUTOMATED_SMS_DELAY_SECONDS:-20}"
   AFTER_HOURS_FOLLOWUP_MINUTES: "${AFTER_HOURS_FOLLOWUP_MINUTES:-720}"
   TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
   TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
   TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+  SMS_PROVIDER_MODE: ${SMS_PROVIDER_MODE:-auto}
+  SETTINGS_ENCRYPTION_KEYS: ${SETTINGS_ENCRYPTION_KEYS:-}
+  ALLOW_UNSIGNED_TWILIO_WEBHOOKS: "${ALLOW_UNSIGNED_TWILIO_WEBHOOKS:-false}"
+  ALLOW_UNSIGNED_CRM_WEBHOOKS: "${ALLOW_UNSIGNED_CRM_WEBHOOKS:-false}"
+  CRM_WEBHOOK_SECRET: ${CRM_WEBHOOK_SECRET:-}
+  ZAPIER_BOOKING_WEBHOOK_SECRET: ${ZAPIER_BOOKING_WEBHOOK_SECRET:-}
+  # Inbound-only compatibility alias while existing relays migrate.
+  ZAPIER_WEBHOOK_SECRET: ${ZAPIER_WEBHOOK_SECRET:-}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
   AI_PROVIDER_MODE: ${AI_PROVIDER_MODE:-auto}
+  REQUEST_TIMEOUT_SECONDS: "${REQUEST_TIMEOUT_SECONDS:-20}"
+  REQUEST_BODY_MAX_BYTES: "${REQUEST_BODY_MAX_BYTES:-1048576}"
+  MESSAGE_MEDIA_MAX_BYTES: "${MESSAGE_MEDIA_MAX_BYTES:-26214400}"
+  MESSAGE_MEDIA_STORAGE_DIR: /app/storage/message_media
 
 services:
   migrate:
@@ -30,13 +49,14 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./:/app
+      - ./app:/app/app:ro
+      - ./alembic.ini:/app/alembic.ini:ro
 
   api:
     build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
-      - "8000:8000"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"
     environment: *app-environment
     depends_on:
       seed-demo:
@@ -46,9 +66,10 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     volumes:
-      - ./:/app
+      - ./app:/app/app:ro
+      - message_media:/app/storage/message_media
 
   worker:
     build: .
@@ -62,18 +83,36 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     volumes:
-      - ./:/app
+      - ./app:/app/app:ro
+      - message_media:/app/storage/message_media
+
+  knowledge-worker:
+    build: .
+    command: rq worker knowledge
+    environment: *app-environment
+    depends_on:
+      seed-demo:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app:ro
+      - message_media:/app/storage/message_media
 
   postgres:
     image: postgres:16
     environment:
       POSTGRES_DB: leads_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -84,8 +123,16 @@ services:
 
   redis:
     image: redis:7
+    command: redis-server --appendonly yes --appendfsync everysec
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   seed-demo:
     build: .
@@ -97,7 +144,9 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./:/app
+      - ./app:/app/app:ro
 
 volumes:
   postgres_data:
+  redis_data:
+  message_media:

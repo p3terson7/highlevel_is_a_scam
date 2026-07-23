@@ -39,7 +39,14 @@ from app.services.handoff_policy import (
 )
 from app.services.llm_agent import LLMAgent
 from app.services.i18n import client_language, remember_lead_language
-from app.services.sms_service import SMSService
+from app.services.outbound_requests import (
+    cancel_outbound_request,
+    complete_outbound_request,
+    fail_outbound_request,
+    lock_lead_for_outbound_delivery,
+    reserve_outbound_request,
+)
+from app.services.sms_service import SMSService, classify_sms_delivery_failure
 from app.services.zapier_booking import notify_zapier_booking_webhook
 
 _PENDING_STEP_KEY = "pending_step"
@@ -79,6 +86,154 @@ def _store_outbound_message(
     if created_at is not None:
         values["created_at"] = created_at
     db.add(Message(**values))
+
+
+def _send_inbound_reply_once(
+    *,
+    db: Session,
+    client: Client,
+    lead: Lead,
+    sms_service: SMSService,
+    body: str,
+    inbound_message_id: int | None,
+    retry_definitive_failure: bool = False,
+) -> tuple[str, str] | None:
+    if inbound_message_id is None:
+        delivery_state = lock_lead_for_outbound_delivery(db=db, lead_id=lead.id)
+        if delivery_state is None:
+            db.rollback()
+            db.add(
+                AuditLog(
+                    client_id=client.id,
+                    lead_id=lead.id,
+                    event_type="automated_reply_suppressed",
+                    decision={"reason": "consent_withdrawn_before_send"},
+                )
+            )
+            db.commit()
+            return None
+        provider_sid = sms_service.send_message(to_number=delivery_state.phone, body=body)
+        return provider_sid, body
+
+    reservation = reserve_outbound_request(
+        db=db,
+        lead=lead,
+        idempotency_key=f"automated-inbound-reply:{inbound_message_id}",
+        request_kind="automated_inbound_reply",
+        fingerprint_data={
+            "client_id": client.id,
+            "lead_id": lead.id,
+            "inbound_message_id": inbound_message_id,
+        },
+        pending_response={
+            "inbound_message_id": inbound_message_id,
+            "body": body,
+            "attempt_count": 1,
+            "max_attempts": 3,
+        },
+        retry_failed=retry_definitive_failure,
+        require_safe_retry=retry_definitive_failure,
+    )
+    if not reservation.should_send:
+        if reservation.status == "pending":
+            fail_outbound_request(
+                db=db,
+                request_id=reservation.request_id,
+                detail="A prior provider attempt did not record a definitive result",
+                ambiguous=True,
+                response={
+                    "inbound_message_id": inbound_message_id,
+                    "failure_reason": "delivery_result_unknown",
+                    "safe_to_retry": False,
+                },
+                merge_response=True,
+            )
+        db.add(
+            AuditLog(
+                client_id=client.id,
+                lead_id=lead.id,
+                event_type="automated_reply_suppressed",
+                decision={
+                    "reason": f"delivery_{reservation.status}",
+                    "inbound_message_id": inbound_message_id,
+                },
+            )
+        )
+        db.commit()
+        return None
+
+    delivery_state = lock_lead_for_outbound_delivery(db=db, lead_id=lead.id)
+    if delivery_state is None:
+        cancel_outbound_request(
+            db=db,
+            request_id=reservation.request_id,
+            reason="consent_withdrawn_before_send",
+            response={"inbound_message_id": inbound_message_id},
+        )
+        db.add(
+            AuditLog(
+                client_id=client.id,
+                lead_id=lead.id,
+                event_type="automated_reply_suppressed",
+                decision={
+                    "reason": "consent_withdrawn_before_send",
+                    "inbound_message_id": inbound_message_id,
+                },
+            )
+        )
+        db.commit()
+        return None
+
+    body = str(reservation.response.get("body") or body)
+    try:
+        provider_sid = sms_service.send_message(to_number=delivery_state.phone, body=body)
+    except Exception as exc:
+        failure = classify_sms_delivery_failure(exc)
+        fail_outbound_request(
+            db=db,
+            request_id=reservation.request_id,
+            detail=exc,
+            ambiguous=failure.ambiguous,
+            response={
+                "inbound_message_id": inbound_message_id,
+                "failure_reason": failure.reason,
+                "safe_to_retry": failure.safe_to_retry,
+                "provider_status": failure.provider_status,
+                "provider_code": failure.provider_code,
+                "last_failed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            merge_response=True,
+        )
+        db.add(
+            AuditLog(
+                client_id=client.id,
+                lead_id=lead.id,
+                event_type="automated_reply_failed",
+                decision={
+                    "reason": failure.reason,
+                    "inbound_message_id": inbound_message_id,
+                    "delivery_result_unknown": failure.ambiguous,
+                    "safe_to_retry": failure.safe_to_retry,
+                    "provider_status": failure.provider_status,
+                    "provider_code": failure.provider_code,
+                    "error": str(exc)[:500],
+                },
+            )
+        )
+        db.commit()
+        return None
+
+    complete_outbound_request(
+        db=db,
+        request_id=reservation.request_id,
+        provider_reference=provider_sid,
+        response={
+            "inbound_message_id": inbound_message_id,
+            "provider_sid": provider_sid,
+            "attempt_count": reservation.response.get("attempt_count", 1),
+        },
+    )
+    return provider_sid, body
 
 
 def _auto_update_crm_stage(
@@ -169,10 +324,58 @@ def _store_agent_memory(
         "lead_summary",
         "recommended_follow_up",
         "calendar_booking",
+        "booking_confirmation_unknown",
+        "booking_provider_status",
     ):
         if key in runtime_payload:
             payload[key] = runtime_payload[key]
+    if agent_response.next_state == ConversationStateEnum.HANDOFF:
+        payload.pop("booking_offer", None)
+        payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
     lead.raw_payload = payload
+
+
+def safe_agent_diagnostics(runtime_payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep retrieval/policy observability useful without storing prompts or URLs."""
+
+    raw_retrieval = runtime_payload.get("knowledge_retrieval")
+    retrieval = raw_retrieval if isinstance(raw_retrieval, dict) else {}
+    raw_sources = retrieval.get("selected_sources")
+    selected_sources: list[dict[str, Any]] = []
+    for raw_source in raw_sources if isinstance(raw_sources, list) else []:
+        if not isinstance(raw_source, dict) or len(selected_sources) >= 6:
+            continue
+        try:
+            source_id = int(raw_source.get("source_id") or 0)
+            score = round(float(raw_source.get("score") or 0.0), 3)
+        except (TypeError, ValueError):
+            continue
+        selected_sources.append(
+            {
+                "source_id": source_id,
+                "title": str(raw_source.get("title") or "")[:180],
+                "score": score,
+                "status": str(raw_source.get("status") or "")[:24],
+            }
+        )
+
+    raw_events = runtime_payload.get("guardrail_events")
+    if not isinstance(raw_events, list) and runtime_payload.get("reply_guardrail_reason"):
+        raw_events = [runtime_payload["reply_guardrail_reason"]]
+    guardrail_events = [
+        str(event)[:80]
+        for event in (raw_events if isinstance(raw_events, list) else [])[:8]
+        if str(event).strip()
+    ]
+    return {
+        "conversation_act": str(runtime_payload.get("conversation_act") or "")[:64] or None,
+        "uses_knowledge_context": bool(runtime_payload.get("uses_knowledge_context")),
+        "knowledge_retrieval": {
+            "context_available": bool(retrieval.get("context_available")),
+            "selected_sources": selected_sources,
+        },
+        "guardrail_events": guardrail_events,
+    }
 
 
 def already_processed_inbound_message(*, db: Session, lead_id: int, inbound_message_id: int) -> bool:
@@ -230,7 +433,172 @@ def _merge_booking_flow_memory(*, lead: Lead, runtime_payload: dict[str, Any], n
         if next_state == ConversationStateEnum.BOOKED:
             payload.pop("booking_offer", None)
             payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
+    if "booking_confirmation_unknown" in runtime_payload:
+        payload["booking_confirmation_unknown"] = bool(runtime_payload["booking_confirmation_unknown"])
+        payload["booking_provider_status"] = runtime_payload.get("booking_provider_status")
+    if next_state == ConversationStateEnum.HANDOFF:
+        payload.pop("booking_offer", None)
+        payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
     lead.raw_payload = payload
+
+
+def _persist_and_deliver_confirmed_booking(
+    *,
+    db: Session,
+    client: Client,
+    lead: Lead,
+    inbound_text: str,
+    turn_time: datetime,
+    sms_service: SMSService,
+    reply_text: str,
+    inbound_message_id: int | None,
+    calendar_booking: dict[str, Any],
+    outbound_raw_payload: dict[str, Any],
+    transition_reason: str,
+    provider: str,
+    provider_error: str | None,
+    booking_event_type: str,
+    booking_decision: dict[str, Any],
+    retry_definitive_failure: bool,
+) -> None:
+    """Commit the provider-confirmed outcome before best-effort notifications.
+
+    A Calendly booking is an external side effect and remains true even if the
+    confirmation SMS or Zapier notification fails. Persisting it first keeps
+    CRM state, audit history, and booking memory consistent with the provider.
+    """
+
+    previous_state = lead.conversation_state
+    lead.conversation_state = ConversationStateEnum.BOOKED
+    _auto_update_crm_stage(
+        db=db,
+        lead=lead,
+        client_id=client.id,
+        target_stage=CRM_STAGE_CONTACTED,
+        reason="booking_confirmed",
+        inbound_text=inbound_text,
+    )
+    _auto_update_crm_stage(
+        db=db,
+        lead=lead,
+        client_id=client.id,
+        target_stage=CRM_STAGE_MEETING_BOOKED,
+        reason="booking_confirmed",
+        inbound_text=inbound_text,
+    )
+    if previous_state != lead.conversation_state:
+        db.add(
+            ConversationState(
+                lead_id=lead.id,
+                previous_state=previous_state,
+                new_state=lead.conversation_state,
+                reason=transition_reason,
+                metadata_json={**outbound_raw_payload, "provider": provider},
+            )
+        )
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type=booking_event_type,
+            decision=booking_decision,
+        )
+    )
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type="agent_decision",
+            decision={
+                "inbound": inbound_text,
+                "outbound": reply_text,
+                "next_state": lead.conversation_state.value,
+                "provider": provider,
+                "provider_error": provider_error,
+                "confirmation_sms_status": "pending",
+                **outbound_raw_payload,
+            },
+        )
+    )
+    db.commit()
+
+    if _booking_webhook_enabled_for_turn(lead):
+        try:
+            notify_zapier_booking_webhook(
+                db=db,
+                client=client,
+                lead=lead,
+                calendar_booking=calendar_booking,
+                trigger="sms_ai_calendar_booking_created",
+            )
+        except Exception as exc:
+            db.rollback()
+            db.add(
+                AuditLog(
+                    client_id=client.id,
+                    lead_id=lead.id,
+                    event_type="zapier_booking_webhook_dispatch_failed",
+                    decision={"reason": "unexpected_dispatch_error", "error": str(exc)[:500]},
+                )
+            )
+            db.commit()
+
+    try:
+        delivery = _send_inbound_reply_once(
+            db=db,
+            client=client,
+            lead=lead,
+            sms_service=sms_service,
+            body=reply_text,
+            inbound_message_id=inbound_message_id,
+            retry_definitive_failure=retry_definitive_failure,
+        )
+    except Exception as exc:
+        db.rollback()
+        db.add(
+            AuditLog(
+                client_id=client.id,
+                lead_id=lead.id,
+                event_type="booking_confirmation_sms_failed",
+                decision={"reason": "provider_error", "error": str(exc)[:500]},
+            )
+        )
+        db.commit()
+        return
+
+    if delivery is None:
+        db.add(
+            AuditLog(
+                client_id=client.id,
+                lead_id=lead.id,
+                event_type="booking_confirmation_sms_failed",
+                decision={"reason": "delivery_not_confirmed"},
+            )
+        )
+        db.commit()
+        return
+    sid, reply_text = delivery
+
+    _store_outbound_message(
+        db=db,
+        lead=lead,
+        body=reply_text,
+        provider_sid=sid,
+        raw_payload=outbound_raw_payload,
+        created_at=turn_time,
+        sms_service=sms_service,
+    )
+    lead.last_outbound_at = datetime.now(timezone.utc)
+    db.add(
+        AuditLog(
+            client_id=client.id,
+            lead_id=lead.id,
+            event_type="booking_confirmation_sms_sent",
+            decision={"provider_message_sid": sid},
+        )
+    )
+    db.commit()
+    incr("sms_outbound_total")
 
 
 def _apply_booking_selection_result(
@@ -244,6 +612,7 @@ def _apply_booking_selection_result(
     result,
     inbound_message_id: int | None,
     pending_step_before: str,
+    retry_definitive_failure: bool,
 ) -> None:
     reply_text = str(result.reply_text or "").strip()
     runtime_payload = dict(result.raw_payload or {})
@@ -260,11 +629,50 @@ def _apply_booking_selection_result(
     }
     if inbound_message_id is not None:
         outbound_raw_payload["inbound_message_id"] = int(inbound_message_id)
-    for key in ("booking_offer", "calendar_booking", _PENDING_RESCHEDULE_KEY):
+    for key in (
+        "booking_offer",
+        "calendar_booking",
+        _PENDING_RESCHEDULE_KEY,
+        "booking_confirmation_unknown",
+        "booking_provider_status",
+    ):
         if key in runtime_payload and runtime_payload[key]:
             outbound_raw_payload[key] = runtime_payload[key]
 
-    sid = sms_service.send_message(to_number=lead.phone, body=reply_text)
+    calendar_booking = runtime_payload.get("calendar_booking")
+    if result.next_state == ConversationStateEnum.BOOKED and isinstance(calendar_booking, dict) and calendar_booking:
+        _persist_and_deliver_confirmed_booking(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            turn_time=turn_time,
+            sms_service=sms_service,
+            reply_text=reply_text,
+            inbound_message_id=inbound_message_id,
+            calendar_booking=calendar_booking,
+            outbound_raw_payload=outbound_raw_payload,
+            transition_reason=result.transition_reason,
+            provider="deterministic_booking_flow",
+            provider_error=None,
+            booking_event_type=result.audit_event_type,
+            booking_decision=result.audit_decision,
+            retry_definitive_failure=retry_definitive_failure,
+        )
+        return
+
+    delivery = _send_inbound_reply_once(
+        db=db,
+        client=client,
+        lead=lead,
+        sms_service=sms_service,
+        body=reply_text,
+        inbound_message_id=inbound_message_id,
+        retry_definitive_failure=retry_definitive_failure,
+    )
+    if delivery is None:
+        return
+    sid, reply_text = delivery
     _store_outbound_message(
         db=db,
         lead=lead,
@@ -277,7 +685,7 @@ def _apply_booking_selection_result(
 
     previous_state = lead.conversation_state
     lead.conversation_state = result.next_state
-    lead.last_outbound_at = turn_time
+    lead.last_outbound_at = datetime.now(timezone.utc)
     _auto_update_crm_stage(
         db=db,
         lead=lead,
@@ -366,9 +774,9 @@ def _booking_clarification_result(
             if index and display:
                 labels.append(f"{index}) {display}")
         if language == "fr":
-            reply_text = "Quel créneau voulez-vous réserver?" + (f"\n" + "\n".join(labels) if labels else "")
+            reply_text = "Quel créneau voulez-vous réserver?" + ("\n" + "\n".join(labels) if labels else "")
         else:
-            reply_text = "Which call time should I lock in?" + (f"\n" + "\n".join(labels) if labels else "")
+            reply_text = "Which call time should I lock in?" + ("\n" + "\n".join(labels) if labels else "")
     return BookingSelectionResult(
         handled=True,
         reply_text=reply_text,
@@ -472,6 +880,7 @@ def _apply_handoff_decision(
     source: str,
     provider: str = "handoff_policy",
     provider_error: str | None = None,
+    retry_definitive_failure: bool = False,
 ) -> None:
     _merge_policy_state_updates(lead=lead, decision=decision)
     pending_step_before = _current_pending_step(lead) or None
@@ -501,7 +910,18 @@ def _apply_handoff_decision(
     if inbound_message_id is not None:
         outbound_raw_payload["inbound_message_id"] = int(inbound_message_id)
 
-    sid = sms_service.send_message(to_number=lead.phone, body=reply_text)
+    delivery = _send_inbound_reply_once(
+        db=db,
+        client=client,
+        lead=lead,
+        sms_service=sms_service,
+        body=reply_text,
+        inbound_message_id=inbound_message_id,
+        retry_definitive_failure=retry_definitive_failure,
+    )
+    if delivery is None:
+        return
+    sid, reply_text = delivery
     _store_outbound_message(
         db=db,
         lead=lead,
@@ -514,7 +934,7 @@ def _apply_handoff_decision(
 
     previous_state = lead.conversation_state
     lead.conversation_state = ConversationStateEnum.HANDOFF
-    lead.last_outbound_at = turn_time
+    lead.last_outbound_at = datetime.now(timezone.utc)
     _auto_update_crm_stage(
         db=db,
         lead=lead,
@@ -592,6 +1012,7 @@ def process_inbound_turn(
     inbound_message_id: int | None = None,
     history_limit: int = _DEFAULT_HISTORY_LIMIT,
     media_attachments: list[dict[str, Any]] | None = None,
+    retry_definitive_failure: bool = False,
 ) -> None:
     turn_time = now or datetime.now(timezone.utc)
 
@@ -663,6 +1084,7 @@ def process_inbound_turn(
             result=deterministic_result,
             inbound_message_id=inbound_message_id,
             pending_step_before=pending_step_before,
+            retry_definitive_failure=retry_definitive_failure,
         )
         return
 
@@ -684,6 +1106,7 @@ def process_inbound_turn(
             decision=pre_handoff,
             inbound_message_id=inbound_message_id,
             source="pre_llm",
+            retry_definitive_failure=retry_definitive_failure,
         )
         return
 
@@ -708,6 +1131,7 @@ def process_inbound_turn(
             result=deterministic_result,
             inbound_message_id=inbound_message_id,
             pending_step_before=pending_step_before,
+            retry_definitive_failure=retry_definitive_failure,
         )
         return
 
@@ -733,6 +1157,7 @@ def process_inbound_turn(
             result=deterministic_result,
             inbound_message_id=inbound_message_id,
             pending_step_before=pending_step_before,
+            retry_definitive_failure=retry_definitive_failure,
         )
         return
 
@@ -811,6 +1236,7 @@ def process_inbound_turn(
             source="post_llm",
             provider=agent_response.provider,
             provider_error=agent_response.provider_error,
+            retry_definitive_failure=retry_definitive_failure,
         )
         return
     _merge_policy_state_updates(lead=lead, decision=post_handoff)
@@ -848,6 +1274,13 @@ def process_inbound_turn(
     elif lead.conversation_state == ConversationStateEnum.BOOKED and next_state == ConversationStateEnum.QUALIFYING:
         next_state = ConversationStateEnum.BOOKED
 
+    if has_calendar_booking:
+        # A provider-confirmed booking is authoritative even if the model
+        # returned an inconsistent state/action alongside the tool result.
+        effective_action = "mark_booked"
+        next_state = ConversationStateEnum.BOOKED
+        next_pending_step = None
+
     action = effective_action
     agent_response.action = effective_action
     _store_agent_memory(lead=lead, agent_response=agent_response, pending_step=next_pending_step)
@@ -863,6 +1296,7 @@ def process_inbound_turn(
             "intent_score": runtime_payload.get("intent_score"),
             "cta_state": runtime_payload.get("cta_state"),
             "lead_summary": runtime_payload.get("lead_summary"),
+            **safe_agent_diagnostics(runtime_payload),
         },
         "actions": [action_item.model_dump() for action_item in agent_response.actions],
         "pending_step_before": pending_step_before or None,
@@ -875,7 +1309,40 @@ def process_inbound_turn(
     if runtime_payload.get("calendar_booking"):
         outbound_raw_payload["calendar_booking"] = runtime_payload["calendar_booking"]
 
-    sid = sms_service.send_message(to_number=lead.phone, body=reply_text)
+    calendar_booking = runtime_payload.get("calendar_booking")
+    if isinstance(calendar_booking, dict) and calendar_booking:
+        _persist_and_deliver_confirmed_booking(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            turn_time=turn_time,
+            sms_service=sms_service,
+            reply_text=reply_text,
+            inbound_message_id=inbound_message_id,
+            calendar_booking=calendar_booking,
+            outbound_raw_payload=outbound_raw_payload,
+            transition_reason="calendar_booking_created",
+            provider=agent_response.provider,
+            provider_error=agent_response.provider_error,
+            booking_event_type="calendar_booking_created",
+            booking_decision={"inbound": inbound_text, "calendar_booking": calendar_booking},
+            retry_definitive_failure=retry_definitive_failure,
+        )
+        return
+
+    delivery = _send_inbound_reply_once(
+        db=db,
+        client=client,
+        lead=lead,
+        sms_service=sms_service,
+        body=reply_text,
+        inbound_message_id=inbound_message_id,
+        retry_definitive_failure=retry_definitive_failure,
+    )
+    if delivery is None:
+        return
+    sid, reply_text = delivery
     _store_outbound_message(
         db=db,
         lead=lead,
@@ -888,7 +1355,7 @@ def process_inbound_turn(
 
     previous_state = lead.conversation_state
     lead.conversation_state = next_state
-    lead.last_outbound_at = turn_time
+    lead.last_outbound_at = datetime.now(timezone.utc)
     _auto_update_crm_stage(
         db=db,
         lead=lead,

@@ -47,7 +47,19 @@ _BOOKED_CONFIRM_PATTERN = re.compile(
     r"j'ai r[ée]serv[ée]|nous avons r[ée]serv[ée]|d[ée]j[àa] r[ée]serv[ée]|rendez-vous confirm[ée])\b",
     re.IGNORECASE,
 )
-_HANDOFF_PATTERN = re.compile(r"\b(human|person|call me|someone from your team|manager|representative|humain|personne|appelez-moi|quelqu'un|repr[ée]sentant|g[ée]rant)\b", re.IGNORECASE)
+_HANDOFF_PATTERN = re.compile(
+    r"\b(?:"
+    r"(?:i (?:need|want|prefer)|get me|connect me|can i|could i|may i) (?:to )?(?:a )?(?:human|person|manager|representative)|"
+    r"(?:talk|speak|connect)(?: me)? (?:to|with) (?:a )?(?:human|person|manager|representative|someone)|"
+    r"(?:need|want) (?:a )?(?:human|representative)(?: now)?|call me|"
+    r"someone from your team (?:can |could |to )?(?:call|contact|reach)|"
+    r"(?:je (?:veux|voudrais|souhaite|dois)|puis-je|peut-on) (?:parler|[ée]changer) (?:[àa]|avec) (?:un|une) (?:humain|personne|repr[ée]sentant|g[ée]rant)|"
+    r"(?:parler|[ée]changer) (?:[àa]|avec) (?:un|une) (?:humain|personne|repr[ée]sentant|g[ée]rant)|"
+    r"mettez-moi en contact|appelez-moi|"
+    r"quelqu'un (?:de (?:votre|l['’])[ée]quipe )?(?:peut |pourrait )?(?:m'appeler|me contacter)"
+    r")\b",
+    re.IGNORECASE,
+)
 _IDENTITY_QUESTION_PATTERN = re.compile(
     r"\b("
     r"who (?:are you|is this|runs?|owns?|founded|started|is behind)|"
@@ -69,21 +81,37 @@ _ASSISTANT_OWNERSHIP_CLAIM_PATTERN = re.compile(
 )
 _CLOSING_PATTERN = re.compile(r"^(thanks|thank you|ok|okay|cool|great|perfect|sounds good|merci|parfait|d'accord|super)[.! ]*$", re.IGNORECASE)
 _TIMELINE_PATTERN = re.compile(
-    r"\b(asap|immediately|this week|next week|within \d+\s+(?:day|days|week|weeks|month|months)|\d+\s+(?:day|days|week|weeks|month|months))\b",
+    r"\b(asap|immediately|this week|next week|within \d+\s+(?:day|days|week|weeks|month|months)|"
+    r"\d+\s+(?:day|days|week|weeks|month|months)|d[èe]s que possible|imm[ée]diatement|cette semaine|"
+    r"semaine prochaine|dans (?:un|une|\d+)\s+(?:jour|jours|semaine|semaines|mois)|"
+    r"sous (?:un|une|\d+)\s+(?:jour|jours|semaine|semaines|mois)|au plus tard)\b",
     re.IGNORECASE,
 )
 _DECISION_MAKER_PATTERN = re.compile(
-    r"\b(owner|founder|co-?founder|decision maker|final decision|approv|procurement|partner|stakeholder|team lead|director)\b",
+    r"\b(owner|founder|co-?founder|decision maker|final decision|approv|procurement|partner|stakeholder|team lead|director|"
+    r"c['’]est (?:juste )?moi|ce n['’]est que moi|il n['’]y a que moi|juste moi|moi uniquement|"
+    r"je suis seul|je (?:d[ée]cide|valide)|moi seul|seul d[ée]cisionnaire|personne d'autre|"
+    r"it['’]s (?:just )?me|only me|just me|no one else|nobody else|"
+    r"d[ée]cisionnaire|responsable|directeur|propri[ée]taire)\b",
     re.IGNORECASE,
 )
 _BOOKING_INTENT_PATTERN = re.compile(
     r"\b(yes|yeah|yep|sure|sounds good|works for me|let'?s do (?:it|that)|book(?: (?:it|that))?|"
     r"lock (?:it|that) in|go ahead|schedule|set it up|confirm(?: it| that)?|"
-    r"oui|certainement|ça marche|ca marche|allons-y|r[ée]server?|r[ée]servez(?:-le)?|"
-    r"bloque(?:z|r)?(?:-le)?|planifier|confirmer?|confirmez(?:-le)?|prenez le rendez-vous)\b",
+    r"oui|certainement|ça marche|ca marche|allons-y|allez-y|r[ée]server?|r[ée]servez(?:-le)?|"
+    r"bloque(?:z|r)?(?:-le)?|planifier|confirmer?|confirmez(?:-le)?|prenez le rendez-vous|"
+    r"prendre (?:un )?rendez-vous|je (?:veux|voudrais|souhaite) (?:prendre |r[ée]server )?(?:un )?(?:rendez-vous|appel))\b",
     re.IGNORECASE,
 )
-_PRICING_PATTERN = re.compile(r"\b(price|pricing|cost|quote|estimate|how much|rates?|budget|prix|tarif|co[ûu]t|soumission|combien|estimation)\b", re.IGNORECASE)
+_PRICING_PATTERN = re.compile(
+    r"\b(?:price|pricing|cost|quote|estimate|how much|rates?|budget|prix|tarif|"
+    r"co[ûu]t|soumission|estimation|"
+    r"combien\s+(?:[cç]a\s+)?co[ûu]te|combien\s+(?:pour|facturez|chargez)|"
+    r"(?:[cç]a|cela)\s+co[ûu]te\s+combien|c(?:['’]|\s+)est\s+combien|"
+    r"quel(?:\s+est\s+le)?\s+(?:prix|tarif)|"
+    r"(?:revient|facturez|chargez)[^?.!]{0,30}\bcombien)\b",
+    re.IGNORECASE,
+)
 _PRICE_AMOUNT_PATTERN = re.compile(
     r"(\$\s?\d|(?:under|over|around|about|roughly|starts? at|between)\s+\$?\d[\d,]*(?:\.\d+)?\s?(?:k|cad|usd|dollars?)\b|"
     r"\b\d[\d,]*(?:\.\d+)?\s?(?:cad|usd|dollars?)\b)",
@@ -110,7 +138,9 @@ _CALL_REFUSAL_PATTERN = re.compile(
 _MEETING_CTA_PATTERN = re.compile(
     r"\b(scoping call|consultation call|strategy call|quick call|short call|short meeting|meeting|appointment|book(?:ing)?|schedule|calendar|"
     r"availability|available times|send (?:over )?times|share (?:live )?times|find (?:a )?time|"
-    r"line up (?:a )?(?:call|meeting|appointment|strategy call)|connect with (?:the )?team|coordinate (?:the )?next step|talk (?:with|to) (?:someone|the team))\b",
+    r"line up (?:a )?(?:call|meeting|appointment|strategy call)|connect with (?:the )?team|coordinate (?:the )?next step|talk (?:with|to) (?:someone|the team)|"
+    r"rendez[- ]vous|rencontre avec|appel (?:avec|de consultation|de cadrage|telephonique)|disponibilites?|creneaux?|"
+    r"reserver|reservation|planifier|calendrier)\b",
     re.IGNORECASE,
 )
 _BUYING_SIGNAL_PATTERN = re.compile(
@@ -164,8 +194,29 @@ _GENERIC_MISSING_FIELD_SPECS: tuple[dict[str, Any], ...] = (
         "label": "Desired outcome",
         "question": "What would a successful outcome look like for you?",
         "why": "Clarifies the desired result without assuming a specific industry or service.",
-        "key_tokens": ("purpose", "goal", "reason", "use_case", "use case", "why", "outcome", "success"),
+        "key_tokens": (
+            "purpose",
+            "goal",
+            "reason",
+            "use_case",
+            "use case",
+            "why",
+            "outcome",
+            "success",
+            "project_description",
+            "additional_information",
+            "informations_additionnelles",
+            "description_projet",
+        ),
         "question_tokens": ("successful outcome", "successful result", "success look", "success looks", "hoping to accomplish", "main goal"),
+        "question_tokens_fr": (
+            "bon resultat",
+            "resultat attendu",
+            "resultat recherchez",
+            "voulez-vous surtout",
+            "souhaitez-vous obtenir",
+            "objectif principal",
+        ),
     },
     {
         "key": "request_type",
@@ -174,6 +225,7 @@ _GENERIC_MISSING_FIELD_SPECS: tuple[dict[str, Any], ...] = (
         "why": "Clarifies fit without relying on business-specific assumptions.",
         "key_tokens": ("service", "offering", "product", "request", "need", "goal", "problem", "challenge", "interest", "scope"),
         "question_tokens": ("type of help", "help are you looking for", "what are you looking for"),
+        "question_tokens_fr": ("type d'aide", "aide recherchez", "service recherchez", "besoin principal"),
     },
     {
         "key": "timeline",
@@ -182,6 +234,7 @@ _GENERIC_MISSING_FIELD_SPECS: tuple[dict[str, Any], ...] = (
         "why": "Helps prioritize urgency and next steps.",
         "key_tokens": ("timeline", "timeframe", "deadline", "start", "date", "urgency", "when"),
         "question_tokens": ("when would you", "get started", "have this resolved", "timeline"),
+        "question_tokens_fr": ("quand aimeriez-vous", "date de livraison", "quel delai", "quelle echeance"),
     },
     {
         "key": "decision_process",
@@ -190,6 +243,13 @@ _GENERIC_MISSING_FIELD_SPECS: tuple[dict[str, Any], ...] = (
         "why": "Clarifies who should be involved before moving forward.",
         "key_tokens": ("decision", "approver", "stakeholder", "owner", "role", "buyer", "contact"),
         "question_tokens": ("best person", "someone else", "coordinate next steps", "decision maker", "decision-maker"),
+        "question_tokens_fr": (
+            "bonne personne",
+            "quelqu'un d'autre",
+            "personne qui valide",
+            "personne qui prend la decision",
+            "coordonner la suite",
+        ),
     },
     {
         "key": "follow_up_contact",
@@ -198,6 +258,7 @@ _GENERIC_MISSING_FIELD_SPECS: tuple[dict[str, Any], ...] = (
         "why": "Keeps follow-up easy without assuming a sales process.",
         "key_tokens": ("email", "contact", "preferred_contact", "preferred contact", "follow_up", "follow up"),
         "question_tokens": ("best email", "contact method", "send details"),
+        "question_tokens_fr": ("meilleur courriel", "moyen de contact", "envoyer des details"),
     },
 )
 

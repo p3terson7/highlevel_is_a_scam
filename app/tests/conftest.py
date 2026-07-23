@@ -10,6 +10,7 @@ from app.core.deps import clear_dependency_caches, get_booking_service, get_llm_
 from app.db.models import Base, Client, ConversationStateEnum
 from app.db.session import get_engine, get_session_factory, reset_db_caches
 from app.services.booking import BookingSelectionResult, BookingSlot, SlotOffer
+from app.services.compliance import clear_local_rate_limit_state
 from app.services.llm_agent import AgentResponse
 from app.services.sms_delivery import with_initial_delivery_status
 
@@ -21,6 +22,7 @@ class FakeSMSService:
     def render_template(self, client: Client, template_key: str, context: dict | None = None) -> str:
         templates = {
             "stop_confirmation": "You are unsubscribed.",
+            "start_confirmation": "You are subscribed again.",
             "help_response": "Help message.",
             "after_hours": "We will reply tomorrow from {business_name}.",
             "initial_sms": "Hi from {business_name}.",
@@ -438,16 +440,35 @@ class TestContext:
 
 @pytest.fixture
 def test_context(tmp_path, monkeypatch) -> TestContext:
+    from app.api.routes_webhooks import _reset_webhook_admission_state
+    from app.services.login_rate_limit import reset_local_portal_login_limits
+    from app.services.sandbox_admission import reset_local_sandbox_admission_state
+    from app.services.twilio_inbound_admission import reset_local_twilio_admission_state
+
+    _reset_webhook_admission_state()
+    reset_local_portal_login_limits()
+    reset_local_sandbox_admission_state()
+    reset_local_twilio_admission_state()
+    monkeypatch.setattr("app.services.login_rate_limit._redis_client", lambda _: None)
+    monkeypatch.setattr("app.services.sandbox_admission._redis_client", lambda _: None)
+    monkeypatch.setattr("app.api.routes_webhooks._redis_client", lambda: None)
+    # Do not reuse counters from a developer's running Compose Redis instance.
+    monkeypatch.setattr("app.api.routes_sms.get_redis_connection", lambda: None)
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{db_path.as_posix()}")
     monkeypatch.setenv("RQ_EAGER", "true")
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "")
-    monkeypatch.setenv("ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("ALLOW_UNSIGNED_TWILIO_WEBHOOKS", "true")
+    monkeypatch.setenv("ALLOW_UNSIGNED_CRM_WEBHOOKS", "true")
+    monkeypatch.setenv("ADMIN_TOKEN", "test-admin-token-32-characters-long!")
+    monkeypatch.setenv("ENABLE_DEMO_SEED", "true")
+    monkeypatch.setenv("ENABLE_LEGACY_PORTAL_TOKEN_LOGIN", "true")
     monkeypatch.setenv("AUTO_CREATE_TABLES", "false")
     monkeypatch.setenv("MESSAGE_MEDIA_STORAGE_DIR", str(tmp_path / "message_media"))
 
     get_settings.cache_clear()
     clear_dependency_caches()
+    clear_local_rate_limit_state()
     reset_db_caches()
 
     engine = get_engine()
@@ -485,7 +506,7 @@ def test_context(tmp_path, monkeypatch) -> TestContext:
     app.dependency_overrides[get_llm_agent] = lambda: fake_llm
     app.dependency_overrides[get_booking_service] = lambda: fake_booking
 
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
         yield TestContext(
             client=client,
             fake_sms=fake_sms,
@@ -495,3 +516,7 @@ def test_context(tmp_path, monkeypatch) -> TestContext:
         )
 
     app.dependency_overrides.clear()
+    clear_local_rate_limit_state()
+    reset_local_sandbox_admission_state()
+    reset_local_twilio_admission_state()
+    _reset_webhook_admission_state()

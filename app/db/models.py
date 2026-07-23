@@ -10,9 +10,11 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     JSON,
+    literal_column,
     String,
     Text,
     UniqueConstraint,
@@ -75,6 +77,17 @@ class TimestampMixin:
 
 class Client(Base, TimestampMixin):
     __tablename__ = "clients"
+    __table_args__ = (
+        Index(
+            "uq_clients_enabled_portal_email",
+            "portal_email",
+            unique=True,
+            postgresql_where=text(
+                "portal_enabled AND trim(portal_email) <> ''"
+            ),
+            sqlite_where=text("portal_enabled AND trim(portal_email) <> ''"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_key: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
@@ -103,6 +116,7 @@ class Client(Base, TimestampMixin):
     )
     faq_context: Mapped[str] = mapped_column(Text, default="", nullable=False)
     ai_context: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    knowledge_profile_context: Mapped[str] = mapped_column(Text, default="", nullable=False)
     template_overrides: Mapped[dict[str, str]] = mapped_column(
         JSON, default=default_dict, nullable=False
     )
@@ -149,7 +163,7 @@ class Lead(Base, TimestampMixin):
     form_answers: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
 
-    consented: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    consented: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     opted_out: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     conversation_state: Mapped[ConversationStateEnum] = mapped_column(
@@ -184,6 +198,12 @@ class Message(Base):
         Index("ix_messages_client_direction_created_id", "client_id", "direction", "created_at", "id"),
         Index("ix_messages_client_direction_sid", "client_id", "direction", "provider_message_sid"),
         Index(
+            "ix_messages_inbound_work_status_updated",
+            "inbound_work_status",
+            "inbound_work_updated_at",
+            "id",
+        ),
+        Index(
             "uq_messages_client_direction_provider_sid_not_empty",
             "client_id",
             "direction",
@@ -201,6 +221,21 @@ class Message(Base):
     body: Mapped[str] = mapped_column(Text, nullable=False)
     provider_message_sid: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
+    # Only inbound messages that need an automated turn use these fields.
+    # Keeping the state in a regular column makes worker claiming atomic on
+    # both PostgreSQL and the SQLite test database; JSON payload updates do not.
+    inbound_work_status: Mapped[str] = mapped_column(
+        String(24), default="", server_default="", nullable=False
+    )
+    inbound_work_attempt_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    inbound_work_error: Mapped[str] = mapped_column(
+        String(128), default="", server_default="", nullable=False
+    )
+    inbound_work_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -231,12 +266,77 @@ class MessageAttachment(Base):
     storage_path: Mapped[str] = mapped_column(String(1024), default="", nullable=False)
     provider_media_url: Mapped[str] = mapped_column(String(2048), default="", nullable=False)
     public_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    public_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     message: Mapped[Message] = relationship(back_populates="attachments")
+
+
+class InboundWebhookEvent(Base):
+    """Durable inbox row bridging an authenticated webhook to the worker."""
+
+    __tablename__ = "inbound_webhook_events"
+    __table_args__ = (
+        UniqueConstraint("client_id", "event_key", name="uq_inbound_webhook_events_client_key"),
+        Index("ix_inbound_webhook_events_status_created", "status", "created_at"),
+        Index(
+            "ix_inbound_webhook_events_client_fingerprint_created",
+            "client_id",
+            "payload_sha256",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    endpoint: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_detail: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class OutboundRequest(Base):
+    """Durable idempotency reservation for external side effects."""
+
+    __tablename__ = "outbound_requests"
+    __table_args__ = (
+        UniqueConstraint("client_id", "idempotency_key", name="uq_outbound_requests_client_key"),
+        Index("ix_outbound_requests_lead_created", "lead_id", "created_at"),
+        Index("ix_outbound_requests_status_updated", "status", "updated_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False)
+    provider_message_sid: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
+    error_detail: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class ConversationState(Base):
@@ -385,24 +485,29 @@ class KnowledgeSource(Base, TimestampMixin):
     __tablename__ = "knowledge_sources"
     __table_args__ = (
         UniqueConstraint("client_id", "normalized_url", name="uq_knowledge_sources_client_url"),
+        UniqueConstraint("client_id", "id", name="uq_knowledge_sources_client_id_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), index=True)
     url: Mapped[str] = mapped_column(String(2048), nullable=False)
     normalized_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    final_url: Mapped[str] = mapped_column(String(2048), default="", nullable=False)
     title: Mapped[str] = mapped_column(String(512), default="", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
     content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     extracted_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
     text_excerpt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    structured_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=default_dict, nullable=False)
     error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
     last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     client: Mapped[Client] = relationship(back_populates="knowledge_sources")
     chunks: Mapped[list["KnowledgeChunk"]] = relationship(
         back_populates="source",
         cascade="all, delete-orphan",
+        foreign_keys=lambda: [KnowledgeChunk.client_id, KnowledgeChunk.source_id],
         order_by="KnowledgeChunk.chunk_index",
     )
 
@@ -411,6 +516,12 @@ class KnowledgeChunk(Base, TimestampMixin):
     __tablename__ = "knowledge_chunks"
     __table_args__ = (
         UniqueConstraint("source_id", "chunk_index", name="uq_knowledge_chunks_source_index"),
+        ForeignKeyConstraint(
+            ["client_id", "source_id"],
+            ["knowledge_sources.client_id", "knowledge_sources.id"],
+            name="fk_knowledge_chunks_client_source",
+            ondelete="CASCADE",
+        ),
         Index("ix_knowledge_chunks_client_source_index", "client_id", "source_id", "chunk_index"),
     )
 
@@ -421,4 +532,17 @@ class KnowledgeChunk(Base, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     search_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
-    source: Mapped[KnowledgeSource] = relationship(back_populates="chunks")
+    source: Mapped[KnowledgeSource] = relationship(
+        back_populates="chunks",
+        foreign_keys=[client_id, source_id],
+    )
+
+
+# PostgreSQL production retrieval uses this expression index. SQLite development
+# and tests deliberately skip it and use the bounded lexical fallback.
+Index(
+    "ix_knowledge_chunks_search_tsv",
+    func.to_tsvector(literal_column("'simple'"), KnowledgeChunk.search_text),
+    postgresql_using="gin",
+    _table=KnowledgeChunk.__table__,
+).ddl_if(dialect="postgresql")

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "id": "en_support_before_cta",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["english", "support-first", "cta-restraint", "knowledge"],
+  "risk": "medium",
+  "tenant": {
+    "business_name": "Northstar Home Care",
+    "tone": "warm, practical, concise",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "What service do you need?",
+      "When would you like it completed?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "Every installation includes a two-year workmanship warranty. Support is available Monday through Saturday.",
+    "ai_context": "Answer service questions directly. Offer an appointment only after the lead asks or when it clearly helps."
+  },
+  "lead": {
+    "full_name": "Avery Test",
+    "email": "avery.test@example.test",
+    "phone": "+14165550101",
+    "city": "Toronto",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "service_interest": "Kitchen cabinet installation"
+    },
+    "raw_payload": {}
+  },
+  "initial_history": [],
+  "turns": [
+    {
+      "inbound": "What happens if there is a problem after the installation? Is there a warranty?",
+      "replay_outputs": [
+        {
+          "reply_text": "Yes. Every installation includes a two-year workmanship warranty, and support is available Monday through Saturday if an issue comes up.",
+          "next_state": "QUALIFYING",
+          "conversation_act": "answer_question",
+          "lead_intent": "support_question",
+          "confidence": 0.98,
+          "reasoning_summary": "The lead asked a factual support question that is answered by tenant knowledge.",
+          "uses_knowledge_context": true,
+          "collected_fields": {
+            "service_needed": "Kitchen cabinet installation",
+            "timeline": null,
+            "locations": null,
+            "decision_makers": null,
+            "urgency_driver": null,
+            "booking_intent_locked": false
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "QUALIFYING",
+        "expected_action": "none",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["answer_question"],
+        "expected_next_states": ["QUALIFYING"],
+        "must_include": ["two-year workmanship warranty", "Monday through Saturday"],
+        "must_not_include": ["book", "meeting", "appointment"],
+        "required_facts": [
+          "The workmanship warranty lasts two years.",
+          "Support is available Monday through Saturday."
+        ],
+        "forbidden_claims": [
+          "The warranty is lifetime coverage.",
+          "An appointment is required to receive support."
+        ],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 320,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Answer the support question before any sales transition.",
+          "Do not pressure the lead to book."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}
