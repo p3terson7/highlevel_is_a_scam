@@ -1366,12 +1366,16 @@ def _localize_english_clock_times(text: str) -> str:
 
 def _remove_disallowed_pricing_language(text: str, context: dict[str, Any]) -> str:
     if _reply_has_budget_language(text):
-        return _non_booking_bridge_reply({**context, "pricing_question": True})
+        return _non_booking_bridge_reply(
+            {**context, "pricing_question": bool(context.get("pricing_question"))}
+        )
     if context.get("pricing_context_available"):
         return text
     if not _reply_has_pricing_language(text):
         return text
-    return _non_booking_bridge_reply({**context, "pricing_question": True})
+    return _non_booking_bridge_reply(
+        {**context, "pricing_question": bool(context.get("pricing_question"))}
+    )
 
 
 def _soft_call_cta_allowed(context: dict[str, Any]) -> bool:

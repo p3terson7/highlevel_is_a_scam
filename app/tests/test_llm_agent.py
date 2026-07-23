@@ -4,9 +4,11 @@ import pytest
 
 import app.services.agent_v3 as agent_v3_module
 from app.db.models import Client, ConversationStateEnum, Lead, LeadSource, Message, MessageDirection
+from app.services.agent_v3_helpers import _apply_response_guardrails
 from app.services.booking import BookingProviderError
 from app.services.knowledge import KnowledgeContextResult, KnowledgeRetrievalQuery
 from app.services.llm_agent import LLMAgent
+from app.workers.tasks import _meta_initial_seed_text
 
 
 class FailingProvider:
@@ -1137,6 +1139,57 @@ def test_pricing_question_after_decision_prompt_is_not_stored_as_decision_answer
     assert context["pricing_question"] is True
     assert context["lead_question_detected"] is True
     assert context["qualification_memory"].get("decision_makers") is None
+
+
+def test_internal_form_type_is_excluded_from_agent_context_and_meta_seed():
+    lead = _lead(
+        form_answers={
+            "form_type": "quote_request",
+            "lang": "fr",
+            "type_client": "Individual",
+            "services": "Scan 3D",
+        }
+    )
+    agent = agent_v3_module.LLMAgentV3(provider=FailingProvider())
+
+    seed = _meta_initial_seed_text(lead)
+    context = agent._build_context(
+        client=_client(),
+        lead=lead,
+        inbound_text=seed,
+        history=[],
+    )
+
+    assert "quote_request" not in seed
+    assert "Form Type" not in seed
+    assert "form_type" not in context["lead_form_answers"]
+    assert "lang" not in context["lead_form_answers"]
+    assert "form_type" not in context["known_form_field_keys"]
+    assert all(fact["key"] != "form_type" for fact in context["known_form_facts"])
+    assert context["qualification_memory"]["service_needed"] == "Scan 3D"
+    assert context["pricing_question"] is False
+
+
+def test_invented_pricing_copy_does_not_create_a_pricing_disclaimer():
+    reply = _apply_response_guardrails(
+        "Pricing and package details depend on the project scope.",
+        {
+            "response_language": "fr",
+            "pricing_question": False,
+            "pricing_context_available": False,
+            "intent_level": "MEDIUM_INTENT",
+            "recommended_missing_field": {
+                "question": "Quel type de pièce souhaitez-vous numériser?"
+            },
+            "cta_state": {},
+        },
+    )
+
+    normalized = reply.casefold()
+    assert reply == "Quel type de pièce souhaitez-vous numériser?"
+    assert "prix" not in normalized
+    assert "pricing" not in normalized
+    assert "forfait" not in normalized
 
 
 def test_call_interest_without_tool_is_validated_into_live_slot_offer():

@@ -1609,6 +1609,46 @@ def test_crm_lead_detail_and_tasks_endpoints(test_context):
     assert any(item["id"] == task_id for item in task_list.json()["items"])
 
 
+def test_ui_hides_internal_form_type_for_existing_leads(test_context):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.META,
+            full_name="Existing Quote Lead",
+            phone="+15145550198",
+            email="existing-quote@example.com",
+            city="Montréal",
+            form_answers={
+                "form_type": "quote_request",
+                "services": "Scan 3D",
+            },
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.commit()
+        lead_id = lead.id
+
+    crm_detail = test_context.client.get(
+        f"/ui/api/crm/leads/{lead_id}",
+        headers=_admin_headers(),
+    )
+    thread = test_context.client.get(
+        f"/ui/api/conversations/{lead_id}/thread",
+        headers=_admin_headers(),
+    )
+
+    assert crm_detail.status_code == 200
+    assert thread.status_code == 200
+    for payload in (crm_detail.json(), thread.json()):
+        assert payload["lead"]["form_answers"] == {"services": "Scan 3D"}
+        assert "Form Type" not in payload["lead"]["summary"]
+
+
 def test_crm_endpoints_are_scoped_for_client_portal(test_context):
     seed = test_context.client.post("/ui/api/seed-demo?reset=true", headers=_admin_headers())
     assert seed.status_code == 200

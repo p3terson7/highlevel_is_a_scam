@@ -622,6 +622,7 @@ def test_website_form_webhook_uses_linkedin_utm_as_source(test_context):
             "email": "linkedin.website@example.com",
         },
         "form_answers": {
+            "form_type": "quote_request",
             "type_client": "Company",
             "service_interest": "Scan 3D",
             "timeline": "2 semaines",
@@ -651,6 +652,7 @@ def test_website_form_webhook_uses_linkedin_utm_as_source(test_context):
         assert lead.source == LeadSource.LINKEDIN
         assert lead.phone == "+15553334444"
         assert lead.form_answers["service_interest"] == "Scan 3D"
+        assert "form_type" not in lead.form_answers
         assert "email" not in lead.form_answers
         assert "phone_number" not in lead.form_answers
         assert "utm_source" not in lead.form_answers
@@ -675,6 +677,158 @@ def test_website_form_webhook_uses_linkedin_utm_as_source(test_context):
             )
         ).all()
         assert len(outbound_messages) >= 1
+
+
+@pytest.mark.parametrize("utm_source", ["meta", "facebook", "instagram"])
+def test_signed_website_form_webhook_derives_meta_tracking_from_submission_url_without_sms(
+    test_context,
+    utm_source,
+):
+    secret = "meta-landing-page-webhook-secret"
+    admin_headers = {"X-Admin-Token": "test-admin-token-32-characters-long!"}
+    patch = test_context.client.patch(
+        f"/admin/clients/{test_context.client_key}",
+        headers=admin_headers,
+        json={"provider_config": {"crm_webhook_secret": secret}},
+    )
+    assert patch.status_code == 200
+
+    external_lead_id = f"meta-landing-{utm_source}-001"
+    email = f"{utm_source}.landing@example.com"
+    payload = {
+        "source_page_url": (
+            "https://3dpreciscan.com/soumission"
+            f"?utm_source={utm_source}"
+            "&utm_medium=paid_social"
+            "&utm_campaign=scan+3d+quebec"
+            "&utm_content=quote-button"
+            "&utm_term=industrial+scanner"
+            "&utm_id=120215001234567890"
+            "&ad_id=120215009876543210"
+            "&fbclid=IwAR-test-click-id"
+        ),
+        "referrer": "https://l.facebook.com/",
+        "lead": {
+            "id": external_lead_id,
+            "full_name": f"{utm_source.title()} Landing Lead",
+            "phone": "+1 (555) 333-4545",
+            "email": email,
+        },
+        "form_answers": {
+            "service_interest": "Scan 3D",
+            "timeline": "2 semaines",
+        },
+        # PHP posts every tracking key, even if browser-side attribution failed
+        # to fill the hidden inputs. Blank fields must not erase URL fallback.
+        "tracking": {
+            "utm_source": "",
+            "utm_medium": "",
+            "utm_campaign": "",
+            "utm_content": "",
+            "utm_term": "",
+            "utm_id": "",
+            "ad_id": "",
+        },
+    }
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    timestamp = str(int(time.time()))
+    signature = hmac.new(
+        secret.encode(),
+        timestamp.encode() + b"." + body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    response = test_context.client.post(
+        f"/webhooks/form/{test_context.client_key}",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-CRM-Webhook-Timestamp": timestamp,
+            "X-CRM-Webhook-Signature": f"sha256={signature}",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    assert response.json()["source"] == "meta"
+    assert response.json().get("duplicate", False) is False
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = db.scalar(
+            select(Lead).where(
+                Lead.external_lead_id == external_lead_id,
+                Lead.client_id == 1,
+            )
+        )
+        assert lead is not None
+        assert lead.source == LeadSource.META
+        assert lead.email == email
+        assert lead.phone == "+15553334545"
+        assert lead.form_answers == {
+            "service_interest": "Scan 3D",
+            "when_to_start": "2 semaines",
+        }
+        assert lead.raw_payload["source_page_url"] == payload["source_page_url"]
+        assert lead.raw_payload["tracking"] == {
+            "utm_source": utm_source,
+            "utm_medium": "paid_social",
+            "utm_campaign": "scan 3d quebec",
+            "utm_content": "quote-button",
+            "utm_term": "industrial scanner",
+            "utm_id": "120215001234567890",
+            "ad_id": "120215009876543210",
+            "fbclid": "IwAR-test-click-id",
+        }
+        assert lead.consented is False
+        assert lead.initial_sms_sent_at is None
+        assert lead.crm_stage == "New Lead"
+        assert lead.raw_payload["consent_evidence"] == {
+            "granted": False,
+            "status": "not_provided",
+            "source_fields": [],
+        }
+
+        event = db.scalar(
+            select(InboundWebhookEvent).where(
+                InboundWebhookEvent.client_id == lead.client_id,
+                InboundWebhookEvent.endpoint == "form",
+            )
+        )
+        assert event is not None
+        assert event.source == "meta"
+        assert event.status == "completed"
+        assert event.attempt_count == 1
+        assert event.payload_json == {}
+
+        webhook_log = db.scalar(
+            select(AuditLog).where(
+                AuditLog.client_id == lead.client_id,
+                AuditLog.event_type == "website_form_webhook_received",
+            )
+        )
+        assert webhook_log is not None
+        assert webhook_log.decision["authentication"] == "hmac-sha256"
+        assert webhook_log.decision["queued_source"] == "meta"
+
+        normalized_log = db.scalar(
+            select(AuditLog).where(
+                AuditLog.lead_id == lead.id,
+                AuditLog.event_type == "lead_normalized",
+            )
+        )
+        assert normalized_log is not None
+        assert normalized_log.decision["source"] == "meta"
+        assert normalized_log.decision["should_send_initial_sms"] is False
+
+        outbound_messages = db.scalars(
+            select(Message).where(
+                Message.lead_id == lead.id,
+                Message.direction == MessageDirection.OUTBOUND,
+            )
+        ).all()
+        assert outbound_messages == []
+        assert test_context.fake_sms.sent == []
 
 
 def test_website_form_webhook_parses_zapier_key_value_blob(test_context):

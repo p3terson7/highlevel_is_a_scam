@@ -72,7 +72,12 @@ from app.services.knowledge import knowledge_payload
 from app.services.inbound_sms import process_inbound_turn, safe_agent_diagnostics
 from app.services.llm_agent import build_llm_agent
 from app.services.message_media import refresh_attachment_public_access
-from app.services.lead_summary import build_lead_summary_lines, build_lead_summary_text, normalize_form_answers
+from app.services.lead_summary import (
+    build_lead_summary_lines,
+    build_lead_summary_text,
+    filter_question_form_answers,
+    normalize_form_answers,
+)
 from app.services.portal_auth import issue_portal_token, portal_auth_version, verify_portal_password, verify_portal_token
 from app.services.ui_session_auth import current_ui_session_token, verify_ui_session_token
 from app.services.config_visibility import (
@@ -691,11 +696,11 @@ def _lead_display_name(lead: Lead) -> str:
 
 
 def _lead_summary(lead: Lead) -> str:
-    return build_lead_summary_text(normalize_form_answers(lead.form_answers or {}))
+    return build_lead_summary_text(filter_question_form_answers(lead.form_answers or {}))
 
 
 def _lead_summary_lines(lead: Lead) -> list[dict[str, str]]:
-    return build_lead_summary_lines(normalize_form_answers(lead.form_answers or {}))
+    return build_lead_summary_lines(filter_question_form_answers(lead.form_answers or {}))
 
 
 def _lead_agent_insights(lead: Lead) -> dict[str, Any]:

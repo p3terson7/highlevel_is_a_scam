@@ -17,7 +17,7 @@ _SANDBOX_MESSAGE_WINDOW = timedelta(minutes=1)
 def _sandbox_initial_seed_text(lead: Lead) -> str:
     """Describe a Test Lab submission without pretending it came from Meta."""
 
-    normalized_answers = normalize_form_answers(lead.form_answers or {})
+    normalized_answers = filter_question_form_answers(lead.form_answers or {})
     details: list[str] = []
     # Put the qualification summary first. Knowledge retrieval intentionally
     # prioritizes the opening query tokens, so generic sandbox metadata must not

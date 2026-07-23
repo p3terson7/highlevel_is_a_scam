@@ -71,9 +71,16 @@ def client_language(client: Client, *, lead: Lead | None = None, inbound_text: s
         return explicit_signal
 
     lead_payload = lead.raw_payload if lead and isinstance(lead.raw_payload, dict) else {}
-    for key in ("lead_language", "language", "locale"):
-        if lead_payload.get(key):
-            return normalize_language(lead_payload.get(key))
+    form_answers = lead.form_answers if lead and isinstance(lead.form_answers, dict) else {}
+    nested_form_answers = (
+        lead_payload.get("form_answers")
+        if isinstance(lead_payload.get("form_answers"), dict)
+        else {}
+    )
+    for source in (lead_payload, form_answers, nested_form_answers):
+        for key in ("lead_language", "language", "locale", "lang"):
+            if source.get(key):
+                return normalize_language(source.get(key))
 
     return detect_language(inbound_text, fallback=workspace_language)
 

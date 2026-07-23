@@ -11,6 +11,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from redis.exceptions import RedisError
@@ -24,6 +25,7 @@ from app.core.logging import get_logger
 from app.core.metrics import incr
 from app.db.models import AuditLog, Client, InboundWebhookEvent
 from app.db.session import get_db
+from app.services.i18n import normalize_language
 from app.services.lead_intake import normalize_webhook_payload, validate_webhook_candidates
 from app.services.lead_summary import filter_question_form_answers, normalize_form_answers
 from app.services.runtime_config import get_effective_runtime_map_for_client, load_runtime_overrides
@@ -46,6 +48,7 @@ _REPLAY_CACHE_MAX_ENTRIES = 10_000
 _REPLAY_CACHE_TRIM_TO = 9_000
 _LOCAL_ENVS = {"dev", "development", "local", "test"}
 _CONSENT_KEYS = ("sms_consent", "consent_sms", "consent_to_sms", "sms_opt_in", "contact_by_sms")
+_TRACKING_ID_KEYS = {"gclid", "fbclid", "li_fat_id", "msclkid", "ad_id"}
 
 _ADMISSION_LOCK = Lock()
 _RATE_EVENTS: dict[tuple[int, str], deque[float]] = {}
@@ -420,13 +423,57 @@ def _parse_json_object_blob(blob: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _tracking_from_url(value: Any) -> dict[str, Any]:
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        query_items = parse_qsl(
+            urlsplit(value).query,
+            keep_blank_values=False,
+            max_num_fields=_MAX_OBJECT_FIELDS,
+        )
+    except ValueError:
+        return {}
+
+    tracking: dict[str, Any] = {}
+    for raw_key, item in query_items:
+        key = raw_key.strip().lower()
+        if key.startswith("utm_") or key in _TRACKING_ID_KEYS:
+            tracking.setdefault(key, item)
+    return tracking
+
+
+def _tracking_value_is_present(value: Any) -> bool:
+    return value is not None and (not isinstance(value, str) or bool(value.strip()))
+
+
 def _tracking_from_payload(payload: dict[str, Any], answers: dict[str, Any]) -> dict[str, Any]:
-    tracking = _merge_dicts(payload.get("tracking"), payload.get("utm"), payload.get("utms"))
+    source_page_url = (
+        payload.get("source_page_url")
+        or payload.get("page_url")
+        or payload.get("url")
+        or ""
+    )
+    tracking = _tracking_from_url(source_page_url)
+    for candidate in (payload.get("tracking"), payload.get("utm"), payload.get("utms")):
+        if not isinstance(candidate, dict):
+            continue
+        tracking.update(
+            {
+                str(key): value
+                for key, value in candidate.items()
+                if _tracking_value_is_present(value)
+            }
+        )
     for key, value in payload.items():
-        if str(key).startswith("utm_") or key in {"gclid", "fbclid", "li_fat_id", "msclkid", "ad_id"}:
+        if (
+            str(key).startswith("utm_") or key in _TRACKING_ID_KEYS
+        ) and _tracking_value_is_present(value):
             tracking[str(key)] = value
     for key, value in answers.items():
-        if str(key).startswith("utm_") or key in {"gclid", "fbclid", "li_fat_id", "msclkid", "ad_id"}:
+        if (
+            str(key).startswith("utm_") or key in _TRACKING_ID_KEYS
+        ) and _tracking_value_is_present(value):
             tracking.setdefault(str(key), value)
     return normalize_form_answers(tracking)
 
@@ -529,12 +576,23 @@ def _coerce_website_form_payload(payload: dict[str, Any]) -> tuple[str, dict[str
     clean_form_answers = filter_question_form_answers(raw_form_answers)
     external_lead_id = _external_lead_id_from_payload(payload, lead_payload, raw_form_answers)
     lead_identity = _lead_identity_from_payload(payload, lead_payload, raw_form_answers)
+    submitted_language = _first_payload_value(
+        lead_payload,
+        payload,
+        raw_form_answers,
+        keys=("lead_language", "language", "locale", "lang"),
+    )
 
     source = _source_from_tracking(payload, tracking)
     normalized = {
         "lead": {
             "id": external_lead_id or None,
             **lead_identity,
+            **(
+                {"lead_language": normalize_language(submitted_language)}
+                if submitted_language
+                else {}
+            ),
             **_consent_fields(lead_payload, payload, raw_form_answers),
             "form_answers": clean_form_answers,
             "submitted_form_answers": _question_answer_rows(clean_form_answers),
