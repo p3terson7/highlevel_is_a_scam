@@ -1,225 +1,266 @@
 <?php
-
 error_reporting(E_ALL);
-ini_set('display_errors', '0');
-ini_set('log_errors', '1');
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
 
-require_once __DIR__ . '/fonctions.php';
+include ('fonctions.php');
 
-crm_require_post();
+// Honeypot anti-spam (Campo oculto 'phone')
+if(isset($_POST['phone']) AND $_POST['phone'] == '')
+{
+	$fichiers = array();
+	$path = "/documents/";
+	$lang = isset($_POST['lang']) ? nettoyage($_POST['lang']) : 'fr';
 
-$lang = crm_post_enum('lang', array('fr', 'en'), 'fr');
-if ($lang === false) $lang = 'fr';
-$formPath = crm_form_return_path($lang === 'en' ? '/en/quote' : '/soumission');
+	// 1. Recolección y Sanitización de Campos Requeridos (*)
+	$type_client = isset($_POST['type_client']) ? nettoyage($_POST['type_client']) : 'Non spécifié';
+	$sNom        = isset($_POST['sNom']) ? trim(nettoyage($_POST['sNom'])) : '';
+	$sTel        = isset($_POST['sTel']) ? trim(nettoyage($_POST['sTel'])) : '';
+	$sCourriel   = isset($_POST['sCourriel']) ? trim(nettoyage($_POST['sCourriel'])) : '';
+	$hauteur     = isset($_POST['hauteur']) ? trim(nettoyage($_POST['hauteur'])) : '';
+	$largeur     = isset($_POST['largeur']) ? trim(nettoyage($_POST['largeur'])) : '';
+	$longueur    = isset($_POST['longueur']) ? trim(nettoyage($_POST['longueur'])) : '';
+	
+	// Campos Opcionales
+	$autres      = isset($_POST['autres']) ? trim(nettoyage($_POST['autres'])) : 'Aucune';
+	$sDelai      = isset($_POST['sDelai']) ? trim(nettoyage($_POST['sDelai'])) : 'Non spécifié';
+	$urgent      = isset($_POST['urgent']) ? nettoyage($_POST['urgent']) : 'no';
+	$info        = isset($_POST['info']) ? trim(nettoyage($_POST['info'])) : '';
 
-if (!crm_request_shape_is_bounded(18 * 1024 * 1024, 64)) {
-	error_log('send-email-soumission.php: request rejected by size or field-count limit.');
-	crm_redirect($formPath, 'files');
-}
-crm_require_form_security_configuration();
-if (!crm_rate_limit_allow('quote', 4, 900)) {
-	error_log('send-email-soumission.php: request rejected by rate limit.');
-	crm_redirect($formPath, 'rate');
-}
-if (crm_honeypot_triggered()) {
-	error_log('send-email-soumission.php: honeypot submission rejected.');
-	crm_redirect('/');
-}
-if (!crm_turnstile_submission_is_valid('quote')) {
-	error_log('send-email-soumission.php: Turnstile submission rejected.');
-	crm_redirect($formPath, 'verification');
-}
-$errors = array();
-$submissionId = crm_submission_id_from_post();
-$typeClient = crm_post_enum('type_client', array('Company', 'Individual'));
-$name = crm_post_string('sNom', 160);
-$phone = crm_post_string('sTel', 32);
-$email = crm_post_string('sCourriel', 254);
-$height = crm_post_string('hauteur', 100);
-$width = crm_post_string('largeur', 100);
-$length = crm_post_string('longueur', 100);
-$otherDimensions = crm_post_string('autres', 160, '');
-$deadline = crm_post_string('sDelai', 160, '');
-$urgent = crm_post_enum('urgent', array('yes', 'no'));
-$information = crm_post_string('info', 5000, '');
+	// 2. SISTEMA DE VALIDACIONES ESTRICTAS (Lado del Servidor)
+	$erreurs = array();
 
-if ($submissionId === false) $errors[] = 'submission_id';
-if ($typeClient === false) $errors[] = 'type_client';
-if ($name === false || crm_string_length($name) < 3) $errors[] = 'name';
-if ($phone === false || !crm_valid_phone($phone)) $errors[] = 'phone';
-if ($email === false || !crm_valid_email($email)) $errors[] = 'email';
-if ($height === false || $height === '') $errors[] = 'height';
-if ($width === false || $width === '') $errors[] = 'width';
-if ($length === false || $length === '') $errors[] = 'length';
-if ($otherDimensions === false) $errors[] = 'other_dimensions';
-if ($deadline === false) $errors[] = 'deadline';
-if ($urgent === false) $errors[] = 'urgent';
-if ($information === false) $errors[] = 'information';
-
-$serviceFields = array(
-	'Scan3d' => 'Scan 3D',
-	'Rec3d' => 'Reconstruction 3D',
-	'R_ing3d2d' => 'Rétro-ingénierie (3D & 2D)',
-	'Inspection' => 'Inspection 3D',
-	'Metrologie' => 'Métrologie industrielle',
-	'Concep2d3d' => 'Design (3D & 2D)',
-	'Modelisation3D' => 'Modélisation',
-	'Ingenerie' => 'Ingénierie',
-	'Imp3d' => 'Impression 3D',
-	'Simul3D' => 'Simulation 3D',
-	'Aucun' => 'Je ne sais pas',
-);
-$services = array();
-foreach ($serviceFields as $field => $label) {
-	if (!isset($_POST[$field])) continue;
-	if (!is_string($_POST[$field]) || !in_array($_POST[$field], array('yesclbase', 'yes', 'on', '1'), true)) {
-		$errors[] = 'services';
-		continue;
-	}
-	$services[] = $label;
-}
-if (empty($services)) $errors[] = 'services';
-
-if (!empty($errors)) {
-	error_log('send-email-soumission.php: submission rejected by validation.');
-	crm_redirect($formPath, 'validation', is_string($submissionId) ? $submissionId : '');
-}
-
-$storedFiles = array();
-$uploadsCleaned = false;
-register_shutdown_function(function () use (&$storedFiles, &$uploadsCleaned) {
-	if (!$uploadsCleaned && !empty($storedFiles)) crm_cleanup_uploads($storedFiles);
-});
-
-$uploadResult = crm_store_quote_uploads(isset($_FILES['images']) ? $_FILES['images'] : array(), $storedFiles);
-$storedFiles = $uploadResult['files'];
-if (!empty($uploadResult['errors'])) {
-	crm_cleanup_uploads($storedFiles);
-	$storedFiles = array();
-	$uploadsCleaned = true;
-	error_log('send-email-soumission.php: attachment validation failed.');
-	crm_redirect($formPath, 'files', $submissionId);
-}
-
-$fileNames = array();
-foreach ($storedFiles as $storedFile) $fileNames[] = $storedFile['name'];
-$servicesSummary = implode(', ', $services);
-$displayOtherDimensions = $otherDimensions !== '' ? $otherDimensions : 'Aucune';
-$displayDeadline = $deadline !== '' ? $deadline : 'Non spécifié';
-$typeClientLabel = $typeClient === 'Company' ? 'Entreprise' : 'Particulier';
-$smsConsent = crm_sms_consent_payload('quote_request');
-$sourcePageUrl = crm_source_page_url();
-$referrerUrl = crm_referrer_url();
-
-$message = "<html><head><meta charset='UTF-8'></head>
-<body style='background-color:#f4f6f9; padding:20px; font-family:Arial,sans-serif;'>
-<div style='max-width:650px; margin:0 auto; background:#fff; border:1px solid #e2e8f0; border-radius:8px; overflow:hidden;'>
-<div style='background:#0f172a; padding:24px; text-align:center; border-bottom:4px solid #3b82f6;'>
-<h2 style='color:#fff; margin:0;'>3D PreciScan</h2><p style='color:#94a3b8;'>Nouvelle demande de soumission</p></div>
-<div style='padding:28px;'>"
-	. ($urgent === 'yes' ? "<p style='background:#fef2f2; border-left:4px solid #ef4444; color:#991b1b; padding:12px;'><strong>Demande urgente</strong></p>" : '') .
-"<table width='100%' cellpadding='7' style='font-size:14px; color:#334155;'>
-<tr><td width='35%'><strong>Identifiant</strong></td><td>" . crm_html($submissionId) . "</td></tr>
-<tr><td><strong>Secteur</strong></td><td>" . crm_html($typeClientLabel) . "</td></tr>
-<tr><td><strong>Nom / entreprise</strong></td><td>" . crm_html($name) . "</td></tr>
-<tr><td><strong>Téléphone</strong></td><td>" . crm_html($phone) . "</td></tr>
-<tr><td><strong>Courriel</strong></td><td>" . crm_html($email) . "</td></tr>
-<tr><td><strong>Services</strong></td><td>" . crm_html($servicesSummary) . "</td></tr>
-<tr><td><strong>Délai</strong></td><td>" . crm_html($displayDeadline) . "</td></tr>
-<tr><td><strong>Dimensions</strong></td><td>H " . crm_html($height) . " / L " . crm_html($width) . " / Long. " . crm_html($length) . " / Autres " . crm_html($displayOtherDimensions) . "</td></tr>
-<tr><td><strong>Informations</strong></td><td>" . nl2br(crm_html($information), false) . "</td></tr>
-</table></div></div></body></html>";
-
-$boundary = '=_3dpreciscan_' . bin2hex(random_bytes(18));
-$mailBody = '--' . $boundary . "\r\n";
-$mailBody .= "Content-Type: text/html; charset=UTF-8\r\n";
-$mailBody .= "Content-Transfer-Encoding: 8bit\r\n\r\n";
-$mailBody .= $message . "\r\n";
-
-$attachmentError = false;
-foreach ($storedFiles as $storedFile) {
-	$content = @file_get_contents($storedFile['path']);
-	if ($content === false || strlen($content) !== (int)$storedFile['size']) {
-		$attachmentError = true;
-		break;
-	}
-	$mailBody .= '--' . $boundary . "\r\n";
-	$mailBody .= 'Content-Type: ' . $storedFile['mime'] . '; name="' . $storedFile['name'] . "\"\r\n";
-	$mailBody .= "Content-Transfer-Encoding: base64\r\n";
-	$mailBody .= 'Content-Disposition: attachment; filename="' . $storedFile['name'] . "\"\r\n\r\n";
-	$mailBody .= chunk_split(base64_encode($content)) . "\r\n";
-	unset($content);
-}
-$mailBody .= '--' . $boundary . "--\r\n";
-
-if ($attachmentError) {
-	error_log('send-email-soumission.php: a stored attachment became unreadable.');
-	crm_cleanup_uploads($storedFiles);
-	$storedFiles = array();
-	$uploadsCleaned = true;
-	crm_redirect($formPath, 'files', $submissionId);
-}
-
-$mailSent = false;
-$crmSent = false;
-try {
-	$from = crm_mail_from_address();
-	if ($from !== false) {
-		$headers = 'From: 3D PreciScan <' . $from . ">\r\n";
-		$headers .= 'Reply-To: ' . $email . "\r\n";
-		$headers .= "MIME-Version: 1.0\r\n";
-		$headers .= 'Content-Type: multipart/mixed; boundary="' . $boundary . '"';
-		$mailSent = mail(
-			'fabien.lagier@3dpreciscan.com, dacampos@publissoft.ca',
-			'3DPreciscan - Formulaire soumission',
-			$mailBody,
-			$headers,
-			'-f' . $from
-		);
+	if (empty($sNom))       $erreurs[] = "Le nom est obligatoire.";
+	if (empty($sTel))       $erreurs[] = "Le numéro de téléphone est obligatoire.";
+	if (empty($hauteur))   $erreurs[] = "La hauteur est obligatoire.";
+	if (empty($largeur))   $erreurs[] = "La largeur est obligatoire.";
+	if (empty($longueur))  $erreurs[] = "La longueur est obligatoire.";
+	
+	if (empty($sCourriel)) {
+		$erreurs[] = "L'adresse courriel est obligatoire.";
+	} elseif (!filter_var($sCourriel, FILTER_VALIDATE_EMAIL)) {
+		$erreurs[] = "L'adresse courriel n'est pas valide.";
 	}
 
-	$crmSent = crm_send_lead_webhook(array(
-		'submission_id' => $submissionId,
-		'external_lead_id' => $submissionId,
-		'source_page_url' => $sourcePageUrl,
-		'referrer' => $referrerUrl,
-		'consent' => $smsConsent,
+	// Si hay errores de validación, registramos en el log y redirigimos de inmediato
+	if (!empty($erreurs)) {
+		error_log('send-email-soumission.php: Erreurs de validation: ' . implode(', ', $erreurs));
+		if($lang == "en") {
+			header('Location: /en/quote?error=validation');
+		} else {
+			header('Location: /soumission?error=validation');
+		}
+		exit;
+	}
+
+	// 3. Mapeo Correcto de Checkboxes (Acorde a los "name" de tu HTML)
+	$autre_service = array();
+	if(isset($_POST['Scan3d']))         $autre_service[] = "Scan 3D";
+	if(isset($_POST['Rec3d']))          $autre_service[] = "Reconstruction 3D";
+	if(isset($_POST['R_ing3d2d']))      $autre_service[] = "Rétro-ingénérie (3D & 2D)";
+	if(isset($_POST['Inspection']))     $autre_service[] = "Inspection 3D";
+	if(isset($_POST['Metrologie']))     $autre_service[] = "Métrologie industrielle";
+	if(isset($_POST['Concep2d3d']))     $autre_service[] = "Design (3D & 2D)";
+	if(isset($_POST['Modelisation3D'])) $autre_service[] = "Modeling"; 
+	if(isset($_POST['Ingenerie']))      $autre_service[] = "Ingénierie";
+	if(isset($_POST['Imp3d']))          $autre_service[] = "Impression 3D";
+	if(isset($_POST['Simul3D']))        $autre_service[] = "Simulation 3D";
+	if(isset($_POST['Aucun']))          $autre_service[] = "Je ne sais pas";
+
+	$autres_services = !empty($autre_service) ? implode(', ', $autre_service) : 'Aucun service sélectionné';
+
+	// 4. CONSTRUCCIÓN DEL TEMPLATE HTML ELEGANTE Y MODERNO
+	$message = "
+	<html>
+	<head>
+		<meta charset='UTF-8'>
+	</head>
+	<body style='background-color: #f4f6f9; padding: 20px; font-family: Arial, sans-serif; -webkit-font-smoothing: antialiased;'>
+		<div style='max-width: 650px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);'>
+			
+			<div style='background-color: #0f172a; padding: 30px; text-align: center; border-bottom: 4px solid #3b82f6;'>
+				<h2 style='color: #ffffff; margin: 0; font-size: 22px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;'>3D PreciScan</h2>
+				<p style='color: #94a3b8; margin: 5px 0 0 0; font-size: 14px;'>Nouvelle demande de soumission reçue</p>
+			</div>
+
+			<div style='padding: 30px;'>
+				
+				" . ($urgent === 'yes' ? "
+				<div style='background-color: #fef2f2; border-left: 4px solid #ef4444; color: #991b1b; padding: 12px 15px; border-radius: 0 6px 6px 0; margin-bottom: 25px; font-weight: bold; font-size: 14px;'>
+					⚠️ Demande signalée comme URGENTE
+				</div>
+				" : "") . "
+
+				<p style='margin-top: 0; font-size: 15px; color: #334155;'>Bonjour,</p>
+				<p style='color: #64748b; font-size: 14px; margin-bottom: 25px;'>Un client vient de soumettre une demande via el formulario del sitio web. Aquí están los detalles recibidos :</p>
+
+				<h3 style='font-size: 14px; text-transform: uppercase; color: #3b82f6; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-top: 0; margin-bottom: 15px; letter-spacing: 0.5px;'>1. Informations de Contact</h3>
+				<table width='100%' border='0' cellspacing='0' cellpadding='0' style='margin-bottom: 25px; font-size: 14px; color: #334155;'>
+					<tr>
+						<td width='35%' style='padding: 8px 0; font-weight: bold; color: #64748b;'>Secteur d'activité :</td>
+						<td style='padding: 8px 0;'>$type_client</td>
+					</tr>
+					<tr>
+						<td style='padding: 8px 0; font-weight: bold; color: #64748b;'>Nom / Entreprise :</td>
+						<td style='padding: 8px 0; font-weight: bold; color: #0f172a;'>$sNom</td>
+					</tr>
+					<tr>
+						<td style='padding: 8px 0; font-weight: bold; color: #64748b;'>Téléphone :</td>
+						<td style='padding: 8px 0;'><a href='tel:$sTel' style='color: #0f172a; text-decoration: none;'>$sTel</a></td>
+					</tr>
+					<tr>
+						<td style='padding: 8px 0; font-weight: bold; color: #64748b;'>Courriel :</td>
+						<td style='padding: 8px 0;'><a href='mailto:$sCourriel' style='color: #3b82f6; text-decoration: none;'>$sCourriel</a></td>
+					</tr>
+				</table>
+
+				<h3 style='font-size: 14px; text-transform: uppercase; color: #3b82f6; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 15px; letter-spacing: 0.5px;'>2. Services Requis & Délais</h3>
+				<table width='100%' border='0' cellspacing='0' cellpadding='0' style='margin-bottom: 25px; font-size: 14px; color: #334155;'>
+					<tr>
+						<td width='35%' style='padding: 8px 0; font-weight: bold; color: #64748b; valign: top;'>Services sélectionnés :</td>
+						<td style='padding: 8px 0; color: #0f172a; font-weight: 500;'>$autres_services</td>
+					</tr>
+					<tr>
+						<td style='padding: 8px 0; font-weight: bold; color: #64748b;'>Délai souhaité :</td>
+						<td style='padding: 8px 0; color: #1e40af; font-weight: bold;'>$sDelai</td>
+					</tr>
+				</table>
+
+				<h3 style='font-size: 14px; text-transform: uppercase; color: #3b82f6; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 15px; letter-spacing: 0.5px;'>3. Dimensions de l'Objet</h3>
+				<div style='background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 15px; margin-bottom: 25px;'>
+					<table width='100%' border='0' cellspacing='0' cellpadding='0' style='font-size: 13px; color: #475569; text-align: center;'>
+						<tr>
+							<td style='padding: 5px; border-right: 1px solid #e2e8f0;'><strong>Hauteur</strong><br><span style='font-size: 15px; color: #0f172a; font-weight: bold;'>$hauteur</span></td>
+							<td style='padding: 5px; border-right: 1px solid #e2e8f0;'><strong>Largeur</strong><br><span style='font-size: 15px; color: #0f172a; font-weight: bold;'>$largeur</span></td>
+							<td style='padding: 5px; border-right: 1px solid #e2e8f0;'><strong>Longueur</strong><br><span style='font-size: 15px; color: #0f172a; font-weight: bold;'>$longueur</span></td>
+							<td style='padding: 5px;'><strong>Autres</strong><br><span style='font-size: 15px; color: #0f172a; font-weight: bold;'>$autres</span></td>
+						</tr>
+					</table>
+				</div>
+
+				" . (!empty($info) ? "
+				<h3 style='font-size: 14px; text-transform: uppercase; color: #3b82f6; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 12px; letter-spacing: 0.5px;'>4. Informations Additionnelles</h3>
+				<div style='background-color: #f1f5f9; padding: 15px; border-radius: 6px; font-size: 14px; color: #334155; line-height: 1.5; font-style: italic; white-space: pre-wrap;'>
+					$info
+				</div>
+				" : "") . "
+
+			</div>
+
+			<div style='background-color: #f8fafc; padding: 20px 30px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #e2e8f0;'>
+				Ceci est une notification automatique. Répondre à ce courriel écrira directement à l'adresse du client.
+			</div>
+		</div>
+	</body>
+	</html>";
+
+	// 5. GESTIÓN Y LIMPIEZA DE ARCHIVOS ADJUNTOS MÚLTIPLES (images[])
+	if (isset($_FILES['images']['name'][0]) && !empty($_FILES['images']['name'][0])) {
+		$countfiles = count($_FILES['images']['name']);
+		for($i=0; $i<$countfiles; $i++){
+			$filename = basename($_FILES['images']['name'][$i]);
+			
+			// Sanitización básica del nombre para evitar ataques de inyección de directorios
+			$filename = preg_replace("/[^A-Za-z0-9\.\-_]/", '', $filename);
+			
+			$target_file = '..' . $path . $filename;
+			if(move_uploaded_file($_FILES['images']['tmp_name'][$i], $target_file)){
+				$fichiers[] = $filename;
+			}
+		}
+	}
+
+	$to = 'fabien.lagier@3dpreciscan.com, dacampos@publissoft.ca';
+	$boundary = "-----=" . md5(uniqid(rand()));
+	$subject = '3DPreciscan - Formulaire soumission';
+	
+	$header = 'From:<fabien.lagier@3dpreciscan.com>' . "\r\n";
+	$header .= 'Reply-To:<' . $sCourriel . '>' . "\r\n";
+	$header .= "MIME-Version: 1.0\r\n";
+	$header .= "Content-Type: multipart/mixed; boundary=\"$boundary\"\r\n\r\n";
+
+	$nmessage = "--" . $boundary . "\r\n";
+	$nmessage .= "Content-type:text/html; charset=UTF-8\r\n";
+	$nmessage .= "Content-Transfer-Encoding: 7bit\r\n\r\n";
+	$nmessage .= $message . "\r\n\r\n";
+
+	foreach($fichiers as $v)
+	{
+		$file_path = '..' . $path . $v;
+		if (file_exists($file_path)) {
+			$attachement = chunk_split(base64_encode(file_get_contents($file_path)));
+			$contenttype = mime_content_type($file_path);
+			
+			$nmessage .= "--" . $boundary . "\r\n";
+			$nmessage .= "Content-Type: " . $contenttype . "; name=\"" . $v . "\"\r\n";
+			$nmessage .= "Content-Transfer-Encoding: base64\r\n";
+			$nmessage .= "Content-Disposition: attachment; filename=\"" . $v . "\"\r\n\r\n";
+			$nmessage .= $attachement . "\r\n\r\n";
+		}
+	}
+	$nmessage .= "--" . $boundary . "--";
+
+	$result = mail($to, $subject, $nmessage, $header, '-f ' . $to);
+	
+	if($result) {
+		error_log('send-email-soumission.php: mail() OK -> ' . $to);
+	} else {
+		error_log('send-email-soumission.php: mail() FAILED -> ' . $to);
+	}
+
+	crm_send_lead_webhook(array(
+		'source_page_url' => crm_source_page_url(),
+		'referrer' => crm_referrer_url(),
 		'lead' => array(
-			'id' => $submissionId,
-			'full_name' => $name,
-			'phone' => $phone,
-			'email' => $email,
+			'full_name' => $sNom,
+			'phone' => $sTel,
+			'email' => $sCourriel,
 		),
 		'form_answers' => array(
-			'form_type' => 'quote_request',
-			'type_client' => $typeClient,
-			'full_name' => $name,
-			'phone' => $phone,
-			'email' => $email,
-			'hauteur' => $height,
-			'largeur' => $width,
-			'longueur' => $length,
-			'autres_dimensions' => $otherDimensions,
-			'delai_souhaite' => $deadline,
+			'type_client' => $type_client,
+			'full_name' => $sNom,
+			'phone' => $sTel,
+			'email' => $sCourriel,
+			'hauteur' => $hauteur,
+			'largeur' => $largeur,
+			'longueur' => $longueur,
+			'autres_dimensions' => $autres,
+			'delai_souhaite' => $sDelai,
 			'urgent' => $urgent,
-			'services' => $services,
-			'services_summary' => $servicesSummary,
-			'informations_additionnelles' => $information,
-			'fichiers_joints' => $fileNames,
+			'services' => $autre_service,
+			'services_summary' => $autres_services,
+			'informations_additionnelles' => $info,
+			'fichiers_joints' => $fichiers,
 			'lang' => $lang,
-			'source_page_url' => $sourcePageUrl,
-			'referrer_url' => $referrerUrl,
+			'source_page_url' => crm_source_page_url(),
+			'referrer_url' => crm_referrer_url(),
 		),
 		'tracking' => crm_tracking_payload(),
 	));
-} catch (Throwable $exception) {
-	error_log('send-email-soumission.php: delivery raised an exception for submission=' . $submissionId . '.');
+
+	// Limpieza estricta: eliminamos los archivos subidos del servidor tras enviarlos por correo
+	foreach($fichiers as $v)
+	{
+		$del_path = $_SERVER['DOCUMENT_ROOT'] . $path . $v;
+		if (file_exists($del_path)) {
+			unlink($del_path);
+		}
+	}
+
+	// Redirección final controlada por idioma
+	if($lang == "fr") {
+		header('Location: /merci');
+	} elseif($lang == "en") {
+		header('Location: /en/thanks');
+	} else {
+		header('Location: /merci');
+	}
+	exit;
 }
-
-crm_cleanup_uploads($storedFiles);
-$storedFiles = array();
-$uploadsCleaned = true;
-crm_log_delivery('send-email-soumission.php', $submissionId, $mailSent, $crmSent);
-
-if (!$mailSent && !$crmSent) crm_redirect($formPath, 'delivery', $submissionId);
-crm_redirect($lang === 'en' ? '/en/thanks' : '/merci');
+else
+{
+	error_log('send-email-soumission.php: honeypot "phone" con valor detectado.');
+	header('Location: /');
+	exit;
+}
+?>
