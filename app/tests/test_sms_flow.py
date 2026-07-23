@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -1627,6 +1629,163 @@ def test_sms_inbound_premature_mark_booked_without_booking_does_not_set_booked(t
         assert lead.crm_stage != "Meeting Booked"
 
     app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+
+
+@pytest.mark.parametrize("confirmation", ["Oui", "Allez-y"])
+def test_sms_exact_french_time_is_checked_then_one_word_confirmation_books(
+    test_context,
+    monkeypatch,
+    confirmation,
+):
+    from app.main import app
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 7, 23, 20, 36, tzinfo=timezone.utc)
+            if tz is None:
+                return fixed.replace(tzinfo=None)
+            return fixed.astimezone(tz)
+
+    monkeypatch.setattr("app.services.booking.datetime", FixedDateTime)
+    booking_service = BookingService()
+    app.dependency_overrides[get_booking_service] = lambda: booking_service
+
+    old_offer = {
+        "provider": "internal",
+        "slots": [
+            {
+                "index": 1,
+                "start_time": "2026-07-27T13:00:00Z",
+                "end_time": "2026-07-27T13:30:00Z",
+                "display_time": "lundi 27 juillet à 9 h 00",
+                "display_hint": "lundi à 9 h 00",
+                "search_blob": "monday 9am",
+            },
+            {
+                "index": 2,
+                "start_time": "2026-07-28T13:00:00Z",
+                "end_time": "2026-07-28T13:30:00Z",
+                "display_time": "mardi 28 juillet à 9 h 00",
+                "display_hint": "mardi à 9 h 00",
+                "search_blob": "tuesday 9am",
+            },
+            {
+                "index": 3,
+                "start_time": "2026-07-29T13:00:00Z",
+                "end_time": "2026-07-29T13:30:00Z",
+                "display_time": "mercredi 29 juillet à 9 h 00",
+                "display_hint": "mercredi à 9 h 00",
+                "search_blob": "wednesday 9am",
+            },
+        ],
+    }
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.booking_mode = "internal"
+        client.timezone = "America/Toronto"
+        client.provider_config = {"language": "fr"}
+        client.booking_config = {
+            "internal_calendar": {
+                "slot_minutes": 30,
+                "notice_minutes": 0,
+                "horizon_days": 14,
+                "availability": [
+                    {"day": 3, "enabled": True, "start": "15:00", "end": "16:00"},
+                ],
+            }
+        }
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id=f"meta-exact-fr-{confirmation}",
+            source=LeadSource.META,
+            full_name="Exact French Lead",
+            phone="+15551239991",
+            email="exact-fr@example.com",
+            city="Montreal",
+            form_answers={"interest": "consultation"},
+            raw_payload={
+                "source": "seed",
+                "lead_language": "fr",
+                "pending_step": "slot_selection_pending",
+                "booking_offer": old_offer,
+                "active_booking_offer": old_offer,
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.flush()
+        db.add(
+            Message(
+                client_id=client.id,
+                lead_id=lead.id,
+                direction=MessageDirection.OUTBOUND,
+                body="Voici trois créneaux précédents.",
+                provider_message_sid="SM-OLD-FR-OFFER",
+                raw_payload={"booking_offer": old_offer},
+            )
+        )
+        db.commit()
+
+    availability_response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 123-9991",
+            "Body": "Jeudi prochain 3 PM ça marche ?",
+            "MessageSid": f"SM-EXACT-FR-LOOKUP-{confirmation}",
+        },
+    )
+
+    assert availability_response.status_code == 200
+    assert test_context.fake_llm.calls == 0
+    availability_reply = test_context.fake_sms.sent[-1]["body"]
+    assert "jeudi 30 juillet à 15 h 00" in availability_reply
+    assert "est disponible" in availability_reply
+    assert "Voulez-vous que je le réserve?" in availability_reply
+    assert "préciser quel créneau" not in availability_reply
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15551239991"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.BOOKING_SENT
+        assert lead.raw_payload["pending_step"] == "slot_selection_pending"
+        assert len(lead.raw_payload["active_booking_offer"]["slots"]) == 1
+        assert not db.scalars(
+            select(CalendarBooking).where(CalendarBooking.lead_id == lead.id)
+        ).all()
+
+    booking_response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 123-9991",
+            "Body": confirmation,
+            "MessageSid": f"SM-EXACT-FR-CONFIRM-{confirmation}",
+        },
+    )
+
+    assert booking_response.status_code == 200
+    assert test_context.fake_llm.calls == 0
+    booking_reply = test_context.fake_sms.sent[-1]["body"]
+    assert "Réservé" in booking_reply
+    assert "Ajouté à notre calendrier" in booking_reply
+    assert "rappel" not in booking_reply.lower()
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15551239991"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.BOOKED
+        assert "pending_step" not in lead.raw_payload
+        assert "active_booking_offer" not in lead.raw_payload
+        bookings = db.scalars(
+            select(CalendarBooking).where(CalendarBooking.lead_id == lead.id)
+        ).all()
+        assert len(bookings) == 1
+        assert bookings[0].status == "scheduled"
 
 
 def test_sms_inbound_booked_lead_can_still_get_answers(test_context):

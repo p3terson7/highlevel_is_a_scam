@@ -2005,7 +2005,16 @@ def _extract_slot_choice(inbound_text: str, latest_offer: dict[str, Any] | None)
             slot_indexes.add(int(slot.get("index")))
         except Exception:
             continue
-    for numeric_choice in re.finditer(r"\b(\d+)\b", normalized):
+    numeric_choice = re.fullmatch(
+        r"(?:option\s*)?(\d+)(?:\s+(?:please|pls|svp))?",
+        normalized,
+    )
+    if numeric_choice is None:
+        numeric_choice = re.search(
+            r"\b(?:option|choice|slot|number)\s*#?\s*(\d+)\b",
+            normalized,
+        )
+    if numeric_choice is not None:
         index = int(numeric_choice.group(1))
         if index in slot_indexes:
             return {"slot_index": index}

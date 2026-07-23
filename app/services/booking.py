@@ -193,7 +193,24 @@ def looks_like_slot_selection_message(inbound_text: str) -> bool:
     if not has_time_marker and not has_day_marker:
         return False
 
-    if "?" in raw and any(token in normalized for token in ("do", "can", "could", "any", "availability", "available", "what", "which")):
+    if "?" in raw and any(
+        token in normalized
+        for token in (
+            "do",
+            "can",
+            "could",
+            "any",
+            "availability",
+            "available",
+            "what",
+            "which",
+            "disponible",
+            "marche",
+            "possible",
+            "work",
+            "convient",
+        )
+    ):
         return False
 
     return True
@@ -418,7 +435,21 @@ def _booked_from_reply(inbound_text: str) -> bool:
 
 
 def _slot_commitment_requested(inbound_text: str) -> bool:
-    return bool(_SLOT_COMMITMENT_RE.search(str(inbound_text or "")))
+    raw = str(inbound_text or "")
+    if _SLOT_COMMITMENT_RE.search(raw):
+        return True
+    return _normalize_slot_text(raw) in {
+        "yes",
+        "yes please",
+        "yeah",
+        "yep",
+        "sure",
+        "ok",
+        "okay",
+        "oui",
+        "oui svp",
+        "d accord",
+    }
 
 
 def _offer_has_slots(offer: dict[str, Any] | None) -> bool:
@@ -638,6 +669,100 @@ class BookingService:
             },
         )
 
+    def handle_exact_time_request(
+        self,
+        *,
+        client: Client,
+        lead: Lead,
+        inbound_text: str,
+        db: Session | None = None,
+    ) -> BookingSelectionResult | None:
+        """Check a newly requested future day/time before interpreting old offers."""
+
+        raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+        has_booking_context = bool(
+            lead.conversation_state == ConversationStateEnum.BOOKING_SENT
+            or raw_payload.get("pending_step") == "slot_selection_pending"
+            or _offer_has_slots(raw_payload.get("active_booking_offer"))
+            or _offer_has_slots(raw_payload.get("booking_offer"))
+        )
+        if (
+            not has_booking_context
+            or lead.conversation_state == ConversationStateEnum.BOOKED
+            or not automated_booking_enabled(client)
+        ):
+            return None
+        now_utc = datetime.now(timezone.utc)
+        request = build_booking_time_request(
+            text=inbound_text,
+            timezone_name=client.timezone or "UTC",
+            now_utc=now_utc,
+            source="deterministic_exact_time",
+        )
+        if not request.requested_dates or request.exact_time_minutes is None:
+            return None
+        try:
+            requested_date = date.fromisoformat(request.requested_dates[0])
+        except ValueError:
+            return None
+        hour, minute = divmod(request.exact_time_minutes, 60)
+        requested_at = datetime.combine(
+            requested_date,
+            dt_time(hour=hour, minute=minute),
+            tzinfo=_tzinfo(client.timezone),
+        )
+        if requested_at <= now_utc.astimezone(_tzinfo(client.timezone)):
+            return None
+
+        try:
+            offer = self.find_slots(
+                client=client,
+                lead=lead,
+                request_text=inbound_text,
+                limit=1,
+                db=db,
+            )
+        except BookingProviderError as exc:
+            language = client_language(client, lead=lead, inbound_text=inbound_text)
+            reply = (
+                "Je n'arrive pas à consulter le calendrier pour le moment. "
+                "Je transmets votre demande à l'équipe pour confirmer ce créneau."
+                if language == "fr"
+                else "I can't access the calendar right now. "
+                "I'm sending your request to the team to confirm that time."
+            )
+            return BookingSelectionResult(
+                handled=True,
+                reply_text=reply,
+                next_state=ConversationStateEnum.HANDOFF,
+                raw_payload={"pending_step": None},
+                audit_event_type="calendar_availability_handoff",
+                audit_decision={
+                    "inbound": inbound_text,
+                    "provider_status": exc.provider_status,
+                    "reason": "exact_time_lookup_failed",
+                },
+                transition_reason="calendar_availability_handoff",
+            )
+
+        booking_offer = offer.raw_payload.get("booking_offer", {})
+        return BookingSelectionResult(
+            handled=True,
+            reply_text=offer.reply_text,
+            next_state=ConversationStateEnum.BOOKING_SENT,
+            raw_payload={
+                "booking_offer": booking_offer,
+                "pending_step": "slot_selection_pending" if offer.slots else None,
+            },
+            audit_event_type="calendar_exact_time_checked",
+            audit_decision={
+                "inbound": inbound_text,
+                "matched_slot_count": len(offer.slots),
+                "booking_offer": booking_offer,
+            },
+            transition_reason="calendar_exact_time_checked",
+        )
+
     def book_requested_slot(
         self,
         *,
@@ -697,9 +822,13 @@ class BookingService:
         if language == "fr":
             reply_prefix = "Mis à jour. Votre appel est maintenant prévu" if was_rescheduled else "Réservé. Votre appel est prévu"
             reply_text = f"{reply_prefix} pour {display_time}."
+            if booking.get("booking_id"):
+                reply_text = f"{reply_text[:-1]} et ajouté à notre calendrier."
         else:
             reply_prefix = "Updated. Your call is now set" if was_rescheduled else "Booked. Your call is set"
             reply_text = f"{reply_prefix} for {display_time}."
+            if booking.get("booking_id"):
+                reply_text = f"{reply_text[:-1]} and saved on our calendar."
         return {
             "reply_text": reply_text,
             "booking": booking,
@@ -750,7 +879,12 @@ class BookingService:
                     continue
         if matched is None:
             matched = self._match_slot(inbound_text, slots)
-        if matched is None and commitment_requested and len(slots) == 1:
+        if (
+            matched is None
+            and commitment_requested
+            and len(slots) == 1
+            and not _has_specific_time_request(inbound_text)
+        ):
             matched = slots[0]
         if matched is None:
             if _has_specific_time_request(inbound_text) and not _is_numeric_slot_reply(inbound_text):
@@ -1054,8 +1188,6 @@ class BookingService:
             confirmation = [
                 f"{'Mis à jour. Votre appel est maintenant prévu' if was_rescheduled else 'Réservé. Votre appel est prévu'} pour {display_time}.",
             ]
-            if lead.email.strip():
-                confirmation.append(f"La confirmation sera envoyée à {lead.email}.")
             if booking.get("reschedule_url"):
                 confirmation.append(f"Replanifier: {booking['reschedule_url']}")
             if booking.get("booking_id"):
@@ -1064,8 +1196,6 @@ class BookingService:
             confirmation = [
                 f"{'Updated. Your call is now set' if was_rescheduled else 'Booked. Your call is set'} for {display_time}.",
             ]
-            if lead.email.strip():
-                confirmation.append(f"Confirmation will be sent to {lead.email}.")
             if booking.get("reschedule_url"):
                 confirmation.append(f"Reschedule: {booking['reschedule_url']}")
             if booking.get("booking_id"):
@@ -1537,10 +1667,23 @@ class BookingService:
         normalized = _normalize_slot_text(inbound_text)
         if not normalized:
             return None
-        for slot in slots:
-            index = str(slot.get("index", "")).strip()
-            if index and re.search(rf"(^|\\D){re.escape(index)}($|\\D)", normalized):
-                return slot
+        numeric_choice = re.fullmatch(
+            r"(?:option\s*)?(\d+)(?:\s+(?:please|pls|svp))?",
+            normalized,
+        )
+        if numeric_choice is None:
+            numeric_choice = re.search(
+                r"\b(?:option|choice|slot|number)\s*#?\s*(\d+)\b",
+                normalized,
+            )
+        if numeric_choice is not None:
+            selected_index = int(numeric_choice.group(1))
+            for slot in slots:
+                try:
+                    if int(slot.get("index")) == selected_index:
+                        return slot
+                except (TypeError, ValueError):
+                    continue
         for slot in slots:
             variants = [item.strip() for item in str(slot.get("search_blob", "")).split("|") if item.strip()]
             if any(variant in normalized for variant in variants):
