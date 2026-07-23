@@ -36,6 +36,19 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m pip check
 
+      - name: Set up Node.js for Python UI integration tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend assets for Python UI integration tests
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
       - name: Run high-signal Python static checks
         run: python -m ruff check --select E9,F63,F7,F82 app scripts evals
 
