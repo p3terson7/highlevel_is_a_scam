@@ -4,8 +4,8 @@ import pytest
 
 import app.services.agent_v3 as agent_v3_module
 from app.db.models import Client, ConversationStateEnum, Lead, LeadSource, Message, MessageDirection
-from app.services.agent_v3_helpers import _apply_response_guardrails
-from app.services.booking import BookingProviderError
+from app.services.agent_v3_helpers import _apply_response_guardrails, _extract_slot_choice
+from app.services.booking import BookingProviderError, BookingSlot, SlotOffer
 from app.services.knowledge import KnowledgeContextResult, KnowledgeRetrievalQuery
 from app.services.llm_agent import LLMAgent
 from app.workers.tasks import _meta_initial_seed_text
@@ -1361,6 +1361,111 @@ def test_exact_time_request_after_offer_checks_calendar_instead_of_rejecting_cur
     assert "11:00 AM" in response.reply_text
     assert "call" in response.reply_text.lower()
     assert "couldn" not in response.reply_text.lower()
+
+
+def test_french_exact_time_question_forces_live_lookup_and_does_not_select_option_three():
+    active_offer = {
+        "provider": "internal",
+        "slots": [
+            {"index": 1, "start_time": "2026-07-27T13:00:00Z", "display_time": "lundi 27 juillet à 9 h 00"},
+            {"index": 2, "start_time": "2026-07-28T13:00:00Z", "display_time": "mardi 28 juillet à 9 h 00"},
+            {"index": 3, "start_time": "2026-07-29T13:00:00Z", "display_time": "mercredi 29 juillet à 9 h 00"},
+        ],
+    }
+    inbound = "Jeudi prochain 3 PM ça marche ?"
+    assert _extract_slot_choice(inbound, active_offer) is None
+    assert _extract_slot_choice("option 3", active_offer) == {"slot_index": 3}
+
+    class FrenchExactProvider:
+        name = "french-exact"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_json(self, system_prompt: str, user_prompt: str):
+            _ = system_prompt
+            self.calls += 1
+            payload = json.loads(user_prompt)
+            if self.calls == 1:
+                assert payload["scheduling_intent_detected"] is True
+                assert payload["latest_inbound_booking_preferences"] == {
+                    "preferred_day": "jeudi",
+                    "exact_time": "3 pm",
+                }
+                return {
+                    "reply_text": "Je peux vérifier ce moment.",
+                    "next_state": "BOOKING_SENT",
+                    "collected_fields": payload["qualification_memory"],
+                    "next_question_key": None,
+                    "action": "none",
+                    "tool_call": {"name": "none", "args": {}},
+                }
+            tool_result = payload["tool_result"]
+            assert tool_result["kind"] == "slots"
+            return {
+                "reply_text": tool_result["fallback_reply"],
+                "next_state": "BOOKING_SENT",
+                "collected_fields": payload["conversation_context"]["qualification_memory"],
+                "next_question_key": None,
+                "action": "none",
+                "tool_call": {"name": "none", "args": {}},
+            }
+
+    class FrenchExactBookingService:
+        def __init__(self) -> None:
+            self.find_args: list[dict] = []
+
+        def find_slots(self, **kwargs):
+            self.find_args.append(dict(kwargs))
+            slot = BookingSlot(
+                index=1,
+                start_time="2026-07-30T19:00:00Z",
+                end_time="2026-07-30T19:30:00Z",
+                display_time="jeudi 30 juillet à 15 h 00",
+                display_hint="jeudi à 15 h 00",
+                search_blob="thursday 3pm | jeudi 15h",
+            )
+            return SlotOffer(
+                reply_text=(
+                    "Oui, jeudi 30 juillet à 15 h 00 (EDT) est disponible. "
+                    "Voulez-vous que je le réserve?"
+                ),
+                slots=[slot],
+                raw_payload={"booking_offer": {"provider": "internal", "slots": [slot.__dict__]}},
+            )
+
+    provider = FrenchExactProvider()
+    booking_service = FrenchExactBookingService()
+    client = _client()
+    client.provider_config = {"language": "fr"}
+    lead = _lead(
+        state=ConversationStateEnum.BOOKING_SENT,
+        raw_payload={
+            "lead_language": "fr",
+            "pending_step": "slot_selection_pending",
+            "booking_offer": active_offer,
+            "active_booking_offer": active_offer,
+        },
+    )
+    agent = LLMAgent(provider=provider)
+
+    response = agent.run_turn(
+        client=client,
+        lead=lead,
+        inbound_text=inbound,
+        history=[],
+        booking_service=booking_service,
+        db=None,
+    )
+
+    assert provider.calls == 2
+    assert len(booking_service.find_args) == 1
+    assert booking_service.find_args[0]["request_text"] == inbound
+    assert booking_service.find_args[0]["preferred_day"] == "jeudi"
+    assert booking_service.find_args[0]["exact_time"] == "3 pm"
+    assert response.next_state == ConversationStateEnum.BOOKING_SENT
+    assert "est disponible" in response.reply_text
+    assert "Voulez-vous que je le réserve?" in response.reply_text
 
 
 def test_booked_lead_reschedule_request_uses_calendar_tools():

@@ -472,6 +472,34 @@ def _current_user_slot_choice(inbound_text: str, latest_offer: dict[str, Any] | 
     return _extract_slot_choice(inbound_text=inbound_text, latest_offer=latest_offer)
 
 
+def _mentioned_offered_slot_indexes(
+    inbound_text: str,
+    latest_offer: dict[str, Any] | None,
+) -> set[int]:
+    if not isinstance(latest_offer, dict):
+        return set()
+    slots = latest_offer.get("slots")
+    if not isinstance(slots, list):
+        return set()
+    offered_indexes: set[int] = set()
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        try:
+            offered_indexes.add(int(slot.get("index")))
+        except (TypeError, ValueError):
+            continue
+    normalized = _normalize_text(inbound_text)
+    return {
+        int(match.group(1))
+        for match in re.finditer(
+            r"\b(\d+)\b(?!\s*(?::\d{2}\b|h\b|(?:am|pm)\b))",
+            normalized,
+        )
+        if int(match.group(1)) in offered_indexes
+    }
+
+
 def _latest_outbound_body(history: Sequence[Message]) -> str:
     for message in reversed(history):
         if message.direction == MessageDirection.OUTBOUND:
@@ -512,6 +540,7 @@ class LLMAgentV3:
         deterministic_slot_choice = _current_user_slot_choice(bounded_inbound, active_offer)
         deterministic_booking_confirmation = bool(
             deterministic_slot_choice
+            or _mentioned_offered_slot_indexes(bounded_inbound, active_offer)
             or _has_booking_intent(
                 bounded_inbound,
                 allow_generic_confirmation=_message_suggests_meeting(bounded_last_outbound),
@@ -930,7 +959,7 @@ class LLMAgentV3:
         booking_ready, booking_gap_fields = _booking_threshold(memory=memory)
         flow_state = str(raw_payload.get("flow_state") or "NEW").strip().upper()
         inbound_preferences = _extract_booking_preferences(inbound_text)
-        scheduling_intent_detected = _has_scheduling_intent(inbound_text)
+        scheduling_intent_detected = _has_scheduling_intent(inbound_text) or bool(inbound_preferences)
         known_form_facts = _build_known_form_facts(normalized_answers, lead=lead)
         acknowledged_form_fact_keys = _extract_acknowledged_form_fact_keys(known_form_facts=known_form_facts, history=history)
         important_missing_fields = _important_missing_fields(

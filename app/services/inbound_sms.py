@@ -404,9 +404,17 @@ def _should_try_deterministic_slot_selection(*, lead: Lead, inbound_text: str) -
     return looks_like_slot_selection_message(inbound_text)
 
 
-def _should_try_deterministic_commitment(*, lead: Lead, inbound_text: str) -> bool:
+def _should_try_deterministic_commitment(
+    *,
+    lead: Lead,
+    inbound_text: str,
+    active_offer: dict[str, Any] | None,
+) -> bool:
     pending_step = _current_pending_step(lead)
     if pending_step != "slot_selection_pending":
+        return False
+    slots = active_offer.get("slots") if isinstance(active_offer, dict) else None
+    if not isinstance(slots, list) or len(slots) != 1:
         return False
     return looks_like_booking_commitment(inbound_text)
 
@@ -1110,16 +1118,14 @@ def process_inbound_turn(
         )
         return
 
-    deterministic_result = _resolve_booking_selection_with_llm(
-        client=client,
-        lead=lead,
-        inbound_text=inbound_text,
-        history=history,
-        llm_agent=llm_agent,
-        booking_service=booking_service,
-        active_offer=active_offer_before,
-        db=db,
-    )
+    handle_exact_time = getattr(booking_service, "handle_exact_time_request", None)
+    if deterministic_result is None and callable(handle_exact_time):
+        deterministic_result = handle_exact_time(
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            db=db,
+        )
     if deterministic_result is not None and deterministic_result.handled:
         _apply_booking_selection_result(
             db=db,
@@ -1135,7 +1141,11 @@ def process_inbound_turn(
         )
         return
 
-    if deterministic_result is None and _should_try_deterministic_commitment(lead=lead, inbound_text=inbound_text):
+    if deterministic_result is None and _should_try_deterministic_commitment(
+        lead=lead,
+        inbound_text=inbound_text,
+        active_offer=active_offer_before,
+    ):
         handle_slot_selection = getattr(booking_service, "handle_slot_selection", None)
         if callable(handle_slot_selection):
             deterministic_result = handle_slot_selection(
@@ -1146,6 +1156,31 @@ def process_inbound_turn(
                 active_offer=active_offer_before,
                 db=db,
             )
+    if deterministic_result is not None and deterministic_result.handled:
+        _apply_booking_selection_result(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            turn_time=turn_time,
+            sms_service=sms_service,
+            result=deterministic_result,
+            inbound_message_id=inbound_message_id,
+            pending_step_before=pending_step_before,
+            retry_definitive_failure=retry_definitive_failure,
+        )
+        return
+
+    deterministic_result = _resolve_booking_selection_with_llm(
+        client=client,
+        lead=lead,
+        inbound_text=inbound_text,
+        history=history,
+        llm_agent=llm_agent,
+        booking_service=booking_service,
+        active_offer=active_offer_before,
+        db=db,
+    )
     if deterministic_result is not None and deterministic_result.handled:
         _apply_booking_selection_result(
             db=db,

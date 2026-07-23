@@ -67,7 +67,6 @@ def _single_exact_slot_reply(
     language: str,
     timezone_name: str,
 ) -> str:
-    index = _slot_index(slot) or 1
     display_time = _slot_display_time(
         slot,
         language=language,
@@ -75,16 +74,14 @@ def _single_exact_slot_reply(
     )
     if language == "fr":
         return (
-            f"Le créneau demandé est disponible pour un appel de consultation : {index}) {display_time}. "
-            f"Répondez {index} pour réserver l'appel. "
-            "Si ce créneau ne fonctionne pas, envoyez-moi un autre moment qui vous convient. "
-            f"Heure affichée en {timezone_label}."
+            f"Oui, {display_time} ({timezone_label}) est disponible pour l'appel de consultation. "
+            "Voulez-vous que je le réserve? "
+            "Si ce créneau ne fonctionne pas, envoyez-moi un autre moment."
         )
     return (
-        f"The requested consultation call time is available: {index}) {display_time}. "
-        f"Reply with {index} to book the call. "
-        "If that time doesn't work, send me another time that suits you. "
-        f"Time shown in {timezone_label}."
+        f"Yes, {display_time} ({timezone_label}) is available for the consultation call. "
+        "Would you like me to reserve it? "
+        "If that time doesn't work, send me another time."
     )
 
 
