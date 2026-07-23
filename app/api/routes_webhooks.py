@@ -697,6 +697,11 @@ def _coerce_zapier_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     raw_form_answers = normalize_form_answers(form_answers)
     clean_form_answers = filter_question_form_answers(raw_form_answers)
+    submitted_language = _first_payload_value(
+        payload,
+        raw_form_answers,
+        keys=("lead_language", "language", "locale", "lang"),
+    )
     clean_original_answers = [
         row
         for row in original_answers
@@ -705,6 +710,11 @@ def _coerce_zapier_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     lead_payload: dict[str, Any] = {
         **_lead_identity_from_payload(payload, {}, raw_form_answers),
+        **(
+            {"lead_language": normalize_language(submitted_language)}
+            if submitted_language
+            else {}
+        ),
         **_consent_fields(payload, raw_form_answers),
         "form_answers": clean_form_answers,
         "submitted_form_answers": clean_original_answers or _question_answer_rows(clean_form_answers),

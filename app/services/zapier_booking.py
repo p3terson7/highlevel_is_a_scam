@@ -19,7 +19,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import AuditLog, CalendarBooking, Client, Lead, OutboundRequest
 from app.services.i18n import client_language, normalize_language
-from app.services.lead_summary import format_answer_value
+from app.services.lead_summary import filter_question_form_answers, format_answer_value
 from app.services.outbound_requests import (
     complete_outbound_request,
     fail_outbound_request,
@@ -395,11 +395,13 @@ def _local_time_fields(
 
 
 def _form_payload(lead: Lead) -> dict[str, Any]:
-    normalized_answers = _json_object(lead.form_answers)
+    normalized_answers = filter_question_form_answers(_json_object(lead.form_answers))
     rows: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
 
     for raw_row in _extract_raw_form_answer_rows(_json_object(lead.raw_payload)):
+        if not filter_question_form_answers({str(raw_row[0] or ""): raw_row[1]}):
+            continue
         _append_form_row(
             rows=rows,
             seen_keys=seen_keys,

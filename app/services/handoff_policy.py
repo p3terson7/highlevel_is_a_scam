@@ -6,10 +6,25 @@ from typing import Any, Literal, Sequence
 
 from app.db.models import Client, Lead, Message
 from app.services.i18n import client_language
+from app.services.lead_summary import (
+    build_lead_summary_text,
+    filter_question_form_answers,
+    format_answer_value,
+    normalize_form_answers,
+)
 
 HandoffLevel = Literal["none", "soft", "required"]
 
 _LIMITS_KEY = "agent_limits"
+_FORM_DERIVED_SUMMARY_KEYS = {
+    "service_interest",
+    "pain_point",
+    "desired_outcome",
+    "timeline",
+    "scale_or_scope",
+    "location",
+    "decision_maker_role",
+}
 
 _HUMAN_REQUEST_RE = re.compile(
     r"\b("
@@ -345,6 +360,8 @@ def _summary(
     media_attachments: Sequence[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    raw_answers = lead.form_answers if isinstance(lead.form_answers, dict) else {}
+    form_answers = filter_question_form_answers(raw_answers)
     return {
         "level": level,
         "reason": reason,
@@ -356,11 +373,15 @@ def _summary(
             "city": lead.city,
             "source": getattr(lead.source, "value", str(lead.source)),
         },
-        "form_answers": lead.form_answers or {},
+        "form_answers": form_answers,
         "last_inbound": inbound_text,
         "conversation_state": lead.conversation_state.value if lead.conversation_state else "",
         "intent_level": raw_payload.get("intent_level"),
-        "lead_summary": raw_payload.get("lead_summary"),
+        "lead_summary": _response_safe_lead_summary(
+            raw_payload.get("lead_summary"),
+            raw_answers=raw_answers,
+            form_answers=form_answers,
+        ),
         "recent_messages": [
             {
                 "direction": getattr(message.direction, "value", str(message.direction)),
@@ -371,6 +392,47 @@ def _summary(
         "media_attachments": list(media_attachments or []),
         "recommended_follow_up": _recommended_follow_up(reason=reason),
     }
+
+
+def _response_safe_lead_summary(
+    raw_summary: Any,
+    *,
+    raw_answers: dict[str, Any],
+    form_answers: dict[str, Any],
+) -> Any:
+    if not isinstance(raw_summary, dict):
+        return raw_summary
+
+    summary = dict(raw_summary)
+    for key in list(summary):
+        if not filter_question_form_answers({key: "metadata-probe"}):
+            summary.pop(key, None)
+
+    if "form_answers" in summary:
+        summary["form_answers"] = dict(form_answers)
+    if "form_answers_summary" in summary:
+        if form_answers:
+            summary["form_answers_summary"] = build_lead_summary_text(
+                form_answers,
+                limit=8,
+            )
+        else:
+            summary.pop("form_answers_summary", None)
+
+    normalized_answers = normalize_form_answers(raw_answers)
+    hidden_values = {
+        format_answer_value(value).strip().casefold()
+        for key, value in normalized_answers.items()
+        if key not in form_answers and format_answer_value(value).strip()
+    }
+    for key in _FORM_DERIVED_SUMMARY_KEYS:
+        value = summary.get(key)
+        if (
+            value is not None
+            and format_answer_value(value).strip().casefold() in hidden_values
+        ):
+            summary.pop(key, None)
+    return summary
 
 
 def _recommended_follow_up(*, reason: str) -> str:

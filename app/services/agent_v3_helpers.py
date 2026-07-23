@@ -1280,7 +1280,44 @@ def _enforce_response_language(text: str, context: dict[str, Any]) -> str:
     clean = re.sub(r"\bstrategy call\b", "appel de consultation", clean, flags=re.IGNORECASE)
     clean = re.sub(r"\bthe team\b", "l'équipe", clean, flags=re.IGNORECASE)
     clean = re.sub(r"\s+([,.!?])", r"\1", clean)
-    return re.sub(r"\s{2,}", " ", clean).strip()
+    clean = re.sub(r"\s{2,}", " ", clean).strip()
+    if _reply_is_clearly_english(clean, context):
+        return _ensure_initial_intro(_non_booking_bridge_reply(context), context)
+    return clean
+
+
+_LANGUAGE_GUARD_IGNORED_RE = re.compile(
+    r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b",
+    re.IGNORECASE,
+)
+_ENGLISH_LANGUAGE_MARKERS = frozenset(
+    "are can clear could for great hello help hoping how is looking need outcome "
+    "please reaching should sure thank thanks that the this understand want what "
+    "when where which why with would you your".split()
+)
+_FRENCH_LANGUAGE_MARKERS = frozenset(
+    "aide aider appel avec besoin bonjour clarifier comment confirme dans des est "
+    "ici la le les merci notre nous pouvez pour pourquoi projet quel quelle quels "
+    "quelles souhaitez sur une votre vous".split()
+)
+
+
+def _reply_is_clearly_english(text: str, context: dict[str, Any]) -> bool:
+    """Detect a clear English draft without treating brands or URLs as language."""
+
+    candidate = str(text or "").strip()
+    if context.get("initial_outreach"):
+        prefix = _initial_intro_prefix(context)
+        if candidate.casefold().startswith(prefix.casefold()):
+            candidate = candidate[len(prefix) :].lstrip()
+    candidate = _LANGUAGE_GUARD_IGNORED_RE.sub(" ", candidate)
+    tokens = re.findall(r"[a-z]+", _normalize_text(candidate))
+    if len(tokens) < 2:
+        return False
+
+    english_score = sum(token in _ENGLISH_LANGUAGE_MARKERS for token in tokens)
+    french_score = sum(token in _FRENCH_LANGUAGE_MARKERS for token in tokens)
+    return english_score >= 3 and english_score >= french_score + 2
 
 
 def _replace_common_english_booking_copy(text: str) -> str:

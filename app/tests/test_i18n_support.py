@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from app.api.routes_webhooks import _coerce_website_form_payload
+from app.api.routes_webhooks import _coerce_website_form_payload, _coerce_zapier_payload
 from app.db.models import Client, ConversationStateEnum, Lead, LeadSource, Message, MessageDirection
 from app.db.session import get_session_factory
 from app.services.agent_v3 import LLMAgentV3
@@ -209,6 +209,101 @@ def test_website_form_canonicalizes_submitted_language_before_answer_filtering()
     assert normalized["lead"]["lead_language"] == "fr"
     candidates = normalize_webhook_payload(source=source, payload=normalized)
     assert candidates[0].raw_payload["lead_language"] == "fr"
+
+
+def test_flat_zapier_payload_promotes_language_before_answer_filtering():
+    normalized = _coerce_zapier_payload(
+        {
+            "id": "zapier-fr-language",
+            "full_name": "Julie Gagnon",
+            "phone": "+15145550121",
+            "email": "julie-zapier-language@example.com",
+            "form_answers": {
+                "locale": "fr_CA",
+                "service": "Inspection dimensionnelle",
+            },
+        }
+    )
+
+    assert normalized["lead"]["lead_language"] == "fr"
+    candidates = normalize_webhook_payload(source="meta", payload=normalized)
+    assert candidates[0].raw_payload["lead_language"] == "fr"
+    assert "locale" not in candidates[0].form_answers
+
+
+def test_native_meta_field_data_promotes_language_to_raw_lead_metadata():
+    candidates = normalize_webhook_payload(
+        source="meta",
+        payload={
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "leadgen_id": "meta-native-fr-language",
+                                "field_data": [
+                                    {"name": "full_name", "values": ["Marc Tremblay"]},
+                                    {"name": "phone_number", "values": ["5145550122"]},
+                                    {"name": "email", "values": ["marc-native-meta@example.com"]},
+                                    {"name": "language", "values": ["fr-CA"]},
+                                    {"name": "service", "values": ["Numérisation 3D"]},
+                                ],
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+
+    assert candidates[0].raw_payload["lead_language"] == "fr"
+    assert "language" not in candidates[0].form_answers
+
+
+def test_native_linkedin_element_promotes_language_to_raw_lead_metadata():
+    candidates = normalize_webhook_payload(
+        source="linkedin",
+        payload={
+            "elements": [
+                {
+                    "leadId": "linkedin-native-fr-language",
+                    "lead": {
+                        "form_answers": {
+                            "full_name": "Julie Gagnon",
+                            "phone": "5145550123",
+                            "email": "julie-native-linkedin@example.com",
+                            "lang": "fr",
+                            "service": "Rétro-ingénierie",
+                        }
+                    },
+                }
+            ]
+        },
+    )
+
+    assert candidates[0].raw_payload["lead_language"] == "fr"
+    assert "lang" not in candidates[0].form_answers
+
+
+def test_direct_manual_normalizer_promotes_language_to_raw_lead_metadata():
+    candidates = normalize_webhook_payload(
+        source="manual",
+        payload={
+            "lead": {
+                "id": "manual-fr-language",
+                "full_name": "Marc Tremblay",
+                "phone": "+15145550124",
+                "email": "marc-manual-language@example.com",
+                "form_answers": {
+                    "lead_language": "fr",
+                    "service": "Scan 3D",
+                },
+            }
+        },
+    )
+
+    assert candidates[0].raw_payload["lead_language"] == "fr"
+    assert "lead_language" not in candidates[0].form_answers
 
 
 def test_sms_templates_render_in_workspace_language(test_context):
