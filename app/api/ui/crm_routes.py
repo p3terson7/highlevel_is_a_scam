@@ -330,7 +330,7 @@ def ui_crm_lead_detail(
         custom_tags=tags,
         conversation_tags=_conversation_tags(lead, list(reversed(audit_logs))),
     )
-    normalized_answers = normalize_form_answers(lead.form_answers or {})
+    normalized_answers = filter_question_form_answers(lead.form_answers or {})
 
     return {
         "lead": {

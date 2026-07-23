@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Client, Lead, LeadSource
+from app.services.i18n import normalize_language
 from app.services.lead_summary import filter_question_form_answers, normalize_form_answers
 
 _IDENTITY_CONTEXT_KEYS = (
@@ -55,6 +56,7 @@ _CONSENT_FIELD_KEYS = (
 )
 _CONSENT_TRUE_VALUES = {"1", "true", "yes", "on", "accepted", "checked", "opted_in"}
 _CONSENT_FALSE_VALUES = {"0", "false", "no", "off", "declined", "unchecked", "not_granted"}
+_LANGUAGE_KEYS = ("lead_language", "language", "locale", "lang")
 MAX_WEBHOOK_LEADS_PER_REQUEST = 10
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -125,8 +127,31 @@ def _consent_evidence(*sources: Any) -> tuple[bool, dict[str, Any]]:
     return granted, evidence
 
 
-def _raw_payload_with_consent(payload: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
-    return {**payload, "consent_evidence": evidence}
+def _explicit_lead_language(*sources: Any) -> str | None:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        normalized = normalize_form_answers(source)
+        for key in _LANGUAGE_KEYS:
+            value = normalized.get(key)
+            if isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            text = str(value or "").strip().lower().replace("_", "-")
+            if text.startswith(("fr", "en")):
+                return normalize_language(text)
+    return None
+
+
+def _raw_payload_with_consent(
+    payload: dict[str, Any],
+    evidence: dict[str, Any],
+    *language_sources: Any,
+) -> dict[str, Any]:
+    raw_payload = {**payload, "consent_evidence": evidence}
+    language = _explicit_lead_language(*language_sources, payload)
+    if language:
+        raw_payload["lead_language"] = language
+    return raw_payload
 
 
 def _question_form_answers(raw_answers: dict[str, Any]) -> dict[str, Any]:
@@ -259,7 +284,13 @@ def normalize_meta_payload(
                 email=email,
                 city=city,
                 form_answers=_question_form_answers(form_answers),
-                raw_payload=_raw_payload_with_consent(lead_payload, consent_evidence),
+                raw_payload=_raw_payload_with_consent(
+                    lead_payload,
+                    consent_evidence,
+                    form_answers,
+                    lead_payload,
+                    payload,
+                ),
                 consented=consented,
             )
         )
@@ -286,7 +317,13 @@ def normalize_meta_payload(
                     email=email,
                     city=city,
                     form_answers=_question_form_answers(form_answers),
-                    raw_payload=_raw_payload_with_consent(value, consent_evidence),
+                    raw_payload=_raw_payload_with_consent(
+                        value,
+                        consent_evidence,
+                        form_answers,
+                        value,
+                        payload,
+                    ),
                     consented=consented,
                 )
             )
@@ -310,7 +347,13 @@ def normalize_meta_payload(
                     email=email,
                     city=city,
                     form_answers=_question_form_answers(form_answers),
-                    raw_payload=_raw_payload_with_consent(item, consent_evidence),
+                    raw_payload=_raw_payload_with_consent(
+                        item,
+                        consent_evidence,
+                        form_answers,
+                        item,
+                        payload,
+                    ),
                     consented=consented,
                 )
             )
@@ -352,7 +395,14 @@ def normalize_linkedin_payload(payload: dict[str, Any]) -> list[NormalizedLead]:
                 email=email,
                 city=city,
                 form_answers=_question_form_answers(answers),
-                raw_payload=_raw_payload_with_consent(element, consent_evidence),
+                raw_payload=_raw_payload_with_consent(
+                    element,
+                    consent_evidence,
+                    answers,
+                    lead_data,
+                    element,
+                    payload,
+                ),
                 consented=consented,
             )
         )
@@ -374,7 +424,13 @@ def normalize_linkedin_payload(payload: dict[str, Any]) -> list[NormalizedLead]:
                 email=email,
                 city=city,
                 form_answers=_question_form_answers(answers),
-                raw_payload=_raw_payload_with_consent(lead_data, consent_evidence),
+                raw_payload=_raw_payload_with_consent(
+                    lead_data,
+                    consent_evidence,
+                    answers,
+                    lead_data,
+                    payload,
+                ),
                 consented=consented,
             )
         )
@@ -401,7 +457,13 @@ def normalize_simple_payload(payload: dict[str, Any]) -> list[NormalizedLead]:
             email=email,
             city=city,
             form_answers=_question_form_answers(answers),
-            raw_payload=_raw_payload_with_consent(lead_data, consent_evidence),
+            raw_payload=_raw_payload_with_consent(
+                lead_data,
+                consent_evidence,
+                answers,
+                lead_data,
+                payload,
+            ),
             consented=consented,
         )
     ]

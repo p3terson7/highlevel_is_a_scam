@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
+from app.api.routes_webhooks import _coerce_website_form_payload, _coerce_zapier_payload
 from app.db.models import Client, ConversationStateEnum, Lead, LeadSource, Message, MessageDirection
 from app.db.session import get_session_factory
 from app.services.agent_v3 import LLMAgentV3
@@ -24,6 +25,7 @@ from app.services.agent_v3_helpers import (
 from app.services.agent_v3_types import _HANDOFF_PATTERN, _PRICING_PATTERN
 from app.services.booking import BookingService
 from app.services.i18n import client_language, detect_language, format_datetime_for_language, remember_lead_language
+from app.services.lead_intake import normalize_webhook_payload
 from app.services.lead_summary import normalize_form_answers
 from app.services.sms_service import SMSService, load_default_templates
 
@@ -134,6 +136,174 @@ def test_client_language_sticks_to_detected_lead_language(test_context):
         assert remember_lead_language(client, lead, inbound_text="Bonjour, 10h00 fonctionne") == "fr"
         assert lead.raw_payload["lead_language"] == "fr"
         assert client_language(client, lead=lead, inbound_text="lock it in") == "fr"
+
+
+def test_client_language_recovers_submitted_language_from_existing_form_answers(test_context):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        client.provider_config = {}
+        lead = Lead(
+            client_id=client.id,
+            source=LeadSource.META,
+            full_name="Marc Tremblay",
+            phone="+15145550119",
+            email="marc-form-language@example.com",
+            city="Montréal",
+            form_answers={"lang": "fr", "service": "Numérisation 3D"},
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.flush()
+
+        synthetic_initial_seed = (
+            "New lead submitted from Meta Lead Ads. "
+            "This is the first outbound SMS after the form submit."
+        )
+        assert client_language(client, lead=lead, inbound_text=synthetic_initial_seed) == "fr"
+
+        agent = LLMAgentV3(provider=DummyProvider())
+        context = agent._build_context(
+            client=client,
+            lead=lead,
+            inbound_text=synthetic_initial_seed,
+            history=[],
+            knowledge_context="",
+        )
+        prompt = agent._build_decision_prompt(
+            client=client,
+            response_language=context["response_language"],
+        )
+        followup_prompt = agent._build_tool_followup_prompt(
+            client=client,
+            response_language=context["response_language"],
+        )
+
+        assert context["response_language"] == "fr"
+        assert "response_language is fr" in prompt
+        assert "response_language is en" not in prompt
+        assert "response_language is fr" in followup_prompt
+
+
+def test_website_form_canonicalizes_submitted_language_before_answer_filtering():
+    source, normalized = _coerce_website_form_payload(
+        {
+            "source": "meta",
+            "lead": {
+                "id": "meta-fr-language",
+                "full_name": "Marc Tremblay",
+                "phone": "+15145550120",
+                "email": "marc-ingress-language@example.com",
+            },
+            "form_answers": {
+                "lang": "fr",
+                "service": "Numérisation 3D",
+            },
+        }
+    )
+
+    assert source == "meta"
+    assert normalized["lead"]["lead_language"] == "fr"
+    candidates = normalize_webhook_payload(source=source, payload=normalized)
+    assert candidates[0].raw_payload["lead_language"] == "fr"
+
+
+def test_flat_zapier_payload_promotes_language_before_answer_filtering():
+    normalized = _coerce_zapier_payload(
+        {
+            "id": "zapier-fr-language",
+            "full_name": "Julie Gagnon",
+            "phone": "+15145550121",
+            "email": "julie-zapier-language@example.com",
+            "form_answers": {
+                "locale": "fr_CA",
+                "service": "Inspection dimensionnelle",
+            },
+        }
+    )
+
+    assert normalized["lead"]["lead_language"] == "fr"
+    candidates = normalize_webhook_payload(source="meta", payload=normalized)
+    assert candidates[0].raw_payload["lead_language"] == "fr"
+    assert "locale" not in candidates[0].form_answers
+
+
+def test_native_meta_field_data_promotes_language_to_raw_lead_metadata():
+    candidates = normalize_webhook_payload(
+        source="meta",
+        payload={
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "leadgen_id": "meta-native-fr-language",
+                                "field_data": [
+                                    {"name": "full_name", "values": ["Marc Tremblay"]},
+                                    {"name": "phone_number", "values": ["5145550122"]},
+                                    {"name": "email", "values": ["marc-native-meta@example.com"]},
+                                    {"name": "language", "values": ["fr-CA"]},
+                                    {"name": "service", "values": ["Numérisation 3D"]},
+                                ],
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+
+    assert candidates[0].raw_payload["lead_language"] == "fr"
+    assert "language" not in candidates[0].form_answers
+
+
+def test_native_linkedin_element_promotes_language_to_raw_lead_metadata():
+    candidates = normalize_webhook_payload(
+        source="linkedin",
+        payload={
+            "elements": [
+                {
+                    "leadId": "linkedin-native-fr-language",
+                    "lead": {
+                        "form_answers": {
+                            "full_name": "Julie Gagnon",
+                            "phone": "5145550123",
+                            "email": "julie-native-linkedin@example.com",
+                            "lang": "fr",
+                            "service": "Rétro-ingénierie",
+                        }
+                    },
+                }
+            ]
+        },
+    )
+
+    assert candidates[0].raw_payload["lead_language"] == "fr"
+    assert "lang" not in candidates[0].form_answers
+
+
+def test_direct_manual_normalizer_promotes_language_to_raw_lead_metadata():
+    candidates = normalize_webhook_payload(
+        source="manual",
+        payload={
+            "lead": {
+                "id": "manual-fr-language",
+                "full_name": "Marc Tremblay",
+                "phone": "+15145550124",
+                "email": "marc-manual-language@example.com",
+                "form_answers": {
+                    "lead_language": "fr",
+                    "service": "Scan 3D",
+                },
+            }
+        },
+    )
+
+    assert candidates[0].raw_payload["lead_language"] == "fr"
+    assert "lead_language" not in candidates[0].form_answers
 
 
 def test_sms_templates_render_in_workspace_language(test_context):

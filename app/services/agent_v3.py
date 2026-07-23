@@ -23,13 +23,13 @@ from app.services.booking import (
     looks_like_booking_commitment,
     looks_like_slot_selection_message,
 )
-from app.services.i18n import client_language, language_instruction
+from app.services.i18n import client_language, language_instruction, normalize_language
 from app.services.knowledge import (
     KnowledgeRetrievalQuery,
     build_business_profile_context,
     build_knowledge_context_result,
 )
-from app.services.lead_summary import filter_question_form_answers, normalize_form_answers
+from app.services.lead_summary import filter_question_form_answers
 
 logger = get_logger(__name__)
 
@@ -646,7 +646,10 @@ class LLMAgentV3:
         )
         if context.get("identity_question"):
             return _identity_agent_response(context)
-        system_prompt = self._build_decision_prompt(client=client)
+        system_prompt = self._build_decision_prompt(
+            client=client,
+            response_language=str(context.get("response_language") or ""),
+        )
         user_prompt = json.dumps(context, ensure_ascii=False)
 
         try:
@@ -748,8 +751,15 @@ class LLMAgentV3:
         )
         return _finalize_response_with_context(response, context)
 
-    def _build_decision_prompt(self, *, client: Client) -> str:
-        workspace_language = client_language(client)
+    def _build_decision_prompt(
+        self,
+        *,
+        client: Client,
+        response_language: str | None = None,
+    ) -> str:
+        response_language = normalize_language(
+            response_language or client_language(client)
+        )
         return (
             f"{_UNTRUSTED_DATA_POLICY}\n"
             f"You are {_ASSISTANT_NAME}, an AI assistant for a client business. "
@@ -772,7 +782,7 @@ class LLMAgentV3:
             "- answered_missing_field_keys were already asked and answered; do not ask those same missing-field questions again.\n"
             "- After the first outbound message, acknowledge only the newest answer briefly. Do not summarize the project, form, urgency, or deliverables again before every question.\n"
             "- Use conversation_context.response_language for the reply language. "
-            f"{language_instruction(workspace_language)}\n"
+            f"{language_instruction(response_language)}\n"
             "- If response_language is fr, every lead-facing word must be French. Do not use English weekday/month abbreviations, AM/PM, 'Reply with', 'Times shown', or 'If none of those work'. Format times like 'mercredi 24 juin à 10 h 00'.\n"
             f"- On the first outbound SMS in English, start with: \"Hi {{first_name}}, I'm {_ASSISTANT_NAME}, the assistant for {{business_name}}.\" "
             f"In French, start with: \"Bonjour {{first_name}}, ici {_ASSISTANT_NAME}, l'assistante de {{business_name}}.\" "
@@ -831,14 +841,21 @@ class LLMAgentV3:
             f"{_TOOL_JSON_SCHEMA}"
         )
 
-    def _build_tool_followup_prompt(self, *, client: Client) -> str:
-        workspace_language = client_language(client)
+    def _build_tool_followup_prompt(
+        self,
+        *,
+        client: Client,
+        response_language: str | None = None,
+    ) -> str:
+        response_language = normalize_language(
+            response_language or client_language(client)
+        )
         return (
             f"{_UNTRUSTED_DATA_POLICY}\n"
             "You are writing the final SMS after a backend tool returned structured booking data.\n"
             "Rules:\n"
             f"- You are {_ASSISTANT_NAME}, the assistant for the business. Never write as the founder, owner, or a human employee.\n"
-            f"- Use conversation_context.response_language for the reply language. {language_instruction(workspace_language)}\n"
+            f"- Use conversation_context.response_language for the reply language. {language_instruction(response_language)}\n"
             "- If response_language is fr, every lead-facing word must be French. Do not use English weekday/month abbreviations, AM/PM, 'Reply with', 'Times shown', or 'If none of those work'. Format times like 'mercredi 24 juin à 10 h 00'.\n"
             "- Use the tool_result as the source of truth.\n"
             "- Use conversation_context.business_profile_context as always-on website-derived business memory when wording the final answer.\n"
@@ -867,7 +884,7 @@ class LLMAgentV3:
         knowledge_context: str = "",
         knowledge_retrieval: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        normalized_answers = normalize_form_answers(lead.form_answers or {})
+        normalized_answers = filter_question_form_answers(lead.form_answers or {})
         raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
         response_language = client_language(client, lead=lead, inbound_text=inbound_text)
         ai_context = getattr(client, "ai_context", "") or ""
@@ -1630,7 +1647,10 @@ class LLMAgentV3:
         client: Client,
     ) -> AgentResponse:
         try:
-            followup_prompt = self._build_tool_followup_prompt(client=client)
+            followup_prompt = self._build_tool_followup_prompt(
+                client=client,
+                response_language=str(context.get("response_language") or ""),
+            )
             followup_user = json.dumps(
                 _bounded_prompt_value(
                     {

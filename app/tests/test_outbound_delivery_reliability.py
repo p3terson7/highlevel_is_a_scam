@@ -19,9 +19,11 @@ class ControlledSMSService:
     def __init__(self, failure: Exception | None = None) -> None:
         self.failure = failure
         self.send_calls = 0
+        self.render_contexts: list[dict] = []
 
     def render_template(self, client: Client, template_key: str, context=None) -> str:
-        _ = client, template_key, context
+        _ = client, template_key
+        self.render_contexts.append(dict(context or {}))
         return "Original durable message"
 
     def send_message(self, to_number: str, body: str) -> str:
@@ -147,6 +149,36 @@ def test_delayed_initial_sms_is_suppressed_after_lead_starts_conversation(
         )
         assert audit is not None
         assert audit.decision["reason"] == "conversation_already_started"
+
+
+def test_non_meta_initial_sms_uses_submitted_lead_language(test_context, monkeypatch):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        lead = Lead(
+            client_id=1,
+            external_lead_id="manual-french-form-language",
+            source=LeadSource.MANUAL,
+            full_name="Julie Gagnon",
+            phone="+15550001019",
+            email="julie-form-language@example.com",
+            form_answers={"lang": "fr"},
+            raw_payload={},
+            consented=True,
+            opted_out=False,
+        )
+        db.add(lead)
+        db.commit()
+        lead_id = lead.id
+
+    service = ControlledSMSService()
+    monkeypatch.setattr(tasks, "build_sms_service", lambda *args, **kwargs: service)
+    monkeypatch.setattr(tasks, "_acquire_lead_workflow_lock", lambda **kwargs: None)
+    monkeypatch.setattr(tasks, "within_operating_hours", lambda client: True)
+
+    result = tasks.send_initial_sms_task(lead_id)
+
+    assert result["status"] == "ok"
+    assert service.render_contexts[0]["language"] == "fr"
 
 
 def test_sms_failure_classification_distinguishes_rejection_from_unknown_result():

@@ -206,7 +206,7 @@ def ui_conversation_thread(
             for log in visible_audits
             if log.event_type not in {"lead_normalized", "meta_webhook_received", "linkedin_webhook_received"}
         ]
-    normalized_answers = normalize_form_answers(lead.form_answers or {})
+    normalized_answers = filter_question_form_answers(lead.form_answers or {})
 
     return {
         "lead": {

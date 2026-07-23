@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -238,6 +239,79 @@ def test_manual_calendar_booking_payload_respects_french_workspace_language(test
     assert payload["email_confirmation"]["subject"] == "Acme Solar: rencontre confirmée avec Camille Tremblay"
     assert "Votre rencontre avec Acme Solar est réservée." in payload["email_confirmation"]["body_text"]
     assert "When:" not in payload["email_confirmation"]["body_text"]
+
+
+def test_zapier_booking_payload_filters_stored_form_metadata_without_mutating_lead(
+    test_context,
+):
+    session_factory = get_session_factory()
+    with session_factory() as db:
+        client = db.scalar(select(Client).where(Client.client_key == test_context.client_key))
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="zapier-stored-metadata",
+            source=LeadSource.META,
+            full_name="Stored Metadata Lead",
+            phone="+15145550192",
+            email="zapier-stored-metadata@example.com",
+            city="Montréal",
+            form_answers={
+                "form_type": "quote_request",
+                "lang": "en",
+                "services": "Scan 3D",
+            },
+            raw_payload={
+                "submitted_form_answers": [
+                    {"question": "Form Type", "answer": "quote_request"},
+                    {"question": "Lang", "answer": "en"},
+                    {"question": "Project scope", "answer": "Industrial component"},
+                ],
+                "form_answers": {
+                    "form_type": "quote_request",
+                    "lang": "en",
+                    "timeline": "This week",
+                },
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.QUALIFYING,
+            crm_stage="Qualified",
+        )
+        db.add(lead)
+        db.flush()
+        original_answers = dict(lead.form_answers)
+        original_raw_payload = dict(lead.raw_payload)
+
+        payload = zapier_booking.build_zapier_booking_payload(
+            client=client,
+            lead=lead,
+            calendar_booking={
+                "provider": "internal",
+                "booking": {
+                    "booking_id": 991,
+                    "start_time": "2026-06-15T14:00:00+00:00",
+                    "end_time": "2026-06-15T14:30:00+00:00",
+                    "timezone": "America/Toronto",
+                },
+            },
+            trigger="metadata_filter_test",
+        )
+
+        assert payload["form"]["answers_map"] == {
+            "services": "Scan 3D",
+            "project_scope": "Industrial component",
+            "timeline": "This week",
+        }
+        assert payload["form_answers"] == payload["form"]["answers_map"]
+        assert payload["form_answers_list"] == payload["form"]["answers"]
+        serialized = json.dumps(payload)
+        assert "quote_request" not in serialized
+        assert "Form Type" not in serialized
+        assert '"form_type"' not in serialized
+        assert '"lang"' not in serialized
+        assert lead.form_answers == original_answers
+        assert lead.raw_payload == original_raw_payload
 
 
 def test_zapier_booking_webhook_skips_clients_without_url(test_context, monkeypatch):

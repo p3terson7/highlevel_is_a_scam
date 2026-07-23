@@ -4,9 +4,11 @@ import pytest
 
 import app.services.agent_v3 as agent_v3_module
 from app.db.models import Client, ConversationStateEnum, Lead, LeadSource, Message, MessageDirection
+from app.services.agent_v3_helpers import _apply_response_guardrails
 from app.services.booking import BookingProviderError
 from app.services.knowledge import KnowledgeContextResult, KnowledgeRetrievalQuery
 from app.services.llm_agent import LLMAgent
+from app.workers.tasks import _meta_initial_seed_text
 
 
 class FailingProvider:
@@ -16,6 +18,23 @@ class FailingProvider:
         _ = system_prompt
         _ = user_prompt
         raise RuntimeError("provider unavailable")
+
+
+class EnglishDraftForFrenchLeadProvider:
+    name = "english-draft-for-french-lead"
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        assert "response_language is fr" in system_prompt
+        payload = json.loads(user_prompt)
+        assert payload["response_language"] == "fr"
+        return {
+            "reply_text": "Thanks for reaching out. What outcome are you hoping for?",
+            "next_state": "QUALIFYING",
+            "collected_fields": payload["qualification_memory"],
+            "next_question_key": None,
+            "action": "none",
+            "tool_call": {"name": "none", "args": {}},
+        }
 
 
 class PartialProjectProvider:
@@ -1137,6 +1156,135 @@ def test_pricing_question_after_decision_prompt_is_not_stored_as_decision_answer
     assert context["pricing_question"] is True
     assert context["lead_question_detected"] is True
     assert context["qualification_memory"].get("decision_makers") is None
+
+
+def test_internal_form_type_is_excluded_from_agent_context_and_meta_seed():
+    lead = _lead(
+        form_answers={
+            "form_type": "quote_request",
+            "lang": "fr",
+            "type_client": "Individual",
+            "services": "Scan 3D",
+        }
+    )
+    agent = agent_v3_module.LLMAgentV3(provider=FailingProvider())
+
+    seed = _meta_initial_seed_text(lead)
+    context = agent._build_context(
+        client=_client(),
+        lead=lead,
+        inbound_text=seed,
+        history=[],
+    )
+
+    assert "quote_request" not in seed
+    assert "Form Type" not in seed
+    assert "form_type" not in context["lead_form_answers"]
+    assert "lang" not in context["lead_form_answers"]
+    assert "form_type" not in context["known_form_field_keys"]
+    assert all(fact["key"] != "form_type" for fact in context["known_form_facts"])
+    assert context["qualification_memory"]["service_needed"] == "Scan 3D"
+    assert context["pricing_question"] is False
+    assert context["lead_question_detected"] is False
+
+
+def test_invented_pricing_copy_does_not_create_a_pricing_disclaimer():
+    reply = _apply_response_guardrails(
+        "Pricing and package details depend on the project scope.",
+        {
+            "response_language": "fr",
+            "pricing_question": False,
+            "pricing_context_available": False,
+            "intent_level": "MEDIUM_INTENT",
+            "recommended_missing_field": {
+                "question": "Quel type de pièce souhaitez-vous numériser?"
+            },
+            "cta_state": {},
+        },
+    )
+
+    normalized = reply.casefold()
+    assert reply == "Quel type de pièce souhaitez-vous numériser?"
+    assert "prix" not in normalized
+    assert "pricing" not in normalized
+    assert "forfait" not in normalized
+
+
+def test_meta_initial_french_reply_replaces_clear_english_provider_draft():
+    lead = _lead(
+        state=ConversationStateEnum.NEW,
+        form_answers={
+            "form_type": "quote_request",
+            "lang": "fr",
+            "services": "Scan 3D",
+        },
+        source=LeadSource.META,
+    )
+    response = LLMAgent(provider=EnglishDraftForFrenchLeadProvider()).next_reply(
+        client=_client(),
+        lead=lead,
+        inbound_text=_meta_initial_seed_text(lead),
+        history=[],
+    )
+
+    normalized = response.reply_text.casefold()
+    assert response.reply_text.startswith(
+        "Bonjour Jordan, ici Hermes, l'assistante de Survey North."
+    )
+    assert "thanks for reaching out" not in normalized
+    assert "what outcome" not in normalized
+    assert response.reply_text.endswith("?")
+
+
+def test_later_french_reply_replaces_clear_english_provider_draft():
+    lead = _lead(
+        raw_payload={"lead_language": "fr"},
+        form_answers={"services": "Scan 3D"},
+        source=LeadSource.META,
+    )
+    history = [
+        Message(
+            direction=MessageDirection.OUTBOUND,
+            body=(
+                "Bonjour Jordan, ici Hermes, l'assistante de Survey North. "
+                "Quel résultat souhaitez-vous obtenir?"
+            ),
+        )
+    ]
+    response = LLMAgent(provider=EnglishDraftForFrenchLeadProvider()).next_reply(
+        client=_client(),
+        lead=lead,
+        inbound_text="Oui, merci.",
+        history=history,
+    )
+
+    normalized = response.reply_text.casefold()
+    assert "thanks for reaching out" not in normalized
+    assert "what outcome" not in normalized
+    assert any(
+        marker in normalized
+        for marker in ("à quoi", "quel", "quelle", "qu'est-ce", "voulez-vous")
+    )
+
+
+def test_french_language_guard_preserves_french_with_names_and_urls():
+    draft = (
+        "Bonjour Marc, le service Scan to BIM convient au projet Johnson Controls. "
+        "Consultez https://example.com/Scan-to-BIM pour les détails."
+    )
+
+    reply = _apply_response_guardrails(
+        draft,
+        {
+            "response_language": "fr",
+            "pricing_question": False,
+            "pricing_context_available": False,
+            "intent_level": "MEDIUM_INTENT",
+            "cta_state": {},
+        },
+    )
+
+    assert reply == draft
 
 
 def test_call_interest_without_tool_is_validated_into_live_slot_offer():

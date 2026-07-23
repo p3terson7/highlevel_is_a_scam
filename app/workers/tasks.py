@@ -37,6 +37,7 @@ from app.services.booking import build_booking_service
 from app.services.compliance import within_operating_hours
 from app.services.crm import CRM_STAGE_CONTACTED, progress_crm_stage
 from app.services.inbound_sms import already_processed_inbound_message, process_inbound_turn
+from app.services.i18n import client_language
 from app.services.inbound_work import (
     INBOUND_WORK_COMPLETED,
     INBOUND_WORK_DEAD_LETTER,
@@ -50,7 +51,7 @@ from app.services.inbound_work import (
     reserve_inbound_work_enqueue,
 )
 from app.services.lead_intake import normalize_webhook_payload, upsert_lead
-from app.services.lead_summary import build_lead_summary_text, normalize_form_answers
+from app.services.lead_summary import build_lead_summary_text, filter_question_form_answers
 from app.services.llm_agent import build_llm_agent
 from app.services.message_media import (
     MessageMediaError,
@@ -1448,7 +1449,7 @@ def _record_outbound(
 
 
 def _meta_initial_seed_text(lead: Lead) -> str:
-    normalized_answers = normalize_form_answers(lead.form_answers or {})
+    normalized_answers = filter_question_form_answers(lead.form_answers or {})
     details: list[str] = []
     if lead.full_name:
         details.append(f"name={lead.full_name}")
@@ -1539,6 +1540,7 @@ def send_initial_sms_task(
                 "business_name": client.business_name,
                 "booking_url": client.booking_url,
                 "consent_text": client.consent_text,
+                "language": client_language(client, lead=lead),
             }
 
             outbound_payload: dict[str, Any]
