@@ -11,6 +11,9 @@ Production-minded FastAPI starter for a reusable multi-tenant Lead Conversion SM
 
 2. **Lead normalization + persistence + initial SMS**
    - Worker logic is in `app/workers/tasks.py` (`process_webhook_payload_task`, `send_initial_sms_task`).
+   - Every eligible source uses `app/services/initial_outreach.py`, the same Agent V3 opening routine as Test Lab: source-neutral form context, tenant playbook/FAQ, and database-backed website retrieval. Source attribution remains in CRM records and is excluded from model context.
+   - Initial outreach no longer switches to `initial_sms`/`after_hours` templates or schedules the old after-hours booking-link follow-up. The agent answers 24/7. Already-queued legacy after-hours jobs drain without sending, and failed legacy after-hours sends are not retried. Legacy templates remain for compatibility, but do not control new initial outreach.
+   - Consent, opt-out, delayed dispatch, and outbound idempotency still apply. Safe retries reuse the reserved reply and memory rather than generating a different opening; existing non-retired reservations retain their original delivery contract.
    - Normalization is in `app/services/lead_intake.py` (`normalize_webhook_payload`, `upsert_lead`).
    - State/data is stored in PostgreSQL tables from `app/db/models.py`:
      - `clients`, `leads`, `messages`, `conversation_states`, `audit_logs`, `runtime_settings`.
@@ -69,7 +72,7 @@ Equivalent command:
 docker compose up --build
 ```
 
-Non-Compose deployments must run the default queue as `rq worker --with-scheduler`, because automated SMS pacing and after-hours follow-ups use scheduled jobs. They must also run `rq worker knowledge` and use a private Redis deployment with persistence enabled. Remote website extraction is intentionally kept off both the API process and the default SMS/webhook queue. Compose enables Redis AOF persistence and stores it in the `redis_data` volume.
+Non-Compose deployments must run the default queue as `rq worker --with-scheduler`, because automated SMS pacing and delivery recovery use scheduled jobs. They must also run `rq worker knowledge` and use a private Redis deployment with persistence enabled. Remote website extraction is intentionally kept off both the API process and the default SMS/webhook queue. Compose enables Redis AOF persistence and stores it in the `redis_data` volume.
 
 Website knowledge ingestion accepts up to 12 owner-managed public HTTP(S) URLs per run and 48 stored sources per workspace, discovers a bounded set of same-site service/about/capability pages, and extracts readable HTML, form labels/options, metadata, and JSON-LD. Settings reports queued/running/partial results and can explicitly clear all derived knowledge; clearing also supersedes an active crawl so it cannot repopulate the deleted data. A failed refresh keeps last-successful chunks available for source-labelled, query-specific retrieval for at most 30 days, but stale facts are excluded from always-on business memory. Production crawl URLs are encrypted in Redis, query credentials are never returned as source citations, and query-bearing URLs must use HTTPS. Query strings are used for that crawl but are not persisted, so a signed URL must be re-entered for a later refresh. The crawler intentionally does not execute JavaScript, so content available only after client-side rendering needs a server-rendered source URL before it can be indexed.
 
@@ -103,7 +106,7 @@ In **Clients > Edit**:
   - booking URL
   - booking mode: `internal`
   - internal calendar availability (weekly windows, slot length, notice, horizon)
-  - operating hours
+  - business operating hours (stored business metadata; never restricts the 24/7 agent)
   - handoff number
   - template overrides (JSON)
   - Twilio `Account SID`, `Auth Token`, and `From Number`
@@ -141,7 +144,7 @@ For local testing with real providers, expose API using ngrok/cloud tunnel.
 - Existing server integrations may use one of the header-only compatibility forms: `X-CRM-Webhook-Secret`, `X-Zapier-Webhook-Secret`, or `X-Zapier-Token`. Query-string secrets are not accepted.
 - Requests are limited to 128 KiB, 10 normalized leads, bounded JSON depth/field sizes, and 60 authenticated requests per client endpoint per minute. Empty or non-actionable leads are rejected.
 - SMS consent is opt-in. Include explicit consent evidence (for example `{"consent":{"sms":true,"method":"explicit_checkbox","captured_at":"...","text":"..."}}`) to authorize an initial SMS; omitted consent is treated as not provided and does not withdraw permission already captured for an existing lead. Withdrawal must be explicit.
-- The bundled PHP landing forms require an explicit HTTPS `CRM_WEBHOOK_URL` and server-side `CRM_WEBHOOK_SECRET` matching the client secret for CRM relay. Configure `CRM_UPLOAD_TMP_DIR` outside the web root; `CRM_MAIL_FROM` sets the fixed envelope sender, and `CRM_TRUSTED_PROXY_IPS` controls which exact proxy IPs may supply client addresses.
+- To deliver bundled PHP landing-form submissions into the CRM, configure `CRM_WEBHOOK_URL=https://leadops-console.onrender.com/webhooks/form/3d-preciscan` and a server-side `CRM_WEBHOOK_SECRET` matching the `3d-preciscan` client secret in the CRM. The browser continues to post to the same-site PHP handler. Each handler attempts the established email delivery first, then signs and sends the same submission data to the CRM as an additive channel; missing credentials, a timeout, or a rejected CRM response cannot turn a successful email submission into a form error. CRM delivery counts only after a `202`/`accepted` response, and the secret is never exposed to frontend code. Quotes containing attachments still require successful email delivery because the CRM payload contains only attachment names. Every handler logs both channel outcomes. Configure `CRM_UPLOAD_TMP_DIR` outside the web root; `CRM_MAIL_FROM` sets the fixed envelope sender, and `CRM_TRUSTED_PROXY_IPS` controls which exact proxy IPs may supply client addresses.
 - Set `CRM_FORM_ENV=production` (or `CRM_FORM_PRODUCTION=true`) on the public PHP host. Production form posts fail with HTTP 503 unless both `TURNSTILE_SITE_KEY` and the server-only `TURNSTILE_SECRET_KEY` are configured, `CRM_RATE_LIMIT_REDIS_URL` is a valid `redis://` or `rediss://` URL, and the phpredis extension is installed (`rediss://` requires phpredis 5.3+ for an explicitly verified TLS stream context). `TURNSTILE_EXPECTED_HOSTNAMES` can contain an exact comma-separated hostname allowlist for an additional Siteverify response check.
 - When a Turnstile site key is configured, the contact and quote pages render Cloudflare's official widget and submit `cf-turnstile-response`. Every form handler validates the token through the fixed Siteverify endpoint before email or CRM delivery, checks the per-form action, uses the trustworthy client IP when available, follows no redirects, and fails closed on timeouts or invalid responses. Cloudflare documents that server validation is mandatory and tokens are single-use, expire after five minutes, and are limited to 2,048 characters: [Turnstile server-side validation](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/) and [widget embedding](https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/).
 - For local development, leave `CRM_FORM_ENV` blank (it inherits `APP_ENV`/`ENV`) or set it to `local`, and omit the Turnstile/Redis settings; the widget stays hidden and the locked file limiter uses `CRM_RATE_LIMIT_DIR` outside the web root. The file limiter is deliberately refused in production because it cannot coordinate multiple PHP workers or hosts. A managed WAF remains useful defense-in-depth.
@@ -305,6 +308,7 @@ The UI is now a compact operator workspace with two roles:
 `[Screenshot placeholder: Settings view with runtime config and demo controls]`
 
 ### Test Lab
+- AI sandbox openings and real intake share the same opening routine and model context for identical lead facts. Sandbox SMS remains simulated; live intake retains transport/consent checks.
 - Live test-contact launcher for texting a real phone
 - Copy-ready Zapier webhook URL for the selected client
 - Zapier POST console showing latest ingestion events/results from webhook through lead normalization
@@ -526,7 +530,6 @@ Current variables used by the app:
 - `RATE_LIMIT_COUNT`
 - `RATE_LIMIT_WINDOW_MINUTES`
 - `AUTOMATED_SMS_DELAY_SECONDS` (default `20`; delays initial and automated reply SMS, `0` disables pacing)
-- `AFTER_HOURS_FOLLOWUP_MINUTES`
 - `REQUEST_TIMEOUT_SECONDS`
 - `REQUEST_BODY_MAX_BYTES`
 - `MESSAGE_MEDIA_MAX_BYTES`

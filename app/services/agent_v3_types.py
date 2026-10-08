@@ -25,7 +25,8 @@ ConversationAct = Literal[
 ActionType = Literal["none", "ask_next_question", "offer_booking", "mark_booked", "handoff_to_human"]
 ToolName = Literal["none", "find_slots", "book_slot", "mark_booked", "handoff_to_human"]
 
-_ASSISTANT_NAME = "Hermes"
+ASSISTANT_NAME = "Hermes"
+_ASSISTANT_NAME = ASSISTANT_NAME
 _ALLOWED_STATES = {
     ConversationStateEnum.QUALIFYING,
     ConversationStateEnum.BOOKING_SENT,

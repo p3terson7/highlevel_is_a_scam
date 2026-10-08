@@ -100,6 +100,16 @@ def test_language_detector_distinguishes_supported_languages_and_uses_fallback()
     assert detect_reply_language("1234") is None
 
 
+def test_french_exact_slot_confirmation_is_one_cta_group() -> None:
+    reply = (
+        "Oui, jeudi 16 juillet à 15 h 00 (EDT) est disponible pour l'appel de consultation. "
+        "Voulez-vous que je le réserve? "
+        "Si ce créneau ne fonctionne pas, envoyez-moi un autre moment."
+    )
+    assert count_meeting_ctas(reply) == 1
+    assert count_meeting_ctas("Voulez-vous que je le réserve?") == 1
+
+
 def test_question_and_cta_counts_are_clause_based() -> None:
     reply = "Would a meeting help?? Here is the service information. What time can I book?"
 
@@ -229,3 +239,89 @@ def test_semantic_descriptions_are_advisory_but_missing_structured_signals_fail(
     assert not any(
         "required_fact" in check.code or "forbidden_claim" in check.code for check in checks
     )
+
+
+def test_persisted_side_effect_expectations_are_deterministic() -> None:
+    expectation = TurnExpectation(
+        expected_total_lead_task_count=1,
+        expected_total_booking_event_count=0,
+        expected_total_outbound_message_count=2,
+        expected_booking_confirmation_unknown=True,
+        expected_handoff_reason="booking_confirmation_unknown",
+        expected_lead_source="linkedin",
+    )
+    observation = TurnObservation(
+        reply="I could not confirm the booking, so the team will verify it.",
+        total_lead_task_count=1,
+        total_booking_event_count=0,
+        total_outbound_message_count=2,
+        booking_confirmation_unknown=True,
+        handoff_reason="booking_confirmation_unknown",
+        lead_source="linkedin",
+    )
+
+    checks = grade_turn(expectation, observation)
+
+    assert all(check.passed for check in checks)
+    assert {check.code for check in checks} >= {
+        "total_lead_task_count",
+        "total_booking_event_count",
+        "total_outbound_message_count",
+        "booking_confirmation_unknown",
+        "handoff_reason",
+        "lead_source",
+    }
+
+
+def test_asserted_observability_capabilities_fail_when_adapter_did_not_expose_them() -> None:
+    expectation = TurnExpectation(
+        expected_total_lead_task_count=0,
+        expected_total_booking_event_count=0,
+        expected_total_outbound_message_count=0,
+        expected_booking_confirmation_unknown=False,
+    )
+
+    checks = grade_turn(expectation, TurnObservation(reply="No observable state."))
+    asserted = {
+        check.code: check
+        for check in checks
+        if check.code
+        in {
+            "total_lead_task_count",
+            "total_booking_event_count",
+            "total_outbound_message_count",
+            "booking_confirmation_unknown",
+        }
+    }
+
+    assert set(asserted) == {
+        "total_lead_task_count",
+        "total_booking_event_count",
+        "total_outbound_message_count",
+        "booking_confirmation_unknown",
+    }
+    assert all(not check.passed for check in asserted.values())
+    assert all("did not expose" in check.detail for check in asserted.values())
+
+
+def test_observability_mismatches_report_cumulative_values() -> None:
+    expectation = TurnExpectation(
+        expected_total_lead_task_count=1,
+        expected_total_booking_event_count=1,
+        expected_total_outbound_message_count=2,
+        expected_booking_confirmation_unknown=True,
+    )
+    observation = TurnObservation(
+        reply="Observed state differs.",
+        total_lead_task_count=0,
+        total_booking_event_count=0,
+        total_outbound_message_count=1,
+        booking_confirmation_unknown=False,
+    )
+
+    checks = grade_turn(expectation, observation)
+    mismatches = [check for check in checks if check.code != "reply_non_empty"]
+
+    assert mismatches
+    assert all(not check.passed for check in mismatches)
+    assert "cumulative" in mismatches[0].detail

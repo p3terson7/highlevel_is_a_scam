@@ -1,0 +1,309 @@
+RewriteEngine On
+RewriteRule ^(css|js)/([\w-]+)\.\d+\.\1$ $1/$2.$1 [L]
+
+RewriteCond %{HTTPS} off
+RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+
+RewriteRule ^services$ pages/services.php [L,NC,QSA]
+
+RewriteRule ^qui-sommes-nous$ pages/qui-sommes-nous.php [L,NC,QSA]
+Redirect 301 /a-propos-de-3d-preciscan /qui-sommes-nous [L,NC,QSA]
+
+#RewriteRule ^services/inspection-3d$ pages/services-inspection-3d.php [L,NC,QSA]
+
+######SERVICES######
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-validation-assemblage.php\ HTTP/
+RewriteRule ^pages/services-validation-assemblage\.php$ https://3dpreciscan.com/services/validation-assemblage [R=301,L]
+RewriteRule ^services/validation-assemblage$ pages/services-validation-assemblage.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*en/pages/services-assembly-validation\.php\ HTTP/
+RewriteRule ^en/pages/services-assembly-validation\.php$ https://3dpreciscan.com/en/services-assembly-validation [R=301,L]
+RewriteRule ^en/services-assembly-validation$ en/pages/services-assembly-validation.php [L,NC,QSA]
+
+
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-inspection-3d.php\ HTTP/
+RewriteRule ^pages/services-inspection-3d\.php$ https://3dpreciscan.com/services/inspection-3d [R=301,L]
+RewriteRule ^services/inspection-3d$ pages/services-inspection-3d.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-retro-ingenierie.php\ HTTP/
+RewriteRule ^pages/services-retro-ingenierie\.php$ https://3dpreciscan.com/services/retro-ingenierie [R=301,L]
+RewriteRule ^services/retro-ingenierie$ pages/services-retro-ingenierie.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-retro-impression-3d.php\ HTTP/
+RewriteRule ^pages/services-impression-3d\.php$ https://3dpreciscan.com/services/impression-3d [R=301,L]
+RewriteRule ^services/impression-3d$ pages/services-impression-3d.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-metrologie-industrielle.php\ HTTP/
+RewriteRule ^pages/metrologie-industrielle\.php$ https://3dpreciscan.com/services/metrologie-industrielle [R=301,L]
+RewriteRule ^services/metrologie-industrielle$ pages/services-metrologie-industrielle.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-modelisation-3d.php\ HTTP/
+RewriteRule ^pages/services-modelisation-3d\.php$ https://3dpreciscan.com/services/modelisation-3d [R=301,L]
+RewriteRule ^services/modelisation-3d$ pages/services-modelisation-3d.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-ingenierie.php\ HTTP/
+RewriteRule ^pages/services-ingenierie\.php$ https://3dpreciscan.com/services/ingenierie [R=301,L]
+RewriteRule ^services/ingenierie$ pages/services-ingenierie.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-simulation-3d.php\ HTTP/
+RewriteRule ^pages/services-simulation-3d\.php$ https://3dpreciscan.com/services/simulation-3d [R=301,L]
+
+
+RewriteRule ^services/simulation-3d$ pages/services-simulation-3d.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-conception-de-piece-3d.php\ HTTP/
+RewriteRule ^pages/services-conception-de-piece-3d\.php$ https://3dpreciscan.com/services/conception-de-pieces-3d [R=301,L]
+RewriteRule ^services/conception-de-pieces-3d$ pages/services-conception-de-piece-3d.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/services-reconstruction-3d.php\ HTTP/
+RewriteRule ^pages/services-reconstruction-3d\.php$ https://3dpreciscan.com/services/reconstruction-3d [R=301,L]
+RewriteRule ^services/reconstruction-3d$ pages/services-reconstruction-3d.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/equipement-handyscan.php\ HTTP/
+RewriteRule ^pages/equipement-handyscan\.php$ https://3dpreciscan.com/equipement/handyscan [R=301,L]
+RewriteRule ^equipement/handyscan$ pages/equipement-handyscan.php [L,NC,QSA]
+
+#RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/equipement-laser_tracker.php\ HTTP/
+
+RewriteRule ^equipement/laser-tracker$ pages/equipement-laser_tracker.php [L,NC,QSA]
+
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/equipement-metrascanphp\ HTTP/
+RewriteRule ^pages/equipement-metrascan\.php$ https://3dpreciscan.com/equipement/metrascan [R=301,L]
+RewriteRule ^equipement/metrascan$ pages/equipement-metrascan.php [L,NC,QSA]
+
+RewriteRule ^services/numerisation-3d$ pages/services-numerisation-3d.php [L,NC,QSA]
+
+RewriteRule ^portfolio$ pages/portfolio.php [L,NC,QSA]
+
+
+#contenido hiperlocal
+# Numérisation 3D à Quebec
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/numerisation-3d-quebec.php\ HTTP/
+RewriteRule ^pages/numerisation-3d-quebec\.php$ https://3dpreciscan.com/numerisation-3d-quebec [R=301,L]
+RewriteRule ^numerisation-3d-quebec$ pages/numerisation-3d-quebec.php [L,NC,QSA]
+
+# 3D scanning in Quebec
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*en/pages/3d-scanning-quebec.php\ HTTP/
+RewriteRule ^en/pages/3d-scanning-quebec\.php$ https://3dpreciscan.com/en/3d-scanning-quebec [R=301,L]
+RewriteRule ^en/3d-scanning-quebec$ en/pages/3d-scanning-quebec.php [L,NC,QSA]
+
+# Numérisation 3D à Drummondville
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/numerisation-3d-drummondville.php\ HTTP/
+RewriteRule ^pages/numerisation-3d-drummondville\.php$ https://3dpreciscan.com/numerisation-3d-drummondville [R=301,L]
+RewriteRule ^numerisation-3d-drummondville$ pages/numerisation-3d-drummondville.php [L,NC,QSA]
+
+# 3D scanning in Drummondville
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*en/pages/3d-scanning-drummondville.php\ HTTP/
+RewriteRule ^en/pages/3d-scanning-drummondville\.php$ https://3dpreciscan.com/en/3d-scanning-drummondville [R=301,L]
+RewriteRule ^en/3d-scanning-drummondville$ en/pages/3d-scanning-drummondville.php [L,NC,QSA]
+
+# Numérisation 3D à Saint-Hyacinthe
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/numerisation-3d-saint-hyacinthe.php\ HTTP/
+RewriteRule ^pages/numerisation-3d-saint-hyacinthe\.php$ https://3dpreciscan.com/numerisation-3d-saint-hyacinthe [R=301,L]
+RewriteRule ^numerisation-3d-saint-hyacinthe$ pages/numerisation-3d-saint-hyacinthe.php [L,NC,QSA]
+
+# 3D scanning in Saint-Hyacinthe
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*en/pages/3d-scanning-saint-hyacinthe.php\ HTTP/
+RewriteRule ^en/pages/3d-scanning-saint-hyacinthe\.php$ https://3dpreciscan.com/en/3d-scanning-saint-hyacinthe [R=301,L]
+RewriteRule ^en/3d-scanning-saint-hyacinthe$ en/pages/3d-scanning-saint-hyacinthe.php [L,NC,QSA]
+
+# Numérisation 3D à Richmond
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/numerisation-3d-richmond.php\ HTTP/
+RewriteRule ^pages/numerisation-3d-richmond\.php$ https://3dpreciscan.com/numerisation-3d-richmond [R=301,L]
+RewriteRule ^numerisation-3d-richmond$ pages/numerisation-3d-richmond.php [L,NC,QSA]
+
+# 3D scanning in Richmond
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*en/pages/3d-scanning-richmond.php\ HTTP/
+RewriteRule ^en/pages/3d-scanning-richmond\.php$ https://3dpreciscan.com/en/3d-scanning-richmond [R=301,L]
+RewriteRule ^en/3d-scanning-richmond$ en/pages/3d-scanning-richmond.php [L,NC,QSA]
+
+# Numérisation 3D à Saint-Nicéphore
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/numerisation-3d-saint-nicephore.php\ HTTP/
+RewriteRule ^pages/numerisation-3d-saint-nicephore\.php$ https://3dpreciscan.com/numerisation-3d-saint-nicephore [R=301,L]
+RewriteRule ^numerisation-3d-saint-nicephore$ pages/numerisation-3d-saint-nicephore.php [L,NC,QSA]
+
+# 3D scanning in Saint-Nicéphore
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*en/pages/3d-scanning-saint-nicephore.php\ HTTP/
+RewriteRule ^en/pages/3d-scanning-saint-nicephore\.php$ https://3dpreciscan.com/en/3d-scanning-saint-nicephore [R=301,L]
+RewriteRule ^en/3d-scanning-saint-nicephore$ en/pages/3d-scanning-saint-nicephore.php [L,NC,QSA]
+
+# Numérisation 3D à Montréal
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*pages/numerisation-3d-montreal.php\ HTTP/
+RewriteRule ^pages/numerisation-3d-montreal\.php$ https://3dpreciscan.com/numerisation-3d-montreal [R=301,L]
+RewriteRule ^numerisation-3d-montreal$ pages/numerisation-3d-montreal.php [L,NC,QSA]
+
+# 3D scanning in Montreal
+RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /.*en/pages/3d-scanning-montreal.php\ HTTP/
+RewriteRule ^en/pages/3d-scanning-montreal\.php$ https://3dpreciscan.com/en/3d-scanning-montreal [R=301,L]
+RewriteRule ^en/3d-scanning-montreal$ en/pages/3d-scanning-montreal.php [L,NC,QSA]
+
+
+#RewriteRule ^notre-scan-3d$ pages/services-numerisation-3d.php [L,NC,QSA]
+Redirect 301 /notre-scan-3d /services/numerisation-3d [L,NC,QSA]
+
+
+RewriteRule ^realisations$ pages/realisations.php [L,NC,QSA]
+RewriteRule ^realisations/([a-zA-Z0-9-]+)$ pages/realisation.php [L,NC,QSA]
+RewriteRule ^realisations/([a-zA-Z0-9-]+)/$   realisations [R=301,L]
+RewriteRule ^projets/([a-zA-Z0-9-]+)$ realisations [R=301,L]
+RewriteRule ^contactez-nous$ pages/contact.php [L,NC,QSA]
+RewriteRule ^soumission$ pages/soumission.php [L,NC,QSA]
+RewriteRule ^politique-confidentialite$ pages/politiqueConfidentialite.php [L,NC,QSA]
+RewriteRule ^merci$ pages/merci.php [L,NC,QSA]
+RewriteRule ^merci-contact$ pages/merci-contact.php [L,NC,QSA]
+RewriteRule ^merci-services$ pages/merci-services.php [L,NC,QSA]
+RewriteRule ^merci-soumission$ pages/merci-soumission.php [L,NC,QSA]
+RewriteRule ^videos$ pages/videos.php [L,NC,QSA]
+Redirect 301 /nos-videos /videos [L,NC,QSA]
+#Redirect 301 /en/privacy-policy / /en/privacy-policy [L,NC,QSA]
+
+RewriteRule ^en$ en/index.php [L,NC,QSA]
+#RewriteRule ^en/about-3d-preciscan$ en/pages/aPropos.php [L,NC,QSA]
+RewriteRule ^en/who-are-we$ en/pages/a-propos-qui-somme-nous.php [L,NC,QSA]
+Redirect 301 /en/about-3d-preciscan /en/who-are-we
+RewriteRule ^en/our-3d-scan$ en/pages/scan3D.php [L,NC,QSA]
+RewriteRule ^en/services$ en/pages/services.php [L,NC,QSA]
+RewriteRule ^en/achievements$ en/pages/realisations.php [L,NC,QSA]
+
+
+RewriteRule ^en/achievements/([a-zA-Z0-9-]+)$ en/pages/realisation.php [L,NC,QSA]
+RewriteRule ^en/achievements/([a-zA-Z0-9-]+)/$   en/achievements [R=301,L]
+RewriteRule ^en/projects/([a-zA-Z0-9-]+)$ en/achievements [R=301,L]
+RewriteRule ^en/contact-us$ en/pages/contact.php [L,NC,QSA]
+RewriteRule ^en/quote$ en/pages/soumission.php [L,NC,QSA]
+#RewriteRule ^en/privacy-policy$ en/pages/politiqueConfidentialite.php [L,NC,QSA]
+
+RewriteRule ^en/thanks$ en/pages/merci.php [L,NC,QSA]
+RewriteRule ^en/thanks-services$ en/pages/merci-services.php [L,NC,QSA]
+RewriteRule ^en/thanks-quote$ en/pages/merci-soumission.php [L,NC,QSA]
+RewriteRule ^en/our-videos$ en/pages/videos.php [L,NC,QSA]
+
+
+#delete .php
+RewriteRule ^en/portfolio$ en/pages/portfolio.php [L,NC,QSA]
+RewriteRule ^en/equipement-handyscan$ en/pages/equipement-handyscan.php [L,NC,QSA]
+RewriteRule ^en/equipement/laser-tracker$ en/pages/equipement-laser_tracker.php [L,NC,QSA]
+RewriteRule ^en/equipement-metrascan$ en/pages/equipement-metrascan.php [L,NC,QSA]
+RewriteRule ^en/services-numerisation-3d$ en/pages/services-numerisation-3d.php [L,NC,QSA]
+RewriteRule ^en/services-reconstruction-3d$ en/pages/services-reconstruction-3d.php [L,NC,QSA]
+RewriteRule ^en/services-retro-ingenierie$ en/pages/services-retro-ingenierie.php [L,NC,QSA]
+RewriteRule ^en/services-inspection-3d$ en/pages/services-inspection-3d.php [L,NC,QSA]
+RewriteRule ^en/services-metrologie-industrielle$ en/pages/services-metrologie-industrielle.php [L,NC,QSA]
+RewriteRule ^en/services-conception-de-piece-3d$ en/pages/services-conception-de-piece-3d.php [L,NC,QSA]
+RewriteRule ^en/services-modelisation-3d$ en/pages/services-modelisation-3d.php [L,NC,QSA]
+RewriteRule ^en/services-ingenierie$ en/pages/services-ingenierie.php [L,NC,QSA]
+RewriteRule ^en/services-impression-3d$ en/pages/services-impression-3d.php [L,NC,QSA]
+RewriteRule ^en/privacy-policy$ en/pages/politiqueConfidentialite.php [L,NC,QSA]
+
+RewriteRule ^en/services-simulation-3d$ en/pages/services-simulation-3d.php [L,NC,QSA]
+
+
+#Redirect 301
+
+
+# Redirección de new-index.php
+RewriteCond %{REQUEST_URI} ^/fr/
+RewriteRule ^fr/new-index\.php$ /new-index.php [L,NC,QSA]
+RewriteCond %{REQUEST_URI} ^/en/
+RewriteRule ^en/new-index\.php$ /new-index.php [L,NC,QSA]
+
+
+RewriteRule ^sitemap.xml$ pages/sitemap.php [L,NC,QSA]
+
+RewriteRule ^images/3dpreciscan/LOGO_ORIGINAL_COULEUR_SANS_FOND-512290.png$  images/3dpreciscan/service-scan-3d/logo-3d-preciscan-service-de-scan-3d-drummondville-fr.png [L,R=301]
+RewriteRule ^images/3dpreciscan/DSC_4311.jpg$  images/3dpreciscan/service-scan-3d/home-carrousel-3d-scan-service-img-4-en.jpg [L,R=301]
+RewriteRule ^images/3dpreciscan/DSC_4705.jpg$  images/3dpreciscan/service-scan-3d/home-carrousel-3d-scan-service-img-5-en.jpg [L,R=301]
+RewriteRule ^images/3dpreciscan/DSC_4690.jpg$  images/3dpreciscan/service-scan-3d/home-carrousel-3d-scan-service-img-6-en.jpg [L,R=301]
+#RewriteRule ^images/3dpreciscan/extension/home-img-fr-en.jpg$  images/3dpreciscan/service-scan-3d/img.jpg [L,R=301]
+
+
+ #New redirection
+Redirect 301 /realisations/3d-reconstruction-of-a-toilet /en/achievements/3d-reconstruction-of-a-toilet
+Redirect 301 /sitemap.xml /sitemap_index.xml
+
+
+Redirect 301 /equipement-handyscan /equipement/handyscan
+Redirect 301 /erreur /
+Redirect 301 /realisations/pia¨ce-de-fonderie /
+Redirect 301 /realisations/calcul-par-a©la©ments-finis /
+Redirect 301 /projets/pia¨ce-dengrenage /
+Redirect 301 /projets/pia¨ce-de-fonte-dun-moteur /
+Redirect 301 /realisations/projets/fea-calculs-par-a©la©ments-finis /
+Redirect 301 /realisations/a‰chantillon-de-cha¢ssis-de-sia¨ge-transport-en-commun /
+Redirect 301 /realisations/pia¨ce-de-plastique-thermoforma©e-industrie-automobile /
+
+#bad redirection
+#Redirect 301 /realisations/fea-calculs-par-a©la©ments-finis /equipement/handyscan
+#Redirect 301 /realisations/arbre-opa%C2%A9rant-sur-une-machine-a%C2%A0-enrouler-du-carton /equipement/handyscan
+#Redirect 301 /projets/arbre-opa%C2%A9rant-sur-une-machine-a%C2%A0-enrouler-du-carton /equipement/handyscan
+
+
+# MOD_DEFLATE COMPRESSION
+SetOutputFilter DEFLATE
+AddOutputFilterByType DEFLATE text/html text/css text/plain text/xml application/x-javascript application/x-httpd-php
+#Pour les navigateurs incompatibles
+BrowserMatch ^Mozilla/4 gzip-only-text/html
+BrowserMatch ^Mozilla/4\.0[678] no-gzip
+BrowserMatch \bMSIE !no-gzip !gzip-only-text/html
+BrowserMatch \bMSI[E] !no-gzip !gzip-only-text/html
+#ne pas mettre en cache si ces fichiers le sont déjà
+SetEnvIfNoCase Request_URI \.(?:gif|jpe?g|png)$ no-gzip
+#les proxies doivent donner le bon contenu
+Header append Vary User-Agent env=!dont-vary
+
+
+# BEGIN Expire headers
+<IfModule mod_expires.c>
+ ExpiresActive On
+ ExpiresDefault "access plus 7200 seconds"
+ ExpiresByType image/jpg "access plus 2592000 seconds"
+ ExpiresByType image/jpeg "access plus 2592000 seconds"
+ ExpiresByType image/png "access plus 2592000 seconds"
+ ExpiresByType image/gif "access plus 2592000 seconds"
+ AddType image/x-icon .ico
+ ExpiresByType image/ico "access plus 2592000 seconds"
+ ExpiresByType image/icon "access plus 2592000 seconds"
+ ExpiresByType image/x-icon "access plus 2592000 seconds"
+ ExpiresByType text/css "access plus 2592000 seconds"
+ ExpiresByType text/javascript "access plus 2592000 seconds"
+ ExpiresByType text/html "access plus 7200 seconds"
+ ExpiresByType application/xhtml+xml "access plus 7200 seconds"
+ ExpiresByType application/javascript A2592000
+ ExpiresByType application/x-javascript "access plus 2592000 seconds"
+ ExpiresByType application/x-shockwave-flash "access plus 2592000 seconds"
+</IfModule>
+
+
+# BEGIN Cache-Control Headers
+<IfModule mod_headers.c>
+ <FilesMatch "\.(ico|jpe?g|png|gif|swf|css|gz)$">
+ Header set Cache-Control "max-age=2592000, public"
+ </FilesMatch>
+ <FilesMatch "\.(js)$">
+ Header set Cache-Control "max-age=2592000, private"
+ </FilesMatch>
+<filesMatch "\.(html|htm)$">
+Header set Cache-Control "max-age=7200, public"
+</filesMatch>
+# Disable caching for scripts and other dynamic files
+<FilesMatch "\.(pl|php|cgi|spl|scgi|fcgi)$">
+Header unset Cache-Control
+</FilesMatch>
+</IfModule>
+# END Cache-Control Headers
+
+
+# KILL THEM ETAGS
+Header unset ETag
+FileETag none
+
+# protection de la lecture des répertoires
+ Options -Indexes
+
+ # protect the htaccess file
+<files .htaccess>
+order allow,deny
+deny from all
+</files>

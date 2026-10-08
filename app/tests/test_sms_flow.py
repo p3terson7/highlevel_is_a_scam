@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.api import routes_sms
 from app.core.config import Settings
-from app.core.deps import get_booking_service, get_llm_agent
+from app.core.deps import get_booking_service, get_llm_agent, get_sms_service
 from app.db.models import (
     AuditLog,
     CalendarBooking,
@@ -15,15 +15,17 @@ from app.db.models import (
     InboundWebhookEvent,
     Lead,
     LeadSource,
+    LeadTask,
     Message,
     MessageAttachment,
     MessageDirection,
     OutboundRequest,
 )
 from app.db.session import get_session_factory
-from app.services.booking import BookingService
+from app.services.booking import BookingService, BookingSlot, SlotOffer
 from app.services.llm_agent import AgentResponse, LLMAgent
 from app.services.sms_delivery import with_initial_delivery_status
+from app.services.sms_service import SMSDeliveryError
 from app.workers.tasks import process_inbound_media_event_task, recover_webhook_inbox_events
 
 
@@ -1126,6 +1128,752 @@ def test_sms_inbound_booking_question_uses_agent_not_repeated_slot_menu(test_con
     assert "did not catch which slot" not in test_context.fake_sms.sent[-1]["body"].lower()
 
 
+def _structured_booking_offer(
+    *,
+    request_fingerprint: str | None,
+    offer_fingerprint: str | None,
+    display_time: str = "Fri Jul 24 at 12:00 PM",
+) -> tuple[dict, BookingSlot]:
+    slot = BookingSlot(
+        index=1,
+        start_time="2026-07-24T16:00:00Z",
+        end_time="2026-07-24T16:30:00Z",
+        display_time=display_time,
+        display_hint="Friday 12:00 PM",
+        search_blob="friday 12pm",
+    )
+    offer = {
+        "provider": "internal",
+        "slots": [slot.__dict__],
+        "request": {
+            "scope": "specific_date",
+            "requested_dates": ["2026-07-24"],
+        },
+        "outcome": "exact_match",
+        "coverage": {
+            "start": "2026-07-23",
+            "end": "2026-08-06",
+        },
+    }
+    if request_fingerprint is not None:
+        offer["request_fingerprint"] = request_fingerprint
+    if offer_fingerprint is not None:
+        offer["offer_fingerprint"] = offer_fingerprint
+    return offer, slot
+
+
+class _NewTimesResolutionAgent:
+    def __init__(self) -> None:
+        self.resolve_calls = 0
+        self.run_calls = 0
+
+    def resolve_booking_selection(
+        self,
+        *,
+        client,
+        lead,
+        inbound_text,
+        history,
+        active_offer,
+    ):
+        _ = client
+        _ = lead
+        _ = inbound_text
+        _ = history
+        _ = active_offer
+        self.resolve_calls += 1
+        return {
+            "decision": "new_times",
+            "selected_slot_index": None,
+            "selected_slot_start_time": None,
+            "reply_text": "",
+            "reasoning_summary": "The lead requested different availability.",
+        }
+
+    def run_turn(self, **kwargs):
+        _ = kwargs
+        self.run_calls += 1
+        raise AssertionError(
+            "A new-times resolution must execute a fresh search before the main agent turn."
+        )
+
+
+class _FreshAvailabilityBookingService:
+    def __init__(self, *, offer: dict, slot: BookingSlot, reply_text: str) -> None:
+        self.offer = offer
+        self.slot = slot
+        self.reply_text = reply_text
+        self.find_calls: list[dict] = []
+
+    def find_slots(self, **kwargs):
+        self.find_calls.append(dict(kwargs))
+        return SlotOffer(
+            reply_text=self.reply_text,
+            slots=[self.slot],
+            raw_payload={"booking_offer": self.offer},
+        )
+
+
+class _FailingReplySMSService:
+    def __init__(self, failure: Exception) -> None:
+        self.failure = failure
+        self.send_calls = 0
+
+    def send_message(self, to_number: str, body: str) -> str:
+        _ = to_number, body
+        self.send_calls += 1
+        raise self.failure
+
+    def with_delivery_status(
+        self,
+        raw_payload: dict | None,
+        provider_sid: str,
+    ) -> dict:
+        return with_initial_delivery_status(
+            raw_payload,
+            provider_sid=provider_sid,
+            provider="mock",
+            callback_url="",
+        )
+
+
+class _FreshOfferAgent:
+    def __init__(self, offer: dict, reply_text: str) -> None:
+        self.offer = offer
+        self.reply_text = reply_text
+        self.run_calls = 0
+
+    def run_turn(self, **kwargs):
+        _ = kwargs
+        self.run_calls += 1
+        return AgentResponse(
+            reply_text=self.reply_text,
+            next_state=ConversationStateEnum.BOOKING_SENT,
+            runtime_payload={
+                "booking_offer": self.offer,
+                "pending_step": "slot_selection_pending",
+            },
+            action="none",
+        )
+
+
+def test_sms_inbound_new_times_refreshes_offer_and_versions_active_request(
+    test_context,
+):
+    from app.main import app
+
+    old_offer, _ = _structured_booking_offer(
+        request_fingerprint="request-old",
+        offer_fingerprint="offer-old",
+        display_time="Mon Jul 27 at 9:00 AM",
+    )
+    new_offer, new_slot = _structured_booking_offer(
+        request_fingerprint="request-friday-noon",
+        offer_fingerprint="offer-friday-noon",
+    )
+    resolution_agent = _NewTimesResolutionAgent()
+    booking_service = _FreshAvailabilityBookingService(
+        offer=new_offer,
+        slot=new_slot,
+        reply_text="Fresh Friday availability:\n1) Fri Jul 24 at 12:00 PM",
+    )
+    app.dependency_overrides[get_llm_agent] = lambda: resolution_agent
+    app.dependency_overrides[get_booking_service] = lambda: booking_service
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="meta-lead-new-times-versioned",
+            source=LeadSource.META,
+            full_name="New Times Lead",
+            phone="+15553334441",
+            email="new-times@example.com",
+            city="Toronto",
+            form_answers={"interest": "consultation"},
+            raw_payload={
+                "pending_step": "slot_selection_pending",
+                "booking_offer": old_offer,
+                "active_booking_offer": old_offer,
+                "active_booking_request": {
+                    "request_fingerprint": "request-old",
+                    "offer_fingerprint": "offer-old",
+                    "revision": 3,
+                },
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.commit()
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 333-4441",
+            "Body": "Could you check Friday at noon instead?",
+            "MessageSid": "SM-IN-NEW-TIMES-VERSIONED",
+        },
+    )
+
+    assert response.status_code == 200
+    assert resolution_agent.resolve_calls == 1
+    assert resolution_agent.run_calls == 0
+    assert len(booking_service.find_calls) == 1
+    assert (
+        booking_service.find_calls[0]["request_text"]
+        == "Could you check Friday at noon instead?"
+    )
+    assert "Fresh Friday availability" in test_context.fake_sms.sent[-1]["body"]
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15553334441"))
+        assert lead is not None
+        active_request = lead.raw_payload["active_booking_request"]
+        assert active_request["request_fingerprint"] == "request-friday-noon"
+        assert active_request["offer_fingerprint"] == "offer-friday-noon"
+        assert active_request["revision"] == 4
+        assert active_request["superseded_offer_fingerprint"] == "offer-old"
+        assert (
+            lead.raw_payload["active_booking_offer"]["offer_fingerprint"]
+            == "offer-friday-noon"
+        )
+
+    app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+    app.dependency_overrides[get_booking_service] = lambda: test_context.fake_booking
+
+
+def test_deterministic_offer_failure_keeps_prior_visible_menu_selectable(
+    test_context,
+):
+    from app.main import app
+
+    old_offer, _ = _structured_booking_offer(
+        request_fingerprint="request-visible-old",
+        offer_fingerprint="offer-visible-old",
+        display_time="Mon Jul 27 at 9:00 AM",
+    )
+    new_offer, new_slot = _structured_booking_offer(
+        request_fingerprint="request-undelivered-new",
+        offer_fingerprint="offer-undelivered-new",
+        display_time="Fri Jul 31 at 12:00 PM",
+    )
+    resolution_agent = _NewTimesResolutionAgent()
+    booking_service = _FreshAvailabilityBookingService(
+        offer=new_offer,
+        slot=new_slot,
+        reply_text="Fresh Friday availability:\n1) Fri Jul 31 at 12:00 PM",
+    )
+    failed_sms = _FailingReplySMSService(
+        SMSDeliveryError(
+            "Twilio rejected it",
+            provider_status=400,
+            provider_code="21610",
+        )
+    )
+    app.dependency_overrides[get_llm_agent] = lambda: resolution_agent
+    app.dependency_overrides[get_booking_service] = lambda: booking_service
+    app.dependency_overrides[get_sms_service] = lambda: failed_sms
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="meta-lead-definitive-offer-delivery-failure",
+            source=LeadSource.META,
+            full_name="Definitive Delivery Lead",
+            phone="+15553334451",
+            email="definitive-delivery@example.com",
+            city="Toronto",
+            form_answers={"interest": "consultation"},
+            raw_payload={
+                "pending_step": "slot_selection_pending",
+                "booking_offer": old_offer,
+                "active_booking_offer": old_offer,
+                "active_booking_request": {
+                    "request_fingerprint": "request-visible-old",
+                    "offer_fingerprint": "offer-visible-old",
+                    "revision": 4,
+                },
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.commit()
+
+    failed_response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 333-4451",
+            "Body": "Could you check Friday at noon instead?",
+            "MessageSid": "SM-IN-OFFER-DEFINITIVE-FAILURE",
+        },
+    )
+
+    assert failed_response.status_code == 200
+    assert failed_sms.send_calls == 1
+    assert resolution_agent.resolve_calls == 1
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15553334451"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.BOOKING_SENT
+        assert lead.raw_payload["pending_step"] == "slot_selection_pending"
+        assert (
+            lead.raw_payload["active_booking_offer"]["offer_fingerprint"]
+            == "offer-visible-old"
+        )
+        assert (
+            lead.raw_payload["active_booking_request"]["request_fingerprint"]
+            == "request-visible-old"
+        )
+        assert lead.raw_payload["active_booking_request"]["revision"] == 4
+        request = db.scalar(
+            select(OutboundRequest)
+            .where(OutboundRequest.lead_id == lead.id)
+            .order_by(OutboundRequest.id.desc())
+        )
+        assert request is not None
+        assert request.status == "failed"
+
+    app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+    app.dependency_overrides[get_booking_service] = lambda: test_context.fake_booking
+    app.dependency_overrides[get_sms_service] = lambda: test_context.fake_sms
+
+    selected_response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 333-4451",
+            "Body": "1",
+            "MessageSid": "SM-IN-SELECT-OLD-AFTER-DEFINITIVE-FAILURE",
+        },
+    )
+
+    assert selected_response.status_code == 200
+    assert "Mon Jul 27 at 9:00 AM" in test_context.fake_sms.sent[-1]["body"]
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15553334451"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.BOOKED
+
+
+def test_agent_offer_ambiguous_failure_freezes_selection_and_hands_off(
+    test_context,
+):
+    from app.main import app
+
+    old_offer, _ = _structured_booking_offer(
+        request_fingerprint="request-visible-agent-old",
+        offer_fingerprint="offer-visible-agent-old",
+        display_time="Tue Jul 28 at 10:00 AM",
+    )
+    new_offer, _ = _structured_booking_offer(
+        request_fingerprint="request-agent-undelivered-new",
+        offer_fingerprint="offer-agent-undelivered-new",
+        display_time="Fri Jul 31 at 1:00 PM",
+    )
+    new_offer_agent = _FreshOfferAgent(
+        new_offer,
+        "Here are different options:\n1) Fri Jul 31 at 1:00 PM",
+    )
+    failed_sms = _FailingReplySMSService(SMSDeliveryError("read timed out"))
+    app.dependency_overrides[get_llm_agent] = lambda: new_offer_agent
+    app.dependency_overrides[get_booking_service] = lambda: test_context.fake_booking
+    app.dependency_overrides[get_sms_service] = lambda: failed_sms
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="meta-lead-ambiguous-offer-delivery-failure",
+            source=LeadSource.META,
+            full_name="Ambiguous Delivery Lead",
+            phone="+15553334452",
+            email="ambiguous-delivery@example.com",
+            city="Toronto",
+            form_answers={"interest": "consultation"},
+            raw_payload={
+                "pending_step": "slot_selection_pending",
+                "booking_offer": old_offer,
+                "active_booking_offer": old_offer,
+                "active_booking_request": {
+                    "request_fingerprint": "request-visible-agent-old",
+                    "offer_fingerprint": "offer-visible-agent-old",
+                    "revision": 6,
+                },
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.commit()
+
+    failed_response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 333-4452",
+            "Body": "Please show me a different set of options.",
+            "MessageSid": "SM-IN-OFFER-AMBIGUOUS-FAILURE",
+        },
+    )
+
+    assert failed_response.status_code == 200
+    assert failed_sms.send_calls == 1
+    assert new_offer_agent.run_calls == 1
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15553334452"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.BOOKING_SENT
+        assert "pending_step" not in lead.raw_payload
+        assert (
+            lead.raw_payload["active_booking_offer"]["status"]
+            == "offer_delivery_unknown"
+        )
+        assert lead.raw_payload["active_booking_offer"]["slots"] == []
+        assert isinstance(
+            lead.raw_payload["booking_offer_delivery_unknown"],
+            dict,
+        )
+        request = db.scalar(
+            select(OutboundRequest)
+            .where(OutboundRequest.lead_id == lead.id)
+            .order_by(OutboundRequest.id.desc())
+        )
+        assert request is not None
+        assert request.status == "ambiguous"
+
+    app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+    app.dependency_overrides[get_booking_service] = lambda: test_context.fake_booking
+    app.dependency_overrides[get_sms_service] = lambda: test_context.fake_sms
+
+    selected_response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 333-4452",
+            "Body": "1",
+            "MessageSid": "SM-IN-SELECT-OLD-AFTER-AMBIGUOUS-FAILURE",
+        },
+    )
+
+    assert selected_response.status_code == 200
+    assert "don't book the wrong time" in test_context.fake_sms.sent[-1]["body"]
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15553334452"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.HANDOFF
+        assert not db.scalars(
+            select(CalendarBooking).where(CalendarBooking.lead_id == lead.id)
+        ).all()
+
+
+def test_booking_offer_provider_success_then_worker_crash_keeps_selection_frozen(
+    test_context,
+    monkeypatch,
+):
+    from app.main import app
+    from app.services import inbound_sms as inbound_sms_service
+
+    old_offer, _ = _structured_booking_offer(
+        request_fingerprint="request-visible-before-crash",
+        offer_fingerprint="offer-visible-before-crash",
+        display_time="Tue Jul 28 at 10:00 AM",
+    )
+    new_offer, _ = _structured_booking_offer(
+        request_fingerprint="request-provider-accepted-before-crash",
+        offer_fingerprint="offer-provider-accepted-before-crash",
+        display_time="Fri Jul 31 at 1:00 PM",
+    )
+    new_offer_agent = _FreshOfferAgent(
+        new_offer,
+        "Here are the new options:\n1) Fri Jul 31 at 1:00 PM",
+    )
+    app.dependency_overrides[get_llm_agent] = lambda: new_offer_agent
+    app.dependency_overrides[get_booking_service] = lambda: test_context.fake_booking
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="meta-lead-offer-activation-crash",
+            source=LeadSource.META,
+            full_name="Offer Activation Crash Lead",
+            phone="+15553334453",
+            email="offer-activation-crash@example.com",
+            city="Toronto",
+            form_answers={"interest": "consultation"},
+            raw_payload={
+                "pending_step": "slot_selection_pending",
+                "booking_offer": old_offer,
+                "active_booking_offer": old_offer,
+                "active_booking_request": {
+                    "request_fingerprint": "request-visible-before-crash",
+                    "offer_fingerprint": "offer-visible-before-crash",
+                    "revision": 2,
+                },
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.commit()
+
+    activate_transition = (
+        inbound_sms_service._activate_booking_offer_delivery_transition
+    )
+
+    def crash_after_provider_acceptance(**kwargs):
+        _ = kwargs
+        raise RuntimeError("simulated crash after provider acceptance")
+
+    monkeypatch.setattr(
+        inbound_sms_service,
+        "_activate_booking_offer_delivery_transition",
+        crash_after_provider_acceptance,
+    )
+    crashed_response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 333-4453",
+            "Body": "Please show me a different set of options.",
+            "MessageSid": "SM-IN-OFFER-ACTIVATION-CRASH",
+        },
+    )
+
+    assert crashed_response.status_code == 200
+    assert "Fri Jul 31 at 1:00 PM" in test_context.fake_sms.sent[-1]["body"]
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15553334453"))
+        assert lead is not None
+        marker = lead.raw_payload["booking_offer_delivery_transition"]
+        assert marker["status"] == "offer_delivery_pending"
+        assert lead.raw_payload["active_booking_offer"]["slots"] == []
+        assert (
+            lead.raw_payload["active_booking_offer"]["status"]
+            == "offer_delivery_pending"
+        )
+        assert "pending_step" not in lead.raw_payload
+        request = db.scalar(
+            select(OutboundRequest)
+            .where(OutboundRequest.lead_id == lead.id)
+            .order_by(OutboundRequest.id.desc())
+        )
+        assert request is not None
+        assert request.status == "pending"
+        assert isinstance(
+            request.response_json.get("booking_offer_transition"),
+            dict,
+        )
+
+    monkeypatch.setattr(
+        inbound_sms_service,
+        "_activate_booking_offer_delivery_transition",
+        activate_transition,
+    )
+    app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+    app.dependency_overrides[get_booking_service] = lambda: test_context.fake_booking
+
+    selected_response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 333-4453",
+            "Body": "1",
+            "MessageSid": "SM-IN-SELECT-AFTER-OFFER-ACTIVATION-CRASH",
+        },
+    )
+
+    assert selected_response.status_code == 200
+    assert "don't book the wrong time" in test_context.fake_sms.sent[-1]["body"]
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15553334453"))
+        assert lead is not None
+        assert lead.conversation_state == ConversationStateEnum.HANDOFF
+        assert not db.scalars(
+            select(CalendarBooking).where(CalendarBooking.lead_id == lead.id)
+        ).all()
+
+
+def test_sms_inbound_unchanged_fingerprinted_offer_keeps_revision_and_skips_menu(
+    test_context,
+):
+    from app.main import app
+
+    unchanged_offer, unchanged_slot = _structured_booking_offer(
+        request_fingerprint="request-friday-noon",
+        offer_fingerprint="offer-friday-noon",
+        display_time="vendredi 24 juillet à 12 h 00",
+    )
+    resolution_agent = _NewTimesResolutionAgent()
+    booking_service = _FreshAvailabilityBookingService(
+        offer=unchanged_offer,
+        slot=unchanged_slot,
+        reply_text=(
+            "Voici les disponibilités:\n"
+            "1) vendredi 24 juillet à 12 h 00\n"
+            "Répondez 1 pour réserver."
+        ),
+    )
+    app.dependency_overrides[get_llm_agent] = lambda: resolution_agent
+    app.dependency_overrides[get_booking_service] = lambda: booking_service
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="meta-lead-new-times-unchanged",
+            source=LeadSource.META,
+            full_name="Unchanged Times Lead",
+            phone="+15553334442",
+            email="unchanged-times@example.com",
+            city="Toronto",
+            form_answers={"interest": "consultation"},
+            raw_payload={
+                "lead_language": "fr",
+                "pending_step": "slot_selection_pending",
+                "booking_offer": unchanged_offer,
+                "active_booking_offer": unchanged_offer,
+                "active_booking_request": {
+                    "request_fingerprint": "request-friday-noon",
+                    "offer_fingerprint": "offer-friday-noon",
+                    "revision": 7,
+                },
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.commit()
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 333-4442",
+            "Body": "Pouvez-vous vérifier vendredi midi encore une fois?",
+            "MessageSid": "SM-IN-NEW-TIMES-UNCHANGED",
+        },
+    )
+
+    assert response.status_code == 200
+    body = test_context.fake_sms.sent[-1]["body"]
+    assert "Les disponibilités n'ont pas changé." in body
+    assert "vendredi 24 juillet à 12 h 00" not in body
+    assert resolution_agent.run_calls == 0
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15553334442"))
+        assert lead is not None
+        active_request = lead.raw_payload["active_booking_request"]
+        assert active_request["revision"] == 7
+        assert "superseded_offer_fingerprint" not in active_request
+        latest_outbound = db.scalar(
+            select(Message)
+            .where(
+                Message.lead_id == lead.id,
+                Message.direction == MessageDirection.OUTBOUND,
+            )
+            .order_by(Message.created_at.desc())
+        )
+        assert latest_outbound is not None
+        assert latest_outbound.raw_payload["booking_flow"]["offer_repeated"] is True
+
+    app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+    app.dependency_overrides[get_booking_service] = lambda: test_context.fake_booking
+
+
+def test_sms_inbound_new_times_preserves_legacy_unfingerprinted_offer_behavior(
+    test_context,
+):
+    from app.main import app
+
+    old_offer, _ = _structured_booking_offer(
+        request_fingerprint=None,
+        offer_fingerprint=None,
+        display_time="Mon Jul 27 at 9:00 AM",
+    )
+    legacy_offer, legacy_slot = _structured_booking_offer(
+        request_fingerprint=None,
+        offer_fingerprint=None,
+    )
+    resolution_agent = _NewTimesResolutionAgent()
+    booking_service = _FreshAvailabilityBookingService(
+        offer=legacy_offer,
+        slot=legacy_slot,
+        reply_text="Legacy fresh menu:\n1) Fri Jul 24 at 12:00 PM",
+    )
+    app.dependency_overrides[get_llm_agent] = lambda: resolution_agent
+    app.dependency_overrides[get_booking_service] = lambda: booking_service
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert client is not None
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="meta-lead-new-times-legacy",
+            source=LeadSource.META,
+            full_name="Legacy New Times Lead",
+            phone="+15553334443",
+            email="legacy-new-times@example.com",
+            city="Toronto",
+            form_answers={"interest": "consultation"},
+            raw_payload={
+                "pending_step": "slot_selection_pending",
+                "booking_offer": old_offer,
+                "active_booking_offer": old_offer,
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.commit()
+
+    response = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 333-4443",
+            "Body": "Could you check Friday instead?",
+            "MessageSid": "SM-IN-NEW-TIMES-LEGACY",
+        },
+    )
+
+    assert response.status_code == 200
+    assert test_context.fake_sms.sent[-1]["body"].startswith("Legacy fresh menu:")
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15553334443"))
+        assert lead is not None
+        assert "active_booking_request" not in lead.raw_payload
+
+    app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
+    app.dependency_overrides[get_booking_service] = lambda: test_context.fake_booking
+
+
 def test_sms_inbound_requested_day_gets_day_specific_options(test_context):
     SessionLocal = get_session_factory()
     with SessionLocal() as db:
@@ -1530,7 +2278,8 @@ def test_sms_inbound_llm_resolves_lock_it_in_against_visible_single_slot(test_co
         lead = db.scalar(select(Lead).where(Lead.phone == "+15551231234"))
         assert lead is not None
         assert lead.conversation_state == ConversationStateEnum.BOOKED
-        assert "active_booking_offer" not in (lead.raw_payload or {})
+        assert lead.raw_payload["active_booking_offer"]["status"] == "booked"
+        assert lead.raw_payload["active_booking_offer"]["slots"] == []
 
     app.dependency_overrides[get_llm_agent] = lambda: test_context.fake_llm
 
@@ -1780,12 +2529,187 @@ def test_sms_exact_french_time_is_checked_then_one_word_confirmation_books(
         assert lead is not None
         assert lead.conversation_state == ConversationStateEnum.BOOKED
         assert "pending_step" not in lead.raw_payload
-        assert "active_booking_offer" not in lead.raw_payload
+        assert lead.raw_payload["active_booking_offer"]["status"] == "booked"
+        assert lead.raw_payload["active_booking_offer"]["slots"] == []
         bookings = db.scalars(
             select(CalendarBooking).where(CalendarBooking.lead_id == lead.id)
         ).all()
         assert len(bookings) == 1
         assert bookings[0].status == "scheduled"
+
+
+def test_duplicate_booking_selection_messagesid_creates_one_booking_and_confirmation(
+    test_context,
+    monkeypatch,
+):
+    from app.main import app
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 7, 23, 16, 0, tzinfo=timezone.utc)
+            if tz is None:
+                return fixed.replace(tzinfo=None)
+            return fixed.astimezone(tz)
+
+    monkeypatch.setattr("app.services.booking.datetime", FixedDateTime)
+    booking_service = BookingService()
+    app.dependency_overrides[get_booking_service] = lambda: booking_service
+    SessionLocal = get_session_factory()
+
+    with SessionLocal() as db:
+        client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert client is not None
+        client.booking_mode = "internal"
+        client.timezone = "America/Toronto"
+        client.booking_config = {
+            "internal_calendar": {
+                "slot_minutes": 30,
+                "notice_minutes": 0,
+                "horizon_days": 14,
+                "availability": [
+                    {
+                        "day": 3,
+                        "enabled": True,
+                        "start": "15:00",
+                        "end": "16:00",
+                    }
+                ],
+            }
+        }
+        old_offer = {
+            "provider": "internal",
+            "slots": [
+                {
+                    "index": 1,
+                    "start_time": "2026-07-27T13:00:00Z",
+                    "end_time": "2026-07-27T13:30:00Z",
+                    "display_time": "Mon Jul 27 at 9:00 AM",
+                    "display_hint": "Monday at 9:00 AM",
+                    "search_blob": "monday 9am",
+                }
+            ],
+        }
+        lead = Lead(
+            client_id=client.id,
+            external_lead_id="duplicate-booking-selection",
+            source=LeadSource.META,
+            full_name="Duplicate Booking Lead",
+            phone="+15551239992",
+            email="duplicate-booking@example.test",
+            city="Toronto",
+            form_answers={"interest": "consultation"},
+            raw_payload={
+                "source": "seed",
+                "pending_step": "slot_selection_pending",
+                "booking_offer": old_offer,
+                "active_booking_offer": old_offer,
+            },
+            consented=True,
+            opted_out=False,
+            conversation_state=ConversationStateEnum.BOOKING_SENT,
+        )
+        db.add(lead)
+        db.flush()
+        db.add(
+            Message(
+                client_id=client.id,
+                lead_id=lead.id,
+                direction=MessageDirection.OUTBOUND,
+                body="Here is the previous option: 1) Mon Jul 27 at 9:00 AM.",
+                provider_message_sid="SM-DUPLICATE-BOOKING-OFFER",
+                raw_payload={"booking_offer": old_offer},
+            )
+        )
+        db.commit()
+
+    availability = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}",
+        data={
+            "From": "+1 (555) 123-9992",
+            "Body": "Jeudi prochain 3 PM ça marche ?",
+            "MessageSid": "SM-IN-DUPLICATE-BOOKING-LOOKUP",
+        },
+    )
+
+    assert availability.status_code == 200
+    assert "jeudi 30 juillet à 15 h 00" in test_context.fake_sms.sent[-1]["body"]
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15551239992"))
+        assert lead is not None
+        assert len((lead.raw_payload or {})["active_booking_offer"]["slots"]) == 1
+
+    sent_before = len(test_context.fake_sms.sent)
+    payload = {
+        "From": "+1 (555) 123-9992",
+        "Body": "Oui",
+        "MessageSid": "SM-IN-DUPLICATE-BOOKING-SELECTION",
+    }
+    first = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}", data=payload
+    )
+    second = test_context.client.post(
+        f"/sms/inbound/{test_context.client_key}", data=payload
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(test_context.fake_sms.sent) == sent_before + 1
+    assert test_context.fake_llm.calls == 0
+
+    with SessionLocal() as db:
+        lead = db.scalar(select(Lead).where(Lead.phone == "+15551239992"))
+        assert lead is not None
+        inbound_messages = db.scalars(
+            select(Message).where(
+                Message.lead_id == lead.id,
+                Message.direction == MessageDirection.INBOUND,
+                Message.provider_message_sid
+                == "SM-IN-DUPLICATE-BOOKING-SELECTION",
+            )
+        ).all()
+        assert len(inbound_messages) == 1
+        inbound_id = inbound_messages[0].id
+        confirmations = [
+            message
+            for message in db.scalars(
+                select(Message).where(
+                    Message.lead_id == lead.id,
+                    Message.direction == MessageDirection.OUTBOUND,
+                )
+            ).all()
+            if (message.raw_payload or {}).get("inbound_message_id") == inbound_id
+        ]
+        assert len(confirmations) == 1
+        confirmation = confirmations[0]
+        assert "Réservé" in confirmation.body
+        assert "calendrier" in confirmation.body.lower()
+        assert lead.conversation_state == ConversationStateEnum.BOOKED
+        assert lead.raw_payload["active_booking_offer"]["status"] == "booked"
+        assert lead.raw_payload["active_booking_offer"]["slots"] == []
+        bookings = db.scalars(
+            select(CalendarBooking).where(
+                CalendarBooking.lead_id == lead.id,
+                CalendarBooking.status == "scheduled",
+            )
+        ).all()
+        assert len(bookings) == 1, {
+            "confirmation": confirmation.body,
+            "lead_state": lead.conversation_state.value,
+            "active_offer": (lead.raw_payload or {}).get("active_booking_offer"),
+        }
+        booking_audits = db.scalars(
+            select(AuditLog).where(
+                AuditLog.lead_id == lead.id,
+                AuditLog.event_type == "calendar_booking_created",
+            )
+        ).all()
+        assert len(booking_audits) == 1
+        assert not db.scalars(
+            select(LeadTask).where(LeadTask.lead_id == lead.id)
+        ).all()
 
 
 def test_sms_inbound_booked_lead_can_still_get_answers(test_context):

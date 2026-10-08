@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "id": "source_independence_website_arbitrary_fields",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["source-independence", "website", "arbitrary-form-fields", "answer-first"],
+  "risk": "high",
+  "tenant": {
+    "business_name": "Bureau Indépendant",
+    "tone": "direct, utile et concis",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Quelle est votre échéance?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "L'équipe réalise la rétro-conception de pièces mécaniques et peut livrer des fichiers STEP et STL. Elle peut établir des partenariats techniques à long terme.",
+    "ai_context": "Répondre au besoin exprimé sans modifier le comportement selon la source d'attribution ou le nom des champs du formulaire."
+  },
+  "lead": {
+    "full_name": "Alexandre Exemple",
+    "email": "alexandre.website@example.test",
+    "phone": "+14165550201",
+    "city": "Montréal",
+    "source": "manual",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "message_du_visiteur_927": "Nous cherchons un partenaire à long terme pour rétro-concevoir des pièces mécaniques et fournir les fichiers finaux.",
+      "champ_delai_libre": "D'ici septembre",
+      "choix_format_final": ["STEP", "STL"]
+    },
+    "raw_payload": {
+      "lead_language": "fr",
+      "submitted_source": "website",
+      "source_page_url": "https://example.test/contact"
+    }
+  },
+  "initial_history": [],
+  "turns": [
+    {
+      "inbound": "Merci. Est-ce que le dossier décrit dans le formulaire correspond à vos services?",
+      "replay_outputs": [
+        {
+          "reply_text": "Oui. Selon les renseignements soumis, l'équipe peut prendre en charge la rétro-conception mécanique, livrer les fichiers STEP et STL et envisager un partenariat à long terme. Votre échéance cible de septembre est bien notée.",
+          "next_state": "QUALIFYING",
+          "conversation_act": "answer_question",
+          "lead_intent": "partenariat_retro_conception_long_terme",
+          "confidence": 0.99,
+          "reasoning_summary": "La demande directe correspond aux capacités confirmées dans la FAQ, indépendamment de la source et des clés du formulaire.",
+          "uses_knowledge_context": true,
+          "collected_fields": {
+            "service_needed": "Rétro-conception mécanique avec fichiers STEP et STL",
+            "timeline": "D'ici septembre",
+            "locations": "Montréal",
+            "decision_makers": null,
+            "urgency_driver": "Échéance en septembre",
+            "booking_intent_locked": false
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "QUALIFYING",
+        "expected_action": "none",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["answer_question"],
+        "expected_next_states": ["QUALIFYING"],
+        "must_include": ["rétro-conception", "STEP", "STL", "partenariat à long terme", "septembre"],
+        "must_not_include": ["manual entry", "website lead", "Meta", "LinkedIn"],
+        "forbidden_tools": ["find_slots", "book_slot", "handoff_to_human"],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 420,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_lead_source": "manual",
+        "expected_total_lead_task_count": 0,
+        "expected_total_outbound_message_count": 1,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Answer the stated service-fit question before qualification.",
+          "Treat source metadata as attribution only and arbitrary form keys as lead context."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}

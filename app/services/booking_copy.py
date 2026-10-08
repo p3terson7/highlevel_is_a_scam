@@ -41,26 +41,72 @@ def render_booking_slot_reply(
     timezone_name: str = "UTC",
 ) -> str:
     language = normalize_language(language)
+    outcome = _effective_outcome(plan=plan, request=request)
+    constraints_satisfied = _constraints_satisfied(plan)
     if not slots:
-        return _no_slots_reply(request=request, language=language)
-    if plan.match_mode == "exact_time" and len(slots) == 1:
-        return _single_exact_slot_reply(
+        return _no_slots_reply(
+            request=request,
+            outcome=outcome,
+            language=language,
+        )
+    if outcome == "exact_available" and constraints_satisfied and len(slots) == 1:
+        return render_exact_slot_confirmation(
             slot=slots[0],
             timezone_label=timezone_label,
             language=language,
             timezone_name=timezone_name,
         )
 
-    lines = [_intro(request=request, plan=plan, coverage_summary=coverage_summary, language=language)]
+    lines = [
+        _intro(
+            request=request,
+            plan=plan,
+            outcome=outcome,
+            coverage_summary=coverage_summary,
+            language=language,
+        )
+    ]
     lines.extend(
         f"{_slot_index(slot)}) {_slot_display_time(slot, language=language, timezone_name=timezone_name)}"
         for slot in slots
     )
-    lines.append(_selection_prompt(slots=slots, timezone_label=timezone_label, language=language))
+    lines.append(
+        _selection_prompt(
+            slots=slots,
+            timezone_label=timezone_label,
+            language=language,
+            alternatives=not constraints_satisfied,
+        )
+    )
     return "\n".join(line for line in lines if line)
 
 
-def _single_exact_slot_reply(
+def render_slot_clarification(
+    *, slots: Sequence[Any], language: str, timezone_name: str,
+) -> str:
+    """Ask for a selection using calendar facts in the conversation locale."""
+    language = normalize_language(language)
+    lines = [
+        "Quel créneau voulez-vous réserver?"
+        if language == "fr" else "Which time would you like to reserve?"
+    ]
+    for slot in slots[:5]:
+        index = _slot_index(slot)
+        if not index:
+            continue
+        start = slot.get("start_time") if isinstance(slot, dict) else getattr(slot, "start_time", "")
+        parsed = _parse_slot_datetime(str(start or ""))
+        # Old display labels may be in a different language. Without a timestamp,
+        # refer to the existing option instead of repeating unverified copy.
+        display = (
+            format_datetime_for_language(parsed, timezone_name=timezone_name, language=language)
+            if parsed is not None else f"Option {index}"
+        )
+        lines.append(f"{index}) {display}")
+    return "\n".join(lines)
+
+
+def render_exact_slot_confirmation(
     *,
     slot: Any,
     timezone_label: str,
@@ -85,55 +131,171 @@ def _single_exact_slot_reply(
     )
 
 
-def _intro(*, request: BookingTimeRequest, plan: BookingPlanResult, coverage_summary: str, language: str) -> str:
+def _intro(
+    *,
+    request: BookingTimeRequest,
+    plan: BookingPlanResult,
+    outcome: str,
+    coverage_summary: str,
+    language: str,
+) -> str:
     date_label = _request_date_label(request, language=language)
     time_label = _request_time_label(request, language=language)
+    requested_label = _requested_constraint_label(
+        date_label=date_label or _requested_weekdays_label(request, language=language),
+        time_label=time_label,
+        language=language,
+    )
 
     if language == "fr":
-        if plan.match_mode == "exact_time" and date_label and time_label:
+        if outcome == "outside_search_coverage":
+            if requested_label:
+                return (
+                    f"Je n'ai pas pu confirmer une disponibilité {requested_label}, car cette demande est en dehors "
+                    "de la période que j'ai pu vérifier. Les créneaux ci-dessous sont seulement des alternatives "
+                    "visibles actuellement; ils ne correspondent pas exactement à votre demande:"
+                )
+            return (
+                "Je n'ai pas pu vérifier toute la période demandée. Les créneaux ci-dessous sont seulement des "
+                "alternatives visibles actuellement; ils ne correspondent pas exactement à votre demande:"
+            )
+        if outcome == "unavailable_within_coverage":
+            if plan.match_mode == "same_day_alternative" and date_label:
+                return (
+                    f"J'ai vérifié le créneau demandé {requested_label}, mais il n'est pas disponible. "
+                    f"Voici des alternatives le même jour, {date_label}:"
+                )
+            if requested_label:
+                return (
+                    f"J'ai vérifié {requested_label}, mais je n'ai trouvé aucun créneau qui corresponde à cette "
+                    "demande. Les créneaux ci-dessous sont des alternatives et ne correspondent pas exactement "
+                    "au moment demandé:"
+                )
+            return (
+                "Je n'ai trouvé aucun créneau qui corresponde exactement à cette demande. Les créneaux ci-dessous "
+                "sont des alternatives:"
+            )
+        if outcome == "exact_available" and date_label and time_label:
             return f"J'ai trouvé ce créneau pour un appel de consultation {date_label} à {time_label}:"
-        if plan.match_mode == "same_day_alternative" and date_label:
-            return f"Je ne vois pas ce créneau exact pour l'appel, mais voici les options les plus proches {date_label}:"
-        if plan.match_mode in {"same_day", "period", "time_range"} and date_label:
+        if outcome == "requested_window_available" and date_label:
             suffix = f" {time_label}" if time_label else ""
             return f"J'ai trouvé quelques créneaux d'appel {date_label}{suffix}:"
-        if plan.match_mode in {"weekday", "same_weekday_alternative"} and request.requested_weekdays:
+        if outcome == "requested_window_available" and request.requested_weekdays:
             return f"J'ai trouvé quelques créneaux d'appel le {_weekday_label(request.requested_weekdays[0], language=language)}:"
+        if request.scope != "broad":
+            return (
+                "Ces créneaux sont des alternatives et ne correspondent pas exactement à votre demande. "
+                "Voici les options actuellement visibles:"
+            )
         if coverage_summary:
             return f"Je peux réserver un appel directement. Ce sera un appel de consultation. J'ai des disponibilités notamment {coverage_summary}. Voici quelques créneaux répartis:"
         return "Je peux réserver un appel directement. Ce sera un appel de consultation. Voici quelques créneaux disponibles:"
 
-    if plan.match_mode == "exact_time" and date_label and time_label:
+    if outcome == "outside_search_coverage":
+        if requested_label:
+            return (
+                f"I could not confirm availability {requested_label} because that request falls outside the period "
+                "I was able to search. The times below are only currently visible alternatives; they do not "
+                "exactly match your request:"
+            )
+        return (
+            "I could not search the entire requested period. The times below are only currently visible "
+            "alternatives; they do not exactly match your request:"
+        )
+    if outcome == "unavailable_within_coverage":
+        if plan.match_mode == "same_day_alternative" and date_label:
+            return (
+                f"I checked the requested time {requested_label}, but it is not available. "
+                f"Here are alternatives on the same day, {date_label}:"
+            )
+        if requested_label:
+            return (
+                f"I checked {requested_label}, but did not find an opening that matches that request. "
+                "The times below are alternatives and do not exactly match the requested time:"
+            )
+        return (
+            "I did not find an opening that exactly matches that request. "
+            "The times below are alternatives:"
+        )
+    if outcome == "exact_available" and date_label and time_label:
         return f"I found that consultation call time {date_label} at {time_label}:"
-    if plan.match_mode == "same_day_alternative" and date_label:
-        return f"I do not see that exact call time, but I found the closest options {date_label}:"
-    if plan.match_mode in {"same_day", "period", "time_range"} and date_label:
+    if outcome == "requested_window_available" and date_label:
         suffix = f" {time_label}" if time_label else ""
         return f"I found a few consultation call times {date_label}{suffix}:"
-    if plan.match_mode in {"weekday", "same_weekday_alternative"} and request.requested_weekdays:
+    if outcome == "requested_window_available" and request.requested_weekdays:
         return f"I found a few consultation call times on {request.requested_weekdays[0].title()}:"
-    if plan.match_mode == "closest_alternative" and date_label:
-        return f"I do not see openings {date_label}, but here are the closest consultation call times I found:"
+    if request.scope != "broad":
+        return (
+            "These times are alternatives and do not exactly match your request. "
+            "Here are the options I can currently see:"
+        )
     if coverage_summary:
         return f"I can book a consultation call directly. I have call openings including {coverage_summary}. Here are a few spread-out times:"
     return "I can book a consultation call directly. Here are a few available call times:"
 
 
-def _no_slots_reply(*, request: BookingTimeRequest, language: str) -> str:
+def _no_slots_reply(
+    *,
+    request: BookingTimeRequest,
+    outcome: str,
+    language: str,
+) -> str:
+    requested_label = _requested_constraint_label(
+        date_label=_request_date_label(request, language=language)
+        or _requested_weekdays_label(request, language=language),
+        time_label=_request_time_label(request, language=language),
+        language=language,
+    )
     if language == "fr":
-        if request.scope != "broad":
-            return "Je ne vois pas de disponibilités qui correspondent à cette demande. Envoyez-moi un autre jour ou une plage horaire, et je vérifierai."
+        if outcome == "needs_clarification":
+            return (
+                "J'ai besoin d'un jour ou d'une plage horaire plus précise avant de vérifier les disponibilités."
+            )
+        if outcome == "outside_search_coverage":
+            detail = f" {requested_label}" if requested_label else ""
+            return (
+                f"Je n'ai pas pu confirmer les disponibilités{detail}, car cette demande est en dehors de la période "
+                "que j'ai pu vérifier. Envoyez-moi un autre moment, ou je peux transmettre la demande à l'équipe."
+            )
+        if outcome == "unavailable_within_coverage" or request.scope != "broad":
+            detail = f" {requested_label}" if requested_label else ""
+            return (
+                f"J'ai vérifié les disponibilités{detail}, mais je ne vois aucun créneau qui corresponde à cette "
+                "demande. Envoyez-moi un autre jour ou une plage horaire, et je vérifierai."
+            )
         return "Je ne vois pas de disponibilités pour le moment. Envoyez-moi une journée et une plage horaire, et je peux vérifier d'autres options."
-    if request.scope != "broad":
-        return "I am not seeing call openings that match that request. Send me another day or time window and I can check again."
+    if outcome == "needs_clarification":
+        return "I need a more specific day or time window before I can check availability."
+    if outcome == "outside_search_coverage":
+        detail = f" {requested_label}" if requested_label else ""
+        return (
+            f"I could not confirm availability{detail} because that request falls outside the period I was able "
+            "to search. Send me another time, or I can pass the request to the team."
+        )
+    if outcome == "unavailable_within_coverage" or request.scope != "broad":
+        detail = f" {requested_label}" if requested_label else ""
+        return (
+            f"I checked availability{detail}, but I am not seeing a call opening that matches that request. "
+            "Send me another day or time window and I can check again."
+        )
     return "I am not seeing open call times right now. Share a day and time window and I can check alternatives."
 
 
-def _selection_prompt(*, slots: Sequence[Any], timezone_label: str, language: str) -> str:
+def _selection_prompt(
+    *,
+    slots: Sequence[Any],
+    timezone_label: str,
+    language: str,
+    alternatives: bool,
+) -> str:
     indexes = [_slot_index(slot) for slot in slots]
     choice_part = _choice_part(indexes, language=language)
     if language == "fr":
+        if alternatives:
+            return f"Si une de ces alternatives vous convient, répondez {choice_part} pour la réserver. Sinon, envoyez-moi un autre moment. Heures affichées en {timezone_label}."
         return f"Répondez {choice_part} pour réserver l'appel, ou envoyez l'heure exacte souhaitée. Si aucune option ne fonctionne, envoyez-moi simplement un moment qui vous convient mieux. Heures affichées en {timezone_label}."
+    if alternatives:
+        return f"If one of these alternatives works, reply with {choice_part} to book it. Otherwise, send me another time. Times shown in {timezone_label}."
     return f"Reply with {choice_part} to book the call, or send the exact time you want. If none of those work, just send me a time that's better for you. Times shown in {timezone_label}."
 
 
@@ -146,6 +308,80 @@ def _choice_part(indexes: list[int], *, language: str) -> str:
     if len(labels) == 2:
         return f"{labels[0]} ou {labels[1]}" if language == "fr" else f"{labels[0]} or {labels[1]}"
     return f"{', '.join(labels[:-1])}, ou {labels[-1]}" if language == "fr" else f"{', '.join(labels[:-1])}, or {labels[-1]}"
+
+
+def _effective_outcome(*, plan: BookingPlanResult, request: BookingTimeRequest) -> str:
+    if plan.outcome:
+        return plan.outcome
+    if plan.fallback_reason:
+        return "unavailable_within_coverage"
+    if plan.match_mode == "exact_time":
+        return "exact_available"
+    if request.scope != "broad":
+        return "requested_window_available"
+    return "broad_availability" if plan.slots else "no_availability"
+
+
+def _constraints_satisfied(plan: BookingPlanResult) -> bool:
+    if plan.outcome:
+        return plan.constraints_satisfied
+    return plan.fallback_reason is None
+
+
+def _requested_constraint_label(*, date_label: str, time_label: str, language: str) -> str:
+    if language == "fr":
+        date_part = (
+            date_label
+            if date_label.startswith("entre ")
+            else f"le {date_label}"
+            if date_label
+            else ""
+        )
+        time_part = (
+            time_label
+            if time_label.startswith("entre ")
+            else f"à {time_label}"
+            if time_label
+            else ""
+        )
+        if date_label and time_label:
+            return f"pour {date_part}, {time_part}"
+        if date_label:
+            return f"pour {date_part}"
+        if time_label:
+            return time_part
+        return ""
+    date_part = (
+        date_label
+        if date_label.startswith("between ")
+        else f"on {date_label}"
+        if date_label
+        else ""
+    )
+    time_part = (
+        time_label
+        if time_label.startswith("between ")
+        else f"at {time_label}"
+        if time_label
+        else ""
+    )
+    if date_label and time_label:
+        return f"{date_part}, {time_part}"
+    if date_label:
+        return date_part
+    if time_label:
+        return time_part
+    return ""
+
+
+def _requested_weekdays_label(request: BookingTimeRequest, *, language: str) -> str:
+    labels = [_weekday_label(day, language=language) for day in request.requested_weekdays]
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    joiner = "ou" if language == "fr" else "or"
+    return ", ".join(labels[:-1]) + f" {joiner} {labels[-1]}"
 
 
 def _request_date_label(request: BookingTimeRequest, *, language: str) -> str:

@@ -26,6 +26,7 @@ from app.db.models import (
 from app.db.session import get_session_factory
 from app.services import zapier_booking
 from app.services.llm_agent import LLMAgent
+from app.workers import tasks
 
 
 def _admin_headers() -> dict[str, str]:
@@ -340,7 +341,7 @@ def test_demo_seed_populates_inbox_and_client_detail(test_context):
     inbox_payload = conversations.json()
     assert inbox_payload["total"] >= 20
     assert any(item["state"] == "BOOKING_SENT" for item in inbox_payload["items"])
-    assert any("After-hours pending" in item["tags"] for item in inbox_payload["items"])
+    assert all("After-hours pending" not in item["tags"] for item in inbox_payload["items"])
 
     handoff = test_context.client.get(
         "/ui/api/conversations?client_key=demo-roofing&state=HANDOFF",
@@ -429,9 +430,10 @@ def test_ui_can_start_custom_test_lab_sandbox_thread(test_context):
     assert any(item["event_type"] == "ui_sandbox_initial_ai_sms" for item in thread_payload["audit_events"])
 
 
-def test_test_lab_opening_reply_uses_selected_clients_website_knowledge(
-    test_context,
-    monkeypatch,
+@pytest.mark.parametrize("source", list(LeadSource))
+@pytest.mark.parametrize("after_hours", [False, True])
+def test_live_and_test_lab_openings_share_source_independent_knowledge_and_memory(
+    test_context, monkeypatch, source, after_hours,
 ):
     captured_prompts: list[dict] = []
     now = datetime.now(timezone.utc)
@@ -543,7 +545,7 @@ def test_test_lab_opening_reply_uses_selected_clients_website_knowledge(
     assert "selected-source fact" in opening_prompt["knowledge_context"].lower()
     assert "other tenant" not in opening_prompt["business_profile_context"].lower()
     assert "other-tenant secret" not in opening_prompt["knowledge_context"].lower()
-    assert "ai sandbox" in opening_prompt["latest_inbound_message"].lower()
+    assert "ai sandbox" not in opening_prompt["latest_inbound_message"].lower()
     assert "meta lead ads" not in opening_prompt["latest_inbound_message"].lower()
 
     with session_factory() as db:
@@ -565,6 +567,47 @@ def test_test_lab_opening_reply_uses_selected_clients_website_knowledge(
             "source_id"
         ] == selected_source_id
         assert "url" not in agent_trace["knowledge_retrieval"]["selected_sources"][0]
+
+    with session_factory() as db:
+        sandbox_lead = db.get(Lead, response.json()["lead_id"])
+        tenant = db.get(Client, selected_client_id)
+        tenant.operating_hours = (
+            {"days": []} if after_hours else
+            {"days": list(range(7)), "start": "00:00", "end": "23:59"}
+        )
+        live_lead = Lead(
+            client_id=selected_client_id, source=source,
+            full_name=sandbox_lead.full_name, phone="+15551239876",
+            form_answers=dict(sandbox_lead.form_answers), consented=True,
+            raw_payload={"attribution": {"campaign": "keep-this"}},
+        )
+        db.add(live_lead)
+        db.commit()
+        live_id = live_lead.id
+        sandbox_memory = dict(sandbox_lead.raw_payload)
+        sandbox_body = outbound.body
+        sandbox_agent = dict(agent_trace)
+
+    monkeypatch.setattr(tasks, "build_llm_agent", lambda **kwargs: LLMAgent(OpeningKnowledgeProvider()))
+    monkeypatch.setattr(tasks, "build_sms_service", lambda *args, **kwargs: test_context.fake_sms)
+    def unexpected_followup(**kwargs):
+        pytest.fail("The retired after-hours opening must not schedule a template follow-up")
+    monkeypatch.setattr(tasks, "enqueue_followup_sms", unexpected_followup)
+    result = tasks.send_initial_sms_task(live_id)
+    assert result["status"] == "ok"
+    assert len(captured_prompts) == 2
+    assert captured_prompts[1] == captured_prompts[0]
+    assert test_context.fake_sms.sent[-1]["body"] == sandbox_body
+    with session_factory() as db:
+        live_lead = db.get(Lead, live_id)
+        assert live_lead.source == source
+        assert live_lead.raw_payload["attribution"] == {"campaign": "keep-this"}
+        for key in ("qualification_memory", "cta_state", "intent_level", "lead_summary", "pending_step", "last_question_key"):
+            assert live_lead.raw_payload.get(key) == sandbox_memory.get(key)
+        live_message = db.scalar(select(Message).where(Message.lead_id == live_id))
+        assert live_message.raw_payload["agent"] == sandbox_agent
+        assert live_lead.initial_sms_sent_at is not None
+
 
 
 def test_test_lab_future_modes_are_explicitly_disabled(test_context):

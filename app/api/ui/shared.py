@@ -863,14 +863,6 @@ def _conversation_tags(lead: Lead, logs: list[AuditLog]) -> list[str]:
     if lead.opted_out or lead.conversation_state == ConversationStateEnum.OPTED_OUT:
         tags.append("Opted out")
 
-    after_hours_at = max(
-        (log.created_at for log in logs if log.event_type in {"after_hours_initial_sms_sent", "outside_operating_hours"}),
-        default=None,
-    )
-    followup_at = max((log.created_at for log in logs if log.event_type == "follow_up_sms_sent"), default=None)
-    if after_hours_at and (followup_at is None or followup_at < after_hours_at) and lead.conversation_state not in _CLOSED_STATES | {ConversationStateEnum.HANDOFF}:
-        tags.append("After-hours pending")
-
     handoff_detected = lead.conversation_state == ConversationStateEnum.HANDOFF or any(
         log.event_type == "admin_marked_handoff" or any(action.get("type") == "handoff_to_human" for action in _actions_from_log(log))
         for log in logs

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.core.config import Settings
+from evals.chatbot.adapters.v3 import _strict_optional_bool
 from evals.chatbot.runner import (
     EvalConfigurationError,
+    _turn_observation,
     deterministic_gate_passed,
     discover_scenarios,
     run_evaluations,
@@ -22,6 +26,50 @@ def _scenario(scenario_id: str):
     scenarios = discover_scenarios("all", scenario_ids=[scenario_id])
     assert len(scenarios) == 1
     return scenarios[0]
+
+
+def test_turn_observation_preserves_missing_observability_capabilities() -> None:
+    observation = _turn_observation(SimpleNamespace(reply="Observed reply."))
+
+    assert observation.total_lead_task_count is None
+    assert observation.total_booking_event_count is None
+    assert observation.total_outbound_message_count is None
+    assert observation.booking_confirmation_unknown is None
+
+
+def test_turn_observation_preserves_supported_zero_and_strict_false() -> None:
+    observation = _turn_observation(
+        SimpleNamespace(
+            reply="Observed reply.",
+            total_lead_task_count=0,
+            total_booking_event_count=0,
+            total_outbound_message_count=0,
+            booking_confirmation_unknown="false",
+        )
+    )
+
+    assert observation.total_lead_task_count == 0
+    assert observation.total_booking_event_count == 0
+    assert observation.total_outbound_message_count == 0
+    assert observation.booking_confirmation_unknown is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (False, False),
+        ("false", False),
+        ("0", False),
+        (True, True),
+        ("true", True),
+        ("not-a-boolean", None),
+    ],
+)
+def test_v3_observability_parses_booking_ambiguity_as_a_strict_bool(
+    raw: object,
+    expected: bool | None,
+) -> None:
+    assert _strict_optional_bool(raw) is expected
 
 
 def test_replay_runner_executes_real_v3_pipeline_without_credentials() -> None:

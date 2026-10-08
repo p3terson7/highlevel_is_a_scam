@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "id": "exact_requested_time_confirmation_books_once",
+  "owner": "conversation-platform",
+  "kind": "journey",
+  "tags": ["french", "booking", "exact-time", "confirmation", "write-safety"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Atelier Calendrier",
+    "tone": "direct, naturel et concis",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Quel service recherchez-vous?"
+    ],
+    "booking_mode": "internal",
+    "provider_config": {
+      "language": "fr"
+    },
+    "faq_context": "Les appels de consultation durent 30 minutes. Toute disponibilité doit provenir du calendrier connecté.",
+    "ai_context": "Vérifier exactement le moment demandé. Si le créneau est libre, demander une confirmation explicite avant de le réserver."
+  },
+  "lead": {
+    "full_name": "Camille Exemple",
+    "email": "camille.exact-time@example.test",
+    "phone": "+14165550204",
+    "city": "Montréal",
+    "external_lead_id": "eval-exact-time-confirmation",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "service_interest": "Consultation technique"
+    },
+    "raw_payload": {
+      "lead_language": "fr"
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Quel moment vous conviendrait pour un appel de consultation?",
+      "raw_payload": {
+        "agent": {
+          "action": "offer_booking"
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "turn_id": "check_exact_requested_time",
+      "inbound": "Jeudi prochain à 15 h, est-ce disponible?",
+      "replay_outputs": [
+        {
+          "reply_text": "",
+          "next_state": "BOOKING_SENT",
+          "conversation_act": "offer_slots",
+          "lead_intent": "verifier_jeudi_15h",
+          "confidence": 0.99,
+          "reasoning_summary": "Le prospect demande la disponibilité d'un créneau précis sans encore autoriser sa réservation.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Consultation technique",
+            "timeline": null,
+            "locations": "Montréal",
+            "decision_makers": null,
+            "urgency_driver": null,
+            "booking_intent_locked": true
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "find_slots",
+            "args": {
+              "preferred_day": "thursday",
+              "exact_time": "15:00",
+              "limit": 3
+            }
+          }
+        },
+        {
+          "reply_text": "Oui, jeudi 16 juillet à 15 h 00 est disponible. Voulez-vous que je le réserve?",
+          "next_state": "BOOKING_SENT",
+          "conversation_act": "offer_slots",
+          "lead_intent": "verifier_jeudi_15h",
+          "confidence": 0.99,
+          "reasoning_summary": "Le calendrier confirme uniquement le créneau demandé; la réponse sollicite une confirmation avant toute écriture.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Consultation technique",
+            "timeline": null,
+            "locations": "Montréal",
+            "decision_makers": null,
+            "urgency_driver": null,
+            "booking_intent_locked": true
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "BOOKING_SENT",
+        "expected_action": "none",
+        "expected_pending_step": "slot_selection_pending",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["offer_slots"],
+        "expected_next_states": ["BOOKING_SENT"],
+        "must_include": ["jeudi 16 juillet", "15 h 00", "réserve"],
+        "must_not_include": ["Réservé", "confirmé", "vendredi", "lundi"],
+        "tool": {
+          "proposed_name": "find_slots",
+          "args_subset": {
+            "preferred_day": "thursday",
+            "exact_time": "15:00"
+          },
+          "max_calls": 1
+        },
+        "visible_slot_indexes": [],
+        "max_questions": 1,
+        "max_chars": 260,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_total_booking_event_count": 0,
+        "expected_total_outbound_message_count": 2,
+        "expected_tool_names": ["find_slots"],
+        "max_tool_calls": 1
+      }
+    },
+    {
+      "turn_id": "explicit_yes_books_exact_slot_once",
+      "inbound": "Oui.",
+      "replay_outputs": [],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "BOOKED",
+        "expected_action": "mark_booked",
+        "expected_pending_step": "none",
+        "allowed_actions": ["mark_booked"],
+        "allowed_conversation_acts": ["book_selected_slot"],
+        "expected_next_states": ["BOOKED"],
+        "allowed_resolution_paths": ["deterministic_booking_flow"],
+        "must_include": ["Réservé", "jeudi 16 juillet", "15 h 00"],
+        "must_not_include": ["Quel créneau", "vendredi", "lundi", "pas pu confirmer"],
+        "forbidden_tools": ["find_slots", "handoff_to_human"],
+        "tool": {
+          "proposed_name": "book_slot",
+          "max_calls": 1
+        },
+        "max_questions": 0,
+        "max_chars": 240,
+        "max_meeting_ctas": 1,
+        "booking_expected": true,
+        "handoff_expected": false,
+        "expected_total_booking_event_count": 1,
+        "expected_total_outbound_message_count": 3,
+        "expected_tool_names": ["book_slot"],
+        "max_tool_calls": 1
+      }
+    }
+  ],
+  "tool_world": {
+    "booking_reference": "eval-exact-time-booking-1",
+    "slots": [
+      {
+        "start": "2026-07-16T15:00:00-04:00",
+        "end": "2026-07-16T15:30:00-04:00",
+        "display_time": "jeudi 16 juillet à 15 h 00"
+      }
+    ]
+  }
+}

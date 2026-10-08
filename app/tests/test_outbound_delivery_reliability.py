@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select
 
 from app.db.models import AuditLog, Client, Lead, LeadSource, OutboundRequest
 from app.db.session import get_session_factory
+from app.services.llm_agent import AgentResponse, LLMAgent
 from app.services.outbound_recovery import reconcile_stale_outbound_requests
 from app.services.outbound_requests import fingerprint_payload
 from app.services.sms_delivery import with_initial_delivery_status
@@ -20,6 +22,7 @@ class ControlledSMSService:
         self.failure = failure
         self.send_calls = 0
         self.render_contexts: list[dict] = []
+        self.bodies: list[str] = []
 
     def render_template(self, client: Client, template_key: str, context=None) -> str:
         _ = client, template_key
@@ -29,6 +32,7 @@ class ControlledSMSService:
     def send_message(self, to_number: str, body: str) -> str:
         _ = to_number, body
         self.send_calls += 1
+        self.bodies.append(body)
         if self.failure is not None:
             raise self.failure
         return f"SM-RELIABLE-{self.send_calls}"
@@ -109,7 +113,7 @@ def test_missing_queue_never_turns_delayed_followup_into_immediate_send(monkeypa
     monkeypatch.setattr(
         tasks,
         "get_settings",
-        lambda: SimpleNamespace(rq_eager=False, after_hours_followup_minutes=720),
+        lambda: SimpleNamespace(rq_eager=False),
     )
     monkeypatch.setattr(tasks, "get_queue", lambda: None)
 
@@ -151,7 +155,7 @@ def test_delayed_initial_sms_is_suppressed_after_lead_starts_conversation(
         assert audit.decision["reason"] == "conversation_already_started"
 
 
-def test_non_meta_initial_sms_uses_submitted_lead_language(test_context, monkeypatch):
+def test_initial_ai_sms_uses_submitted_lead_language(test_context, monkeypatch):
     SessionLocal = get_session_factory()
     with SessionLocal() as db:
         lead = Lead(
@@ -173,12 +177,22 @@ def test_non_meta_initial_sms_uses_submitted_lead_language(test_context, monkeyp
     service = ControlledSMSService()
     monkeypatch.setattr(tasks, "build_sms_service", lambda *args, **kwargs: service)
     monkeypatch.setattr(tasks, "_acquire_lead_workflow_lock", lambda **kwargs: None)
-    monkeypatch.setattr(tasks, "within_operating_hours", lambda client: True)
+    class FrenchProvider:
+        name = "test"
+
+        def generate_json(self, system_prompt, user_prompt):
+            import json
+            assert json.loads(user_prompt)["response_language"] == "fr"
+            return {"reply_text": "Bonjour Julie, ici Hermes, l’assistante de Test Business. Quel résultat recherchez-vous?"}
+
+    monkeypatch.setattr(tasks, "build_llm_agent", lambda **kwargs: LLMAgent(FrenchProvider()))
 
     result = tasks.send_initial_sms_task(lead_id)
 
     assert result["status"] == "ok"
-    assert service.render_contexts[0]["language"] == "fr"
+    assert service.render_contexts == []
+    assert service.bodies[0].startswith("Bonjour Julie")
+    assert "Hermes" in service.bodies[0]
 
 
 def test_sms_failure_classification_distinguishes_rejection_from_unknown_result():
@@ -209,6 +223,20 @@ def test_initial_sms_retries_only_explicit_definitive_failure(test_context, monk
     monkeypatch.setattr(tasks, "build_sms_service", lambda *args, **kwargs: service)
     monkeypatch.setattr(tasks, "_acquire_lead_workflow_lock", lambda **kwargs: None)
 
+    class ChangingAgent:
+        calls = 0
+
+        def run_turn(self, **kwargs):
+            self.calls += 1
+            return AgentResponse(
+                reply_text=f"Opening number {self.calls}",
+                collected_fields={"service_needed": f"Project {self.calls}"},
+                runtime_payload={"intent_level": "HIGH_INTENT"},
+            )
+
+    agent = ChangingAgent()
+    monkeypatch.setattr(tasks, "build_llm_agent", lambda **kwargs: agent)
+
     first = tasks.send_initial_sms_task(lead_id)
     duplicate = tasks.send_initial_sms_task(lead_id)
 
@@ -225,6 +253,9 @@ def test_initial_sms_retries_only_explicit_definitive_failure(test_context, monk
         assert record.response_json["safe_to_retry"] is True
         assert record.response_json["attempt_count"] == 1
 
+        assert "qualification_memory" not in db.get(Lead, lead_id).raw_payload
+    assert agent.calls == 1
+
     service.failure = None
     retried = tasks.send_initial_sms_task(lead_id, retry_definitive_failure=True)
 
@@ -237,6 +268,11 @@ def test_initial_sms_retries_only_explicit_definitive_failure(test_context, monk
         assert record is not None
         assert record.status == "completed"
         assert record.response_json["attempt_count"] == 2
+        lead = db.get(Lead, lead_id)
+        assert lead.raw_payload["qualification_memory"]["service_needed"] == "Project 1"
+        assert lead.raw_payload["intent_level"] == "HIGH_INTENT"
+    assert agent.calls == 1
+    assert service.bodies == ["Opening number 1", "Opening number 1"]
 
 
 def test_initial_sms_never_retries_ambiguous_provider_result(test_context, monkeypatch):
@@ -327,11 +363,11 @@ def test_stale_outbound_recovery_is_bounded_and_conservative(test_context):
                 client_id=1,
                 lead_id=lead_id,
                 idempotency_key="retry-safe",
-                request_kind="automated_followup_sms",
+                request_kind="automated_initial_sms",
                 request_fingerprint=fingerprint_payload({"kind": "retry"}),
                 status="failed",
                 response_json={
-                    "reason": "after_hours_followup",
+                    "reason": "initial_ai_sms_sent",
                     "safe_to_retry": True,
                     "attempt_count": 1,
                     "max_attempts": 3,
@@ -343,7 +379,7 @@ def test_stale_outbound_recovery_is_bounded_and_conservative(test_context):
                 client_id=1,
                 lead_id=lead_id,
                 idempotency_key="retry-cap-reached",
-                request_kind="automated_followup_sms",
+                request_kind="automated_initial_sms",
                 request_fingerprint=fingerprint_payload({"kind": "cap"}),
                 status="failed",
                 response_json={
@@ -371,7 +407,7 @@ def test_stale_outbound_recovery_is_bounded_and_conservative(test_context):
     assert result.pending_marked_ambiguous == 1
     assert result.dead_lettered == 2
     assert len(result.retry_directives) == 1
-    assert result.retry_directives[0].request_kind == "automated_followup_sms"
+    assert result.retry_directives[0].request_kind == "automated_initial_sms"
     assert status_by_key == {
         "stale-pending": "ambiguous",
         "stale-ambiguous": "dead_letter",
@@ -450,3 +486,86 @@ def test_periodic_recovery_uses_single_tokenized_schedule(test_context, monkeypa
     assert redis.value == scheduled_token
     tasks._clear_outbound_recovery_schedule_marker(redis, scheduled_token)
     assert redis.value is None
+
+
+@pytest.mark.parametrize("source", list(LeadSource))
+@pytest.mark.parametrize("permission", ["missing_consent", "opted_out", "missing_phone"])
+def test_initial_ai_outreach_checks_permission_before_model(test_context, monkeypatch, source, permission):
+    lead_id = _create_lead(external_id="permission-before-ai", phone="+15550001087")
+    with get_session_factory()() as db:
+        lead = db.get(Lead, lead_id)
+        lead.source = source
+        if permission == "missing_consent":
+            lead.consented = False
+        elif permission == "opted_out":
+            lead.opted_out = True
+        else:
+            lead.phone = ""
+        db.commit()
+
+    def unexpected_model(**kwargs):
+        pytest.fail("Initial outreach must check permission before invoking the model")
+
+    service = ControlledSMSService()
+    monkeypatch.setattr(tasks, "build_llm_agent", unexpected_model)
+    monkeypatch.setattr(tasks, "build_sms_service", lambda *args, **kwargs: service)
+    result = tasks.send_initial_sms_task(lead_id)
+    assert result["reason"] == "missing_sms_permission_or_phone"
+    assert service.send_calls == 0
+
+
+def test_legacy_after_hours_jobs_do_not_schedule_or_send(monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("Retired after-hours jobs must not access providers or enqueue work")
+
+    monkeypatch.setattr(tasks, "get_queue", unexpected)
+    monkeypatch.setattr(tasks, "build_sms_service", unexpected)
+    monkeypatch.setattr(tasks, "get_session_factory", unexpected)
+    assert tasks.enqueue_followup_sms(123) is False
+    assert tasks.send_followup_sms_task(123)["reason"] == "after_hours_automation_retired"
+    assert tasks.send_followup_sms_task(123, retry_definitive_failure=True)["status"] == "skipped"
+
+
+@pytest.mark.parametrize("kind, reason", [
+    ("automated_initial_sms", "after_hours_initial_sms_sent"),
+    ("automated_followup_sms", "after_hours_followup"),
+])
+def test_failed_legacy_after_hours_outreach_is_never_resent(test_context, monkeypatch, kind, reason):
+    lead_id = _create_lead(external_id="retired-hours", phone="+15550001088")
+    with get_session_factory()() as db:
+        record = OutboundRequest(
+            client_id=1, lead_id=lead_id,
+            idempotency_key=f"automated-initial-sms:{lead_id}",
+            request_kind=kind,
+            request_fingerprint=fingerprint_payload({"lead_id": lead_id, "reason": reason}),
+            status="failed",
+            response_json={"reason": reason, "body": "We are currently offline.", "safe_to_retry": True},
+        )
+        db.add(record)
+        db.commit()
+        record_id = record.id
+
+    service = ControlledSMSService()
+    monkeypatch.setattr(tasks, "build_sms_service", lambda *args, **kwargs: service)
+    task = tasks.send_initial_sms_task if kind == "automated_initial_sms" else tasks.send_followup_sms_task
+    assert task(lead_id, retry_definitive_failure=True)["reason"] == "after_hours_automation_retired"
+    assert service.send_calls == 0
+    with get_session_factory()() as db:
+        result = reconcile_stale_outbound_requests(db=db)
+        db.commit()
+        assert result.retry_directives == ()
+        assert db.get(OutboundRequest, record_id).status == "cancelled"
+
+
+def test_historical_after_hours_logs_do_not_mark_conversation_pending(test_context):
+    from app.api.ui.shared import _conversation_tags
+
+    lead_id = _create_lead(external_id="old-hours-tag", phone="+15550001089")
+    with get_session_factory()() as db:
+        lead = db.get(Lead, lead_id)
+        tags = _conversation_tags(lead, [AuditLog(
+            client_id=1, lead_id=lead_id,
+            event_type="after_hours_initial_sms_sent", decision={},
+            created_at=datetime.now(timezone.utc),
+        )])
+    assert "After-hours pending" not in tags

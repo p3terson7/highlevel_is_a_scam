@@ -111,6 +111,33 @@ jobs:
       - name: Audit frontend dependencies
         run: npm audit --audit-level=high
 
+  php:
+    name: PHP landing-form checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show PHP runtime
+        run: php --version
+
+      - name: Set up Node.js for landing-page attribution tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check PHP syntax
+        run: |
+          find php/public_html php/tests -type f -name '*.php' -print0 \
+            | xargs -0 -n1 php -l
+
+      - name: Run PHP security and landing-page tests
+        run: |
+          for test_file in php/tests/*_test.php; do php "$test_file"; done
+          node --test php/tests/campaign_attribution_test.mjs
+
   migrations:
     name: PostgreSQL migration graph and drift
     runs-on: ubuntu-24.04

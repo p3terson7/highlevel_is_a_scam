@@ -234,6 +234,25 @@ class SlotResolutionProvider:
         }
 
 
+class ClarifyingSlotResolutionProvider:
+    name = "slot-clarification"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_json(self, system_prompt: str, user_prompt: str):
+        _ = system_prompt
+        _ = user_prompt
+        self.calls += 1
+        return {
+            "decision": "ask_clarification",
+            "selected_slot_index": None,
+            "selected_slot_start_time": None,
+            "reply_text": "Which time should I reserve: option 1 or option 2?",
+            "reasoning_summary": "The lead accepted more than one offered slot.",
+        }
+
+
 def test_model_context_redacts_contact_data_bounds_text_and_marks_tenant_text_untrusted():
     provider = CapturingProvider()
     agent = LLMAgent(provider=provider)
@@ -462,8 +481,34 @@ def test_slot_resolver_does_not_run_for_unrelated_active_offer_message():
     assert unrelated_yes is None
     assert provider.calls == 1
     assert confirmed is not None
-    assert confirmed["decision"] == "select_slot"
-    assert confirmed["selected_slot_index"] == 1
+    assert confirmed["decision"] == "not_booking"
+    assert confirmed["selected_slot_index"] is None
+
+
+def test_slot_resolver_clarifies_commitment_to_multiple_visible_options():
+    provider = ClarifyingSlotResolutionProvider()
+    agent = LLMAgent(provider=provider)
+    offer = _offer()
+
+    resolution = agent.resolve_booking_selection(
+        client=_client(),
+        lead=_lead(state=ConversationStateEnum.BOOKING_SENT),
+        inbound_text="Either 1 or 2 works for me; choose whichever you prefer.",
+        history=[
+            Message(
+                direction=MessageDirection.OUTBOUND,
+                body="Options: 1) Monday at 10 AM; 2) Monday at noon.",
+                raw_payload={"booking_offer": offer},
+            )
+        ],
+        active_offer=offer,
+    )
+
+    assert provider.calls == 1
+    assert resolution is not None
+    assert resolution["decision"] == "ask_clarification"
+    assert resolution["selected_slot_index"] is None
+    assert resolution["selected_slot_start_time"] is None
 
 
 def test_calendly_token_is_revealed_without_changing_other_config(monkeypatch: pytest.MonkeyPatch):

@@ -27,17 +27,15 @@ from app.db.models import (
     ConversationStateEnum,
     InboundWebhookEvent,
     Lead,
-    LeadSource,
+    OutboundRequest,
     Message,
     MessageAttachment,
     MessageDirection,
 )
 from app.db.session import get_session_factory
 from app.services.booking import build_booking_service
-from app.services.compliance import within_operating_hours
 from app.services.crm import CRM_STAGE_CONTACTED, progress_crm_stage
 from app.services.inbound_sms import already_processed_inbound_message, process_inbound_turn
-from app.services.i18n import client_language
 from app.services.inbound_work import (
     INBOUND_WORK_COMPLETED,
     INBOUND_WORK_DEAD_LETTER,
@@ -51,7 +49,7 @@ from app.services.inbound_work import (
     reserve_inbound_work_enqueue,
 )
 from app.services.lead_intake import normalize_webhook_payload, upsert_lead
-from app.services.lead_summary import build_lead_summary_text, filter_question_form_answers
+from app.services.initial_outreach import apply_initial_memory, generate_initial_outreach
 from app.services.llm_agent import build_llm_agent
 from app.services.message_media import (
     MessageMediaError,
@@ -72,6 +70,7 @@ from app.services.outbound_recovery import (
     OutboundRetryDirective,
     clear_outbound_recovery_enqueue_marker,
     reconcile_stale_outbound_requests,
+    is_retired_after_hours_outreach,
 )
 from app.services.runtime_config import get_effective_runtime_map_for_client, load_runtime_overrides
 from app.services.sms_service import SMSService, build_sms_service, classify_sms_delivery_failure
@@ -336,25 +335,8 @@ def enqueue_process_inbound_media_event(event_id: int):
 
 
 def enqueue_followup_sms(lead_id: int, reason: str = "after_hours"):
-    settings = get_settings()
-    if settings.rq_eager:
-        return send_followup_sms_task(lead_id=lead_id, reason=reason)
-
-    queue = get_queue()
-    if queue is None:
-        logger.warning(
-            "followup_sms_queue_unavailable",
-            extra={"lead_id": lead_id, "reason": reason},
-        )
-        return False
-
-    return queue.enqueue_in(
-        timedelta(minutes=settings.after_hours_followup_minutes),
-        send_followup_sms_task,
-        lead_id,
-        reason,
-        retry=Retry(max=3, interval=[60, 240, 600]),
-    )
+    """Compatibility no-op: the agent supports leads around the clock."""
+    return False
 
 
 def enqueue_zapier_booking_retry(request_id: int) -> bool:
@@ -611,6 +593,8 @@ def _clear_inbound_sms_recovery_schedule_marker(
 
 
 def _enqueue_outbound_recovery_retry(directive: OutboundRetryDirective) -> None:
+    if is_retired_after_hours_outreach(directive.request_kind, directive.reason):
+        return
     if directive.request_kind == "zapier_booking_webhook":
         if not enqueue_zapier_booking_retry(directive.request_id):
             raise RuntimeError("Zapier retry queue is unavailable")
@@ -621,14 +605,6 @@ def _enqueue_outbound_recovery_retry(directive: OutboundRetryDirective) -> None:
         raise RuntimeError("Outbound retry queue is unavailable")
     if directive.request_kind == "automated_initial_sms":
         queue.enqueue(send_initial_sms_task, directive.lead_id, True)
-        return
-    if directive.request_kind == "automated_followup_sms":
-        queue.enqueue(
-            send_followup_sms_task,
-            directive.lead_id,
-            directive.reason or "after_hours_followup",
-            True,
-        )
         return
     raise RuntimeError(f"Unsupported outbound retry kind: {directive.request_kind}")
 
@@ -1448,28 +1424,6 @@ def _record_outbound(
     )
 
 
-def _meta_initial_seed_text(lead: Lead) -> str:
-    normalized_answers = filter_question_form_answers(lead.form_answers or {})
-    details: list[str] = []
-    if lead.full_name:
-        details.append(f"name={lead.full_name}")
-    if lead.city:
-        details.append(f"city={lead.city}")
-    if lead.email:
-        details.append(f"email={lead.email}")
-
-    summary = build_lead_summary_text(normalized_answers, limit=6)
-    if summary and summary != "No qualification details captured yet.":
-        details.append(f"summary={summary}")
-
-    context_blob = " | ".join(details) if details else "no extra lead details"
-    return (
-        "New lead submitted from Meta Lead Ads. "
-        "This is the first outbound SMS after the form submit. "
-        f"Lead context: {context_blob}."
-    )
-
-
 def send_initial_sms_task(
     lead_id: int,
     retry_definitive_failure: bool = False,
@@ -1477,7 +1431,6 @@ def send_initial_sms_task(
     SessionLocal = get_session_factory()
     settings = get_settings()
 
-    enqueue_followup = False
     lock = _acquire_lead_workflow_lock(lead_id=lead_id, purpose="send_initial_sms")
     if lock is False:
         queue = get_queue()
@@ -1534,83 +1487,32 @@ def send_initial_sms_task(
                 db.commit()
                 return {"status": "skipped", "reason": "conversation_already_started"}
 
-            first_name = lead.full_name.split(" ")[0] if lead.full_name else "there"
-            context = {
-                "first_name": first_name,
-                "business_name": client.business_name,
-                "booking_url": client.booking_url,
-                "consent_text": client.consent_text,
-                "language": client_language(client, lead=lead),
-            }
-
-            outbound_payload: dict[str, Any]
-            next_state = ConversationStateEnum.GREETED
-            if lead.source == LeadSource.META:
-                llm_agent = build_llm_agent(settings=settings, runtime_overrides=effective_runtime)
-                ai_seed = _meta_initial_seed_text(lead)
-                ai_response = llm_agent.next_reply(
-                    client=client,
-                    lead=lead,
-                    inbound_text=ai_seed,
-                    history=[],
+            # Reuse a durable opening on retries, including reservations created
+            # before the source-independent rollout. Never re-plan delivered copy.
+            existing_request = db.scalar(
+                select(OutboundRequest).where(
+                    OutboundRequest.client_id == client.id,
+                    OutboundRequest.idempotency_key == f"automated-initial-sms:{lead.id}",
                 )
-                body = ai_response.reply_text.strip() or sms_service.render_template(client, "initial_sms", context=context)
-                next_state = (
-                    ai_response.next_state
-                    if ai_response.next_state != ConversationStateEnum.NEW
-                    else ConversationStateEnum.QUALIFYING
-                )
-                reason = "initial_ai_sms_sent"
-                qualification_memory = dict(lead.raw_payload or {})
-                qualification_memory["qualification_memory"] = ai_response.collected_fields.model_dump(exclude_none=True)
-                if ai_response.next_question_key:
-                    qualification_memory["last_question_key"] = ai_response.next_question_key
-                else:
-                    qualification_memory.pop("last_question_key", None)
-                pending_step = (ai_response.runtime_payload or {}).get("pending_step")
-                if pending_step:
-                    qualification_memory["pending_step"] = pending_step
-                else:
-                    qualification_memory.pop("pending_step", None)
-                for key in (
-                    "cta_state",
-                    "intent_level",
-                    "intent_score",
-                    "intent_reasons",
-                    "important_missing_fields",
-                    "lead_summary",
-                    "recommended_follow_up",
-                ):
-                    if key in (ai_response.runtime_payload or {}):
-                        qualification_memory[key] = ai_response.runtime_payload[key]
-                lead.raw_payload = qualification_memory
-                outbound_payload = {
-                    "reason": reason,
-                    "provider": ai_response.provider,
-                    "provider_error": ai_response.provider_error,
-                    "agent": {
-                        "action": ai_response.action,
-                        "next_question_key": ai_response.next_question_key,
-                        "collected_fields": ai_response.collected_fields.model_dump(exclude_none=True),
-                        "provider": ai_response.provider,
-                        "provider_error": ai_response.provider_error,
-                        "intent_level": (ai_response.runtime_payload or {}).get("intent_level"),
-                        "intent_score": (ai_response.runtime_payload or {}).get("intent_score"),
-                        "cta_state": (ai_response.runtime_payload or {}).get("cta_state"),
-                        "lead_summary": (ai_response.runtime_payload or {}).get("lead_summary"),
-                    },
-                    "actions": [action.model_dump() for action in ai_response.actions],
-                    "seed_context": ai_seed,
-                }
-            elif within_operating_hours(client):
-                body = sms_service.render_template(client, "initial_sms", context=context)
-                reason = "initial_sms_sent"
-                outbound_payload = {"template": reason}
+            )
+            stored = dict(existing_request.response_json or {}) if existing_request else {}
+            reason = str(stored.get("reason") or "initial_ai_sms_sent")
+            if is_retired_after_hours_outreach("automated_initial_sms", reason):
+                return {"status": "skipped", "reason": "after_hours_automation_retired", "lead_id": lead.id}
+            if stored.get("body"):
+                body = str(stored["body"])
+                next_state = ConversationStateEnum(stored.get("next_state") or "QUALIFYING")
+                outbound_payload = dict(stored.get("outbound_payload") or {})
+                opening_memory = dict(stored.get("opening_memory") or {})
             else:
-                body = sms_service.render_template(client, "after_hours", context=context)
-                reason = "after_hours_initial_sms_sent"
-                outbound_payload = {"template": reason}
-                enqueue_followup = True
+                opening = generate_initial_outreach(
+                    db=db, client=client, lead=lead,
+                    llm_agent=build_llm_agent(settings=settings, runtime_overrides=effective_runtime),
+                )
+                body = opening.body
+                next_state = opening.next_state
+                outbound_payload = {"reason": reason, **opening.payload}
+                opening_memory = opening.memory
 
             reservation = reserve_outbound_request(
                 db=db,
@@ -1622,6 +1524,7 @@ def send_initial_sms_task(
                     "reason": reason,
                     "body": body,
                     "outbound_payload": outbound_payload,
+                    "opening_memory": opening_memory,
                     "next_state": next_state.value,
                     "attempt_count": 1,
                     "max_attempts": 3,
@@ -1649,6 +1552,7 @@ def send_initial_sms_task(
             stored_outbound_payload = reservation.response.get("outbound_payload")
             if isinstance(stored_outbound_payload, dict):
                 outbound_payload = stored_outbound_payload
+            opening_memory = dict(reservation.response.get("opening_memory") or {})
             stored_next_state = str(reservation.response.get("next_state") or "")
             if stored_next_state:
                 try:
@@ -1720,6 +1624,7 @@ def send_initial_sms_task(
                     "reason": failure.reason,
                     "lead_id": lead.id,
                 }
+            apply_initial_memory(lead, opening_memory)
             _record_outbound(
                 db,
                 lead=lead,
@@ -1787,9 +1692,6 @@ def send_initial_sms_task(
     finally:
         _release_lead_workflow_lock(lock, lead_id=lead_id, purpose="send_initial_sms")
 
-    if enqueue_followup:
-        enqueue_followup_sms(lead_id=lead_id, reason="after_hours_followup")
-
     incr("sms_outbound_total")
     return {"status": "ok", "lead_id": lead_id}
 
@@ -1799,199 +1701,5 @@ def send_followup_sms_task(
     reason: str = "after_hours_followup",
     retry_definitive_failure: bool = False,
 ) -> dict[str, Any]:
-    SessionLocal = get_session_factory()
-    settings = get_settings()
-
-    lock = _acquire_lead_workflow_lock(lead_id=lead_id, purpose="send_followup_sms")
-    if lock is False:
-        queue = get_queue()
-        if queue is not None and not settings.rq_eager:
-            queue.enqueue_in(
-                timedelta(seconds=15),
-                send_followup_sms_task,
-                lead_id,
-                reason,
-                retry_definitive_failure,
-            )
-            return {"status": "requeued", "reason": "lead_locked", "lead_id": lead_id}
-        return {"status": "skipped", "reason": "lead_locked", "lead_id": lead_id}
-
-    try:
-        with SessionLocal() as db:
-            runtime_overrides = load_runtime_overrides(db)
-            lead = db.get(Lead, lead_id)
-            if lead is None or lead.opted_out or not lead.consented or not lead.phone:
-                return {"status": "skipped"}
-
-            client = db.get(Client, lead.client_id)
-            if client is None:
-                return {"status": "skipped", "reason": "client_not_found"}
-            pacing_delay = _remaining_automated_sms_delay(
-                settings,
-                lead.last_outbound_at,
-            )
-            if _requeue_automated_task_for_pacing(
-                send_followup_sms_task,
-                lead_id,
-                reason,
-                retry_definitive_failure,
-                delay_seconds=pacing_delay,
-                retry=Retry(max=3, interval=[60, 240, 600]),
-            ):
-                return {
-                    "status": "requeued",
-                    "reason": "automated_sms_pacing",
-                    "lead_id": lead_id,
-                    "delay_seconds": pacing_delay,
-                }
-            effective_runtime = get_effective_runtime_map_for_client(
-                settings=settings,
-                overrides=runtime_overrides,
-                client=client,
-            )
-            sms_service = build_sms_service(settings, runtime_overrides=effective_runtime)
-
-            body = sms_service.render_template(
-                client,
-                "follow_up",
-                context={"booking_url": client.booking_url, "business_name": client.business_name},
-            )
-            reason_key = str(reason or "followup")
-            reason_digest = hashlib.sha256(reason_key.encode("utf-8")).hexdigest()[:16]
-            reservation = reserve_outbound_request(
-                db=db,
-                lead=lead,
-                idempotency_key=f"automated-followup-sms:{lead.id}:{reason_digest}",
-                request_kind="automated_followup_sms",
-                fingerprint_data={"lead_id": lead.id, "reason": reason_key},
-                pending_response={
-                    "reason": reason_key,
-                    "body": body,
-                    "attempt_count": 1,
-                    "max_attempts": 3,
-                },
-                retry_failed=retry_definitive_failure,
-                require_safe_retry=retry_definitive_failure,
-            )
-            if not reservation.should_send:
-                return {
-                    "status": "skipped",
-                    "reason": f"delivery_{reservation.status}",
-                    "lead_id": lead.id,
-                }
-            body = str(reservation.response.get("body") or body)
-            delivery_state = lock_lead_for_outbound_delivery(db=db, lead_id=lead.id)
-            if delivery_state is None:
-                cancel_outbound_request(
-                    db=db,
-                    request_id=reservation.request_id,
-                    reason="consent_withdrawn_before_send",
-                    response={"reason": reason_key},
-                )
-                db.add(
-                    AuditLog(
-                        client_id=client.id,
-                        lead_id=lead.id,
-                        event_type="follow_up_sms_skipped",
-                        decision={
-                            "reason": reason_key,
-                            "suppression_reason": "consent_withdrawn_before_send",
-                        },
-                    )
-                )
-                db.commit()
-                return {
-                    "status": "skipped",
-                    "reason": "consent_withdrawn_before_send",
-                    "lead_id": lead.id,
-                }
-            try:
-                provider_sid = sms_service.send_message(to_number=delivery_state.phone, body=body)
-            except Exception as exc:
-                failure = classify_sms_delivery_failure(exc)
-                fail_outbound_request(
-                    db=db,
-                    request_id=reservation.request_id,
-                    detail=exc,
-                    ambiguous=failure.ambiguous,
-                    response={
-                        "reason": reason_key,
-                        "failure_reason": failure.reason,
-                        "safe_to_retry": failure.safe_to_retry,
-                        "provider_status": failure.provider_status,
-                        "provider_code": failure.provider_code,
-                        "last_failed_at": datetime.now(timezone.utc).isoformat(),
-                    },
-                    merge_response=True,
-                )
-                db.add(
-                    AuditLog(
-                        client_id=client.id,
-                        lead_id=lead.id,
-                        event_type="follow_up_sms_failed",
-                        decision={
-                            "reason": reason_key,
-                            "failure_reason": failure.reason,
-                            "delivery_result_unknown": failure.ambiguous,
-                            "safe_to_retry": failure.safe_to_retry,
-                            "provider_status": failure.provider_status,
-                            "provider_code": failure.provider_code,
-                            "error": str(exc)[:500],
-                        },
-                    )
-                )
-                db.commit()
-                return {
-                    "status": "failed",
-                    "reason": failure.reason,
-                    "lead_id": lead.id,
-                }
-            _record_outbound(
-                db,
-                lead=lead,
-                body=body,
-                provider_sid=provider_sid,
-                raw_payload={"reason": reason},
-                sms_service=sms_service,
-            )
-            complete_outbound_request(
-                db=db,
-                request_id=reservation.request_id,
-                provider_reference=provider_sid,
-                response={
-                    "reason": reason_key,
-                    "provider_sid": provider_sid,
-                    "attempt_count": reservation.response.get("attempt_count", 1),
-                },
-            )
-            lead.last_outbound_at = datetime.now(timezone.utc)
-            previous_crm_stage = lead.crm_stage
-            lead.crm_stage = progress_crm_stage(lead.crm_stage, CRM_STAGE_CONTACTED)
-            if lead.crm_stage != previous_crm_stage:
-                db.add(
-                    AuditLog(
-                        client_id=client.id,
-                        lead_id=lead.id,
-                        event_type="crm_stage_auto_updated",
-                        decision={
-                            "previous_stage": previous_crm_stage,
-                            "new_stage": lead.crm_stage,
-                            "reason": "follow_up_sms_sent",
-                        },
-                    )
-                )
-
-            db.add(
-                AuditLog(
-                    client_id=client.id,
-                    lead_id=lead.id,
-                    event_type="follow_up_sms_sent",
-                    decision={"reason": reason, "provider_sid": provider_sid},
-                )
-            )
-            db.commit()
-    finally:
-        _release_lead_workflow_lock(lock, lead_id=lead_id, purpose="send_followup_sms")
-
-    incr("sms_outbound_total")
-    return {"status": "ok", "lead_id": lead_id, "reason": reason}
+    """Drain jobs scheduled before 24/7 outreach without sending stale copy."""
+    return {"status": "skipped", "reason": "after_hours_automation_retired", "lead_id": lead_id}

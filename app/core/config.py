@@ -53,7 +53,6 @@ class Settings(BaseSettings):
     rate_limit_count: int = 100
     rate_limit_window_minutes: int = 1
     automated_sms_delay_seconds: int = 20
-    after_hours_followup_minutes: int = 720
     request_timeout_seconds: int = 20
     request_body_max_bytes: int = 1024 * 1024
     message_media_storage_dir: str = "storage/message_media"

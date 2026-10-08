@@ -411,6 +411,12 @@ class TurnExpectation(_Serializable):
     handoff_expected: bool | None = None
     expected_tool_names: tuple[str, ...] | None = None
     max_tool_calls: int | None = None
+    expected_total_lead_task_count: int | None = None
+    expected_total_booking_event_count: int | None = None
+    expected_total_outbound_message_count: int | None = None
+    expected_booking_confirmation_unknown: bool | None = None
+    expected_handoff_reason: str | None = None
+    expected_lead_source: str | None = None
     tool: ToolExpectation | None = None
 
     @property
@@ -449,6 +455,12 @@ class TurnExpectation(_Serializable):
             "handoff_expected",
             "expected_tool_names",
             "max_tool_calls",
+            "expected_total_lead_task_count",
+            "expected_total_booking_event_count",
+            "expected_total_outbound_message_count",
+            "expected_booking_confirmation_unknown",
+            "expected_handoff_reason",
+            "expected_lead_source",
             "tool",
         }
         _reject_unknown(data, allowed, path)
@@ -459,6 +471,16 @@ class TurnExpectation(_Serializable):
             expected_language = expected_language.lower()
             if expected_language not in {"en", "fr"}:
                 raise _fail(f"{path}.expected_language", "must be en or fr")
+        expected_lead_source = _optional_string(
+            data.get("expected_lead_source"), f"{path}.expected_lead_source"
+        )
+        if expected_lead_source is not None:
+            expected_lead_source = expected_lead_source.casefold()
+            if expected_lead_source not in _LEAD_SOURCES:
+                raise _fail(
+                    f"{path}.expected_lead_source",
+                    f"unsupported lead source {expected_lead_source!r}",
+                )
         expected_state = _optional_string(data.get("expected_state"), f"{path}.expected_state")
         if expected_state is not None:
             expected_state = expected_state.upper()
@@ -575,6 +597,23 @@ class TurnExpectation(_Serializable):
             handoff_expected=optional_bool("handoff_expected"),
             expected_tool_names=expected_tool_names,
             max_tool_calls=optional_int("max_tool_calls"),
+            expected_total_lead_task_count=optional_int(
+                "expected_total_lead_task_count"
+            ),
+            expected_total_booking_event_count=optional_int(
+                "expected_total_booking_event_count"
+            ),
+            expected_total_outbound_message_count=optional_int(
+                "expected_total_outbound_message_count"
+            ),
+            expected_booking_confirmation_unknown=optional_bool(
+                "expected_booking_confirmation_unknown"
+            ),
+            expected_handoff_reason=_optional_string(
+                data.get("expected_handoff_reason"),
+                f"{path}.expected_handoff_reason",
+            ),
+            expected_lead_source=expected_lead_source,
             tool=tool,
         )
 
@@ -701,6 +740,12 @@ class TurnObservation(_Serializable):
     booking_created: bool = False
     handoff_requested: bool = False
     tool_calls: tuple[dict[str, Any], ...] = ()
+    total_lead_task_count: int | None = None
+    total_booking_event_count: int | None = None
+    total_outbound_message_count: int | None = None
+    booking_confirmation_unknown: bool | None = None
+    handoff_reason: str | None = None
+    lead_source: str | None = None
 
 
 @dataclass(frozen=True)

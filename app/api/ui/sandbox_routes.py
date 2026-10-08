@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.services.initial_outreach import apply_initial_memory, generate_initial_outreach
 from app.services.sandbox_admission import admit_sandbox_action
 
 from .shared import *
@@ -12,60 +13,6 @@ _SANDBOX_START_LIMIT = 10
 _SANDBOX_START_WINDOW = timedelta(minutes=10)
 _SANDBOX_MESSAGE_LIMIT = 30
 _SANDBOX_MESSAGE_WINDOW = timedelta(minutes=1)
-
-
-def _sandbox_initial_seed_text(lead: Lead) -> str:
-    """Describe a Test Lab submission without pretending it came from Meta."""
-
-    normalized_answers = filter_question_form_answers(lead.form_answers or {})
-    details: list[str] = []
-    # Put the qualification summary first. Knowledge retrieval intentionally
-    # prioritizes the opening query tokens, so generic sandbox metadata must not
-    # crowd the lead's actual service and project terms out of candidate search.
-    summary = build_lead_summary_text(normalized_answers, limit=6)
-    if summary and summary != "No qualification details captured yet.":
-        details.append(f"summary={summary}")
-    if lead.full_name:
-        details.append(f"name={lead.full_name}")
-    if lead.city:
-        details.append(f"city={lead.city}")
-    if lead.email:
-        details.append(f"email={lead.email}")
-
-    context_blob = " | ".join(details) if details else "no extra lead details"
-    return (
-        f"Lead context: {context_blob}. "
-        "New test lead submitted through the AI sandbox. "
-        "This is the first outbound message after the Test Lab submission. "
-    )
-
-
-def _run_sandbox_opening_turn(
-    *,
-    db: Session,
-    client: Client,
-    lead: Lead,
-    llm_agent: Any,
-    inbound_text: str,
-):
-    """Run the opening turn with tenant knowledge while supporting legacy test doubles."""
-
-    run_turn = getattr(llm_agent, "run_turn", None)
-    if callable(run_turn):
-        return run_turn(
-            client=client,
-            lead=lead,
-            inbound_text=inbound_text,
-            history=[],
-            booking_service=None,
-            db=db,
-        )
-    return llm_agent.next_reply(
-        client=client,
-        lead=lead,
-        inbound_text=inbound_text,
-        history=[],
-    )
 
 
 def _enforce_sandbox_admission(
@@ -268,62 +215,14 @@ def ui_owner_start_ai_sandbox(
         )
     )
 
-    ai_seed = _sandbox_initial_seed_text(lead)
-    ai_response = _run_sandbox_opening_turn(
-        db=db,
-        client=client,
-        lead=lead,
-        llm_agent=llm_agent,
-        inbound_text=ai_seed,
+    opening = generate_initial_outreach(
+        db=db, client=client, lead=lead, llm_agent=llm_agent,
     )
-    body = ai_response.reply_text.strip()
-    if not body:
-        first_name = lead.full_name.split(" ")[0] if lead.full_name else "there"
-        body = f"Hi {first_name}, thanks for reaching out to {client.business_name}."
-
-    qualification_memory = dict(lead.raw_payload or {})
-    qualification_memory["qualification_memory"] = ai_response.collected_fields.model_dump(exclude_none=True)
-    if ai_response.next_question_key:
-        qualification_memory["last_question_key"] = ai_response.next_question_key
-    else:
-        qualification_memory.pop("last_question_key", None)
-    pending_step = (ai_response.runtime_payload or {}).get("pending_step")
-    if pending_step:
-        qualification_memory["pending_step"] = pending_step
-    else:
-        qualification_memory.pop("pending_step", None)
-    for key in (
-        "cta_state",
-        "intent_level",
-        "intent_score",
-        "intent_reasons",
-        "important_missing_fields",
-        "lead_summary",
-        "recommended_follow_up",
-        "calendar_booking",
-    ):
-        if key in (ai_response.runtime_payload or {}):
-            qualification_memory[key] = ai_response.runtime_payload[key]
-    lead.raw_payload = qualification_memory
-
+    body = opening.body
+    apply_initial_memory(lead, opening.memory)
     outbound_payload = {
+        **opening.payload,
         "reason": "ui_sandbox_initial_ai_sms",
-        "provider": ai_response.provider,
-        "provider_error": ai_response.provider_error,
-        "agent": {
-            "action": ai_response.action,
-            "next_question_key": ai_response.next_question_key,
-            "collected_fields": ai_response.collected_fields.model_dump(exclude_none=True),
-            "provider": ai_response.provider,
-            "provider_error": ai_response.provider_error,
-            "intent_level": (ai_response.runtime_payload or {}).get("intent_level"),
-            "intent_score": (ai_response.runtime_payload or {}).get("intent_score"),
-            "cta_state": (ai_response.runtime_payload or {}).get("cta_state"),
-            "lead_summary": (ai_response.runtime_payload or {}).get("lead_summary"),
-            **safe_agent_diagnostics(dict(ai_response.runtime_payload or {})),
-        },
-        "actions": [action.model_dump() for action in ai_response.actions],
-        "seed_context": ai_seed,
         "delivery_mode": "sandbox",
         "twilio_bypassed": True,
     }
@@ -341,9 +240,7 @@ def ui_owner_start_ai_sandbox(
 
     previous_state = lead.conversation_state
     previous_stage = lead.crm_stage
-    lead.conversation_state = (
-        ai_response.next_state if ai_response.next_state != ConversationStateEnum.NEW else ConversationStateEnum.QUALIFYING
-    )
+    lead.conversation_state = opening.next_state
     lead.crm_stage = progress_crm_stage(lead.crm_stage, CRM_STAGE_CONTACTED)
     lead.initial_sms_sent_at = now
     lead.last_outbound_at = now

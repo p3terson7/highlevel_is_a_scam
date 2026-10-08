@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "french_handoff_has_no_english_suffix",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["french", "handoff", "final-message", "language"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Atelier Démo",
+    "tone": "rassurant, direct et concis",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Quel service recherchez-vous?"
+    ],
+    "booking_mode": "internal",
+    "fallback_handoff_number": "+14165550199",
+    "faq_context": "Une personne de l'équipe peut prendre le relais lorsqu'un prospect le demande.",
+    "ai_context": "Toute la réponse doit rester dans la langue du prospect."
+  },
+  "lead": {
+    "full_name": "Camille Exemple",
+    "email": "camille.handoff@example.test",
+    "phone": "+15145550122",
+    "city": "Montréal",
+    "state": "QUALIFYING",
+    "form_answers": {},
+    "raw_payload": {
+      "lead_language": "fr"
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Bonjour Camille, ici Hermes, l'assistant d'Atelier Démo. Comment puis-je vous aider?",
+      "raw_payload": {
+        "initial_outreach": true
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "Je veux parler à un humain maintenant.",
+      "replay_outputs": [],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "HANDOFF",
+        "expected_action": "handoff_to_human",
+        "allowed_actions": ["handoff_to_human"],
+        "allowed_conversation_acts": ["handoff"],
+        "expected_next_states": ["HANDOFF"],
+        "allowed_resolution_paths": ["pre_llm_handoff_policy", "agent_handoff_tool"],
+        "must_include": ["équipe", "+14165550199"],
+        "must_not_include": ["For immediate help", "call +14165550199"],
+        "max_questions": 0,
+        "max_chars": 320,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": true,
+        "expected_tool_names": [],
+        "max_tool_calls": 0
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}

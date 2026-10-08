@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, time as dt_time, timezone
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo
@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.db.models import CalendarBooking, Client, ConversationStateEnum, Lead, Message
 from app.db.session import get_session_factory
 from app.services.booking_copy import render_booking_slot_reply
-from app.services.booking_planner import plan_booking_slots
+from app.services.booking_planner import BookingSearchCoverage, plan_booking_slots
 from app.services.booking_request import BookingTimeRequest, build_booking_time_request
 from app.services.i18n import client_language, format_datetime_for_language, normalize_language
 from app.services.outbound_requests import (
@@ -33,15 +33,40 @@ _INTERNAL_MODE_ALIASES = {"internal", "calendar"}
 _INTERNAL_DEFAULT_SLOT_MINUTES = 30
 _INTERNAL_DEFAULT_NOTICE_MINUTES = 120
 _INTERNAL_DEFAULT_HORIZON_DAYS = 14
+_MAX_REQUEST_SEARCH_HORIZON_DAYS = 60
+_MAX_AVAILABILITY_RESULTS = 240
+_BOOKING_OFFER_TTL = timedelta(hours=24)
+_INTERNAL_NOTICE_REVALIDATION_GRACE = timedelta(minutes=5)
 _PENDING_RESCHEDULE_KEY = "pending_reschedule_confirmation"
 _RESCHEDULE_PENDING_STEP = "reschedule_confirmation_pending"
 _SLOT_COMMITMENT_RE = re.compile(
     r"\b("
     r"lock (?:it|that) in|book (?:it|that)|reserve (?:it|that)|go with (?:it|that)|"
-    r"that works|that'?s good|works for me|let'?s do (?:it|that)|confirm (?:it|that)|"
+    r"that works|that'?s good|(?:is|sounds) good|works for me|let'?s do (?:it|that)|"
+    r"confirm (?:it|that)|"
     r"bloque(?:z|r)?(?:-le)?|r[ée]serve(?:z|r)?(?:-le)?|ça marche|ca marche|parfait|"
-    r"allez-y|confirm(?:e|ez)(?:-le)?"
+    r"allez-y|confirm(?:e|ez)(?:-le)?|(?:me |ça |ca )?convient"
     r")\b",
+    re.IGNORECASE,
+)
+_SLOT_EXPLICIT_ACTION_RE = re.compile(
+    r"\b("
+    r"book|reserve|lock|confirm|go with|let'?s do|"
+    r"r[ée]serve(?:z|r)?|bloque(?:z|r)?|confirm(?:e|ez|er)?|allez-y"
+    r")\b",
+    re.IGNORECASE,
+)
+_SLOT_NEGATION_RE = re.compile(
+    r"\b("
+    r"not|no|nope|can'?t|cannot|don'?t|do not|won'?t|will not|"
+    r"doesn'?t|does not|isn'?t|is not|unavailable|cancel(?:led|ed|ing)?|"
+    r"non|pas|impossible|annul(?:é|e|er|ez)|"
+    r"ne\s+(?:peux|peut|marche|fonctionne|convient)\s+pas"
+    r")\b",
+    re.IGNORECASE,
+)
+_SLOT_TENTATIVE_RE = re.compile(
+    r"\b(maybe|perhaps|possibly|tentative(?:ly)?|peut[- ]?[êe]tre|possiblement)\b",
     re.IGNORECASE,
 )
 _RESCHEDULE_CONFIRM_RE = re.compile(
@@ -81,6 +106,30 @@ class BookingSlot:
 
 
 @dataclass(frozen=True)
+class AvailabilityCoverage:
+    provider: str
+    start_date: str
+    end_date: str
+    complete: bool
+    reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "complete": self.complete,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class AvailabilitySearchResult:
+    slots: list[BookingSlot]
+    coverage: AvailabilityCoverage
+
+
+@dataclass(frozen=True)
 class SlotOffer:
     reply_text: str
     slots: list[BookingSlot]
@@ -106,10 +155,12 @@ def ensure_booking_link(reply_text: str, client: Client) -> str:
     return f"{reply_text} Book here: {client.booking_url}".strip()
 
 
-def handoff_suffix(client: Client) -> str:
+def handoff_suffix(client: Client, *, language: str) -> str:
+    """Render the phone suffix in the already-resolved turn language."""
+
     if not client.fallback_handoff_number:
         return ""
-    if client_language(client) == "fr":
+    if normalize_language(language) == "fr":
         return f" Pour une aide immédiate, appelez le {client.fallback_handoff_number}."
     return f" For immediate help, call {client.fallback_handoff_number}."
 
@@ -150,12 +201,44 @@ def internal_calendar_preview_config(client: Client) -> dict[str, Any]:
 
 
 def calendar_booking_confirmed(inbound_text: str) -> bool:
-    text = str(inbound_text or "").strip().lower()
+    text = str(inbound_text or "").strip().lower().replace("’", "'")
     if not text:
         return False
-    if "booked" in text and any(word in text for word in ("i", "we", "it is", "it's", "already", "just")):
-        return True
-    return any(phrase in text for phrase in ("appointment booked", "booking confirmed", "i booked", "i'm booked", "im booked"))
+    if "?" in text:
+        return False
+    if re.search(
+        r"\b("
+        r"not booked|haven'?t booked|have not booked|didn'?t book|did not book|"
+        r"cancel(?:led|ed|ing)?|wrong (?:time|slot|appointment)|booked up|"
+        r"pas r[ée]serv[ée]|n[' ]ai pas r[ée]serv[ée]|annul(?:é|e|er|ez)|"
+        r"mauvais (?:cr[ée]neau|horaire|rendez-vous)"
+        r")\b",
+        text,
+    ):
+        return False
+    if re.search(
+        r"\b(wonder if|not sure|thought|maybe|perhaps|je me demande|pas s[ûu]r)\b",
+        text,
+    ):
+        return False
+    normalized = re.sub(r"[.!]+$", "", text).strip()
+    return bool(
+        re.fullmatch(
+            r"(?:"
+            r"i(?:'m| am) booked(?: for (?:the |my )?(?:call|appointment|meeting))?|"
+            r"i (?:have )?booked(?: it| (?:the|my) (?:call|appointment|meeting))?(?: already)?|"
+            r"we (?:have )?booked(?: it| (?:the|our) (?:call|appointment|meeting))?(?: already)?|"
+            r"(?:i(?:'ve| have) |we(?:'ve| have) )?already booked|"
+            r"i scheduled(?: it| (?:the|my) (?:call|appointment|meeting))?|"
+            r"(?:my |the )?appointment (?:is )?booked|"
+            r"(?:the )?booking (?:is )?confirmed|"
+            r"j[' ]ai r[ée]serv[ée](?: (?:le|mon) rendez-vous| l[' ]appel)?|"
+            r"nous avons r[ée]serv[ée](?: le rendez-vous| l[' ]appel)?|"
+            r"(?:le )?rendez-vous (?:est )?confirm[ée]"
+            r")",
+            normalized,
+        )
+    )
 
 
 def looks_like_slot_selection_message(inbound_text: str) -> bool:
@@ -338,6 +421,49 @@ def _candidate_starts(
     return results
 
 
+def _internal_slot_still_allowed(
+    *,
+    client: Client,
+    start_at: datetime,
+    end_at: datetime,
+    now_utc: datetime,
+) -> bool:
+    config = _internal_calendar_config(client)
+    if start_at <= now_utc or end_at <= start_at:
+        return False
+    minimum_notice = (
+        now_utc
+        + timedelta(minutes=int(config["notice_minutes"]))
+        - _INTERNAL_NOTICE_REVALIDATION_GRACE
+    )
+    if start_at < minimum_notice:
+        return False
+
+    tz_name = client.timezone or "UTC"
+    start_local = start_at.astimezone(_tzinfo(tz_name))
+    for row in config["availability"]:
+        if int(row["day"]) != start_local.weekday():
+            continue
+        block_start = _parse_hhmm(str(row["start"]))
+        block_end = _parse_hhmm(str(row["end"]))
+        if block_start is None or block_end is None:
+            continue
+        candidates = _candidate_starts(
+            local_date=start_local.date(),
+            start_time=block_start,
+            end_time=block_end,
+            slot_minutes=int(config["slot_minutes"]),
+            tz_name=tz_name,
+        )
+        if any(
+            candidate_start.astimezone(timezone.utc) == start_at
+            and candidate_end.astimezone(timezone.utc) == end_at
+            for candidate_start, candidate_end in candidates
+        ):
+            return True
+    return False
+
+
 def _existing_internal_bookings(
     db: Session,
     *,
@@ -436,6 +562,12 @@ def _booked_from_reply(inbound_text: str) -> bool:
 
 def _slot_commitment_requested(inbound_text: str) -> bool:
     raw = str(inbound_text or "")
+    if _SLOT_NEGATION_RE.search(raw) or _SLOT_TENTATIVE_RE.search(raw):
+        return False
+    if _SLOT_EXPLICIT_ACTION_RE.search(raw):
+        return True
+    if "?" in raw:
+        return False
     if _SLOT_COMMITMENT_RE.search(raw):
         return True
     return _normalize_slot_text(raw) in {
@@ -457,11 +589,32 @@ def _offer_has_slots(offer: dict[str, Any] | None) -> bool:
 
 
 def _reschedule_confirmed(inbound_text: str) -> bool:
-    return bool(_RESCHEDULE_CONFIRM_RE.search(str(inbound_text or "")))
+    raw = str(inbound_text or "").strip()
+    if (
+        not raw
+        or "?" in raw
+        or _SLOT_NEGATION_RE.search(raw)
+        or _SLOT_TENTATIVE_RE.search(raw)
+    ):
+        return False
+    return bool(_RESCHEDULE_CONFIRM_RE.search(raw))
 
 
 def _reschedule_declined(inbound_text: str) -> bool:
     return bool(_RESCHEDULE_DECLINE_RE.search(str(inbound_text or "")))
+
+
+def confirmed_single_offered_slot(
+    inbound_text: str, slots: Sequence[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Resolve an affirmative to one offered slot, never a new time or refusal."""
+    if (
+        len(slots) == 1
+        and _slot_commitment_requested(inbound_text)
+        and not _has_specific_time_request(inbound_text)
+    ):
+        return slots[0]
+    return None
 
 
 def _has_specific_time_request(inbound_text: str) -> bool:
@@ -496,6 +649,284 @@ def booking_mode_label(client: Client) -> str:
     return str(client.booking_mode or "link").strip().lower() or "link"
 
 
+def _requested_date_bounds(request: BookingTimeRequest) -> tuple[date, date] | None:
+    parsed_dates: list[date] = []
+    for raw_date in request.requested_dates:
+        try:
+            parsed_dates.append(date.fromisoformat(str(raw_date)))
+        except ValueError:
+            continue
+    if parsed_dates:
+        return min(parsed_dates), max(parsed_dates)
+    if request.date_range_start and request.date_range_end:
+        try:
+            return (
+                date.fromisoformat(request.date_range_start),
+                date.fromisoformat(request.date_range_end),
+            )
+        except ValueError:
+            return None
+    return None
+
+
+def _request_spills_next_day(request: BookingTimeRequest) -> bool:
+    return bool(
+        request.range_start_minutes is not None
+        and request.range_end_minutes is not None
+        and request.range_end_minutes > 24 * 60
+    )
+
+
+def _request_overflow_minutes(request: BookingTimeRequest) -> int:
+    if not _request_spills_next_day(request):
+        return 0
+    return max(0, int(request.range_end_minutes or 0) - 24 * 60)
+
+
+def _coverage_contains_request(
+    request: BookingTimeRequest,
+    *,
+    start_date: date,
+    end_date: date,
+) -> bool:
+    bounds = _requested_date_bounds(request)
+    if bounds is not None:
+        required_end = bounds[1] + timedelta(
+            days=1 if _request_spills_next_day(request) else 0
+        )
+        return start_date <= bounds[0] and required_end <= end_date
+    if request.requested_weekdays:
+        latest_anchor = end_date - timedelta(
+            days=1 if _request_spills_next_day(request) else 0
+        )
+        covered_weekdays = {
+            (start_date + timedelta(days=offset)).strftime("%A").lower()
+            for offset in range(max(0, (latest_anchor - start_date).days) + 1)
+        }
+        return set(request.requested_weekdays).issubset(covered_weekdays)
+    return True
+
+
+def _internal_search_coverage(
+    *,
+    client: Client,
+    request: BookingTimeRequest,
+    now_utc: datetime,
+) -> tuple[AvailabilityCoverage, int]:
+    config = _internal_calendar_config(client)
+    local_today = now_utc.astimezone(_tzinfo(client.timezone)).date()
+    search_horizon = int(config["horizon_days"])
+    bounds = _requested_date_bounds(request)
+    if bounds is not None:
+        required_end = bounds[1] + timedelta(
+            days=1 if _request_spills_next_day(request) else 0
+        )
+        requested_horizon = (required_end - local_today).days
+        if 0 <= requested_horizon <= _MAX_REQUEST_SEARCH_HORIZON_DAYS:
+            search_horizon = max(search_horizon, requested_horizon)
+    elif request.requested_weekdays:
+        weekday_offsets = [
+            offset
+            for requested_weekday in request.requested_weekdays
+            for offset in range(7)
+            if (local_today + timedelta(days=offset)).strftime("%A").lower()
+            == requested_weekday
+        ]
+        if weekday_offsets:
+            spill_days = 1 if _request_spills_next_day(request) else 0
+            search_horizon = max(search_horizon, max(weekday_offsets) + spill_days)
+    search_horizon = min(search_horizon, _MAX_REQUEST_SEARCH_HORIZON_DAYS)
+    end_date = local_today + timedelta(days=search_horizon)
+    complete = _coverage_contains_request(
+        request,
+        start_date=local_today,
+        end_date=end_date,
+    )
+    reason = None if complete else "requested_date_outside_search_policy"
+    return (
+        AvailabilityCoverage(
+            provider=_INTERNAL_PROVIDER,
+            start_date=local_today.isoformat(),
+            end_date=end_date.isoformat(),
+            complete=complete,
+            reason=reason,
+        ),
+        search_horizon,
+    )
+
+
+def _calendly_search_window(
+    *,
+    client: Client,
+    request: BookingTimeRequest,
+    now_utc: datetime,
+) -> tuple[datetime, datetime, AvailabilityCoverage]:
+    tz = _tzinfo(client.timezone)
+    base_start = now_utc.replace(second=0, microsecond=0) + timedelta(minutes=30)
+    start = base_start
+    end = start + timedelta(days=7)
+    bounds = _requested_date_bounds(request)
+    local_today = now_utc.astimezone(tz).date()
+    target_end: datetime | None = None
+    within_search_policy = True
+
+    if bounds is not None:
+        required_end_date = bounds[1] + timedelta(
+            days=1 if _request_spills_next_day(request) else 0
+        )
+        requested_horizon = (required_end_date - local_today).days
+        target_start = datetime.combine(bounds[0], dt_time(0, 0), tzinfo=tz).astimezone(timezone.utc)
+        if _request_spills_next_day(request):
+            overflow_minutes = _request_overflow_minutes(request)
+            overflow_hour, overflow_minute = divmod(overflow_minutes, 60)
+            target_end = datetime.combine(
+                bounds[1] + timedelta(days=1),
+                dt_time(min(overflow_hour, 23), overflow_minute),
+                tzinfo=tz,
+            ).astimezone(timezone.utc)
+        else:
+            target_end = datetime.combine(
+                bounds[1] + timedelta(days=1),
+                dt_time(0, 0),
+                tzinfo=tz,
+            ).astimezone(timezone.utc)
+        within_search_policy = (
+            bounds[0] >= local_today
+            and 0 <= requested_horizon <= _MAX_REQUEST_SEARCH_HORIZON_DAYS
+        )
+        if within_search_policy:
+            start = max(base_start, target_start)
+            end = min(start + timedelta(days=7), target_end)
+
+    coverage_start = start.astimezone(tz).date()
+    coverage_end = (end - timedelta(microseconds=1)).astimezone(tz).date()
+    complete = _coverage_contains_request(
+        request,
+        start_date=coverage_start,
+        end_date=coverage_end,
+    )
+    if target_end is not None:
+        complete = complete and within_search_policy and end >= target_end
+    reason: str | None = None
+    if not complete:
+        if bounds is not None and (bounds[1] - local_today).days > _MAX_REQUEST_SEARCH_HORIZON_DAYS:
+            reason = "requested_date_outside_search_policy"
+        else:
+            reason = "requested_window_exceeds_provider_limit"
+    coverage = AvailabilityCoverage(
+        provider="calendly",
+        start_date=coverage_start.isoformat(),
+        end_date=coverage_end.isoformat(),
+        complete=complete,
+        reason=reason,
+    )
+    return start, end, coverage
+
+
+def _request_fingerprint(request: BookingTimeRequest) -> str:
+    fingerprint = str(getattr(request, "fingerprint", "") or "").strip()
+    if fingerprint:
+        return fingerprint
+    canonical_payload = getattr(request, "to_canonical_payload", None)
+    payload = canonical_payload() if callable(canonical_payload) else request.to_payload()
+    return fingerprint_payload(payload)
+
+
+def _booking_provider_config_fingerprint(client: Client) -> str:
+    return fingerprint_payload(
+        {
+            "booking_mode": booking_mode_label(client),
+            "timezone": client.timezone or "UTC",
+            "booking_config": (
+                client.booking_config
+                if isinstance(client.booking_config, dict)
+                else {}
+            ),
+        }
+    )
+
+
+def _booking_offer_stale_reason(
+    *,
+    client: Client,
+    offer: dict[str, Any],
+    now_utc: datetime,
+) -> str | None:
+    if int(offer.get("schema_version") or 0) < 2:
+        # Preserve menus emitted immediately before this rollout. Every newly
+        # generated offer carries versioned freshness/config metadata.
+        return None
+    generated_at = _to_utc_datetime(str(offer.get("generated_at") or ""))
+    if generated_at is None:
+        return "invalid_offer_timestamp"
+    if generated_at > now_utc + timedelta(minutes=5):
+        return "invalid_offer_timestamp"
+    if now_utc - generated_at > _BOOKING_OFFER_TTL:
+        return "offer_expired"
+    expected_config = _booking_provider_config_fingerprint(client)
+    if str(offer.get("provider_config_fingerprint") or "") != expected_config:
+        return "booking_configuration_changed"
+    return None
+
+
+def _booking_offer_payload(
+    *,
+    provider: str,
+    slots: Sequence[BookingSlot],
+    request: BookingTimeRequest,
+    plan: Any,
+    coverage: AvailabilityCoverage,
+    generated_at: datetime,
+    provider_config_fingerprint: str,
+    event_type_uri: str = "",
+) -> dict[str, Any]:
+    request_fingerprint = _request_fingerprint(request)
+    planner_payload = plan.to_payload()
+    outcome = str(getattr(plan, "outcome", "") or plan.match_mode)
+    constraints_satisfied = bool(
+        getattr(plan, "constraints_satisfied", plan.fallback_reason is None)
+    )
+    stable_slots = [
+        {
+            "start_time": slot.start_time,
+            "end_time": slot.end_time,
+        }
+        for slot in slots
+    ]
+    offer_fingerprint = fingerprint_payload(
+        {
+            "provider": provider,
+            "provider_config_fingerprint": provider_config_fingerprint,
+            "request_fingerprint": request_fingerprint,
+            "outcome": outcome,
+            "constraints_satisfied": constraints_satisfied,
+            "coverage": coverage.to_payload(),
+            "slots": stable_slots,
+        }
+    )
+    status = "awaiting_confirmation" if slots and constraints_satisfied else (
+        "alternatives_available" if slots else "unavailable"
+    )
+    return {
+        "schema_version": 2,
+        "provider": provider,
+        "provider_config_fingerprint": provider_config_fingerprint,
+        "event_type_uri": event_type_uri,
+        "slots": [slot.__dict__ for slot in slots],
+        "generated_at": generated_at.isoformat(),
+        "request": request.to_payload(),
+        "request_fingerprint": request_fingerprint,
+        "offer_fingerprint": offer_fingerprint,
+        "status": status,
+        "outcome": outcome,
+        "constraints_satisfied": constraints_satisfied,
+        "coverage": coverage.to_payload(),
+        "planner": planner_payload,
+        "matched_preference": constraints_satisfied,
+        "match_mode": plan.match_mode,
+    }
+
+
 class BookingService:
     def __init__(self, timeout_seconds: int = 20) -> None:
         self._timeout_seconds = timeout_seconds
@@ -515,37 +946,47 @@ class BookingService:
         if not automated_booking_enabled(client):
             raise BookingProviderError("Automated booking is not configured for this client.")
 
+        now_utc = datetime.now(timezone.utc)
+        request = build_booking_time_request(
+            text="",
+            timezone_name=client.timezone or "UTC",
+            now_utc=now_utc,
+            source="initial_offer",
+        )
         mode = booking_mode_label(client)
         provider = "calendly"
         expanded_limit = max(limit * 12, 96)
         if mode in _INTERNAL_MODE_ALIASES:
             provider = _INTERNAL_PROVIDER
-            slots = self._list_internal_slots(client=client, limit=expanded_limit, db=db)
+            search = self._search_internal_slots(
+                client=client,
+                request=request,
+                limit=expanded_limit,
+                db=db,
+                now_utc=now_utc,
+            )
         else:
-            slots = self._list_calendly_slots(client=client, limit=expanded_limit)
-        all_available_slots = list(slots)
-        if not slots:
-            fallback = (
-                "Je ne vois pas de disponibilités pour le moment. Envoyez-moi une journée et une plage horaire, et je peux vérifier d'autres options."
-                if language == "fr"
-                else "I am not seeing open times right now. Share a day and time window and I can check alternatives."
+            search = self._search_calendly_slots(
+                client=client,
+                request=request,
+                limit=expanded_limit,
+                now_utc=now_utc,
             )
-            return SlotOffer(
-                reply_text=fallback,
-                slots=[],
-                raw_payload={"booking_offer": {"provider": provider, "slots": []}},
-            )
-
-        request = build_booking_time_request(
-            text="",
-            timezone_name=client.timezone or "UTC",
-            source="initial_offer",
-        )
+        all_available_slots = list(search.slots)
         plan = plan_booking_slots(
             slots=all_available_slots,
             request=request,
-            limit=max(1, min(limit, len(all_available_slots))),
+            limit=max(1, min(limit, len(all_available_slots) or limit)),
             timezone_name=client.timezone or "UTC",
+            searched_coverage=BookingSearchCoverage(
+                start_date=search.coverage.start_date,
+                end_date=search.coverage.end_date,
+                complete=search.coverage.complete,
+                reason=search.coverage.reason,
+            ),
+            coverage_start_date=search.coverage.start_date,
+            coverage_end_date=search.coverage.end_date,
+            coverage_complete=search.coverage.complete,
         )
         slots = _reindex_slots(plan.slots)
         coverage_summary = _availability_coverage_summary(
@@ -554,7 +995,7 @@ class BookingService:
             day_limit=3,
             language=language,
         )
-        timezone_label = self._timezone_abbreviation(client.timezone)
+        timezone_label = self._timezone_abbreviation(client.timezone, slots)
         reply_text = render_booking_slot_reply(
             slots=slots,
             request=request,
@@ -565,16 +1006,20 @@ class BookingService:
             timezone_name=client.timezone or "UTC",
         )
         raw_payload = {
-            "booking_offer": {
-                "provider": provider,
-                "event_type_uri": self._calendly_config(client)["calendly_event_type_uri"] if provider == "calendly" else "",
-                "slots": [slot.__dict__ for slot in slots],
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "request": request.to_payload(),
-                "planner": plan.to_payload(),
-                "matched_preference": plan.fallback_reason is None,
-                "match_mode": plan.match_mode,
-            }
+            "booking_offer": _booking_offer_payload(
+                provider=provider,
+                slots=slots,
+                request=request,
+                plan=plan,
+                coverage=search.coverage,
+                generated_at=now_utc,
+                provider_config_fingerprint=_booking_provider_config_fingerprint(client),
+                event_type_uri=(
+                    self._calendly_config(client)["calendly_event_type_uri"]
+                    if provider == "calendly"
+                    else ""
+                ),
+            )
         }
         return SlotOffer(reply_text=reply_text, slots=slots, raw_payload=raw_payload)
 
@@ -590,6 +1035,7 @@ class BookingService:
         range_start: str | None = None,
         range_end: str | None = None,
         request_text: str | None = None,
+        booking_request: BookingTimeRequest | None = None,
         limit: int = 3,
         db: Session | None = None,
     ) -> SlotOffer:
@@ -597,11 +1043,13 @@ class BookingService:
         if not automated_booking_enabled(client):
             raise BookingProviderError("Automated booking is not configured for this client.")
 
+        now_utc = datetime.now(timezone.utc)
         mode = booking_mode_label(client)
         provider = _INTERNAL_PROVIDER if mode in _INTERNAL_MODE_ALIASES else "calendly"
-        request = build_booking_time_request(
+        request = booking_request or build_booking_time_request(
             text=request_text or "",
             timezone_name=client.timezone or "UTC",
+            now_utc=now_utc,
             source="agent_find_slots",
             preferred_day=preferred_day,
             avoid_day=avoid_day,
@@ -615,20 +1063,40 @@ class BookingService:
         if specific_request:
             expanded_limit = max(expanded_limit, 240)
         if provider == _INTERNAL_PROVIDER:
-            slots = self._list_internal_slots(client=client, limit=expanded_limit, db=db, request=request)
+            search = self._search_internal_slots(
+                client=client,
+                request=request,
+                limit=expanded_limit,
+                db=db,
+                now_utc=now_utc,
+            )
         else:
-            slots = self._list_calendly_slots(client=client, limit=expanded_limit)
-        all_available_slots = list(slots)
+            search = self._search_calendly_slots(
+                client=client,
+                request=request,
+                limit=expanded_limit,
+                now_utc=now_utc,
+            )
+        all_available_slots = list(search.slots)
 
         plan = plan_booking_slots(
             slots=all_available_slots,
             request=request,
             limit=max(1, min(limit, len(all_available_slots) or limit)),
             timezone_name=client.timezone or "UTC",
+            searched_coverage=BookingSearchCoverage(
+                start_date=search.coverage.start_date,
+                end_date=search.coverage.end_date,
+                complete=search.coverage.complete,
+                reason=search.coverage.reason,
+            ),
+            coverage_start_date=search.coverage.start_date,
+            coverage_end_date=search.coverage.end_date,
+            coverage_complete=search.coverage.complete,
         )
         slots = plan.slots
         slots = _reindex_slots(slots)
-        timezone_label = self._timezone_abbreviation(client.timezone)
+        timezone_label = self._timezone_abbreviation(client.timezone, slots)
         coverage_summary = ""
         if not specific_request:
             coverage_summary = _availability_coverage_summary(
@@ -646,30 +1114,55 @@ class BookingService:
             coverage_summary=coverage_summary,
             timezone_name=client.timezone or "UTC",
         )
+        booking_offer = _booking_offer_payload(
+            provider=provider,
+            slots=slots,
+            request=request,
+            plan=plan,
+            coverage=search.coverage,
+            generated_at=now_utc,
+            provider_config_fingerprint=_booking_provider_config_fingerprint(client),
+            event_type_uri=(
+                self._calendly_config(client)["calendly_event_type_uri"]
+                if provider == "calendly"
+                else ""
+            ),
+        )
+        booking_offer.update(
+            {
+                "preferred_day": request.preferred_day or preferred_day,
+                "preferred_date": request.requested_dates[0] if request.requested_dates else None,
+                "avoid_day": request.avoid_weekdays[0] if request.avoid_weekdays else avoid_day,
+                "preferred_period": request.periods[0] if request.periods else preferred_period,
+                "exact_time": request.exact_time or exact_time,
+                "range_start": request.range_start or range_start,
+                "range_end": request.range_end or range_end,
+            }
+        )
         return SlotOffer(
             reply_text=reply_text,
             slots=slots,
-            raw_payload={
-                "booking_offer": {
-                    "provider": provider,
-                    "slots": [slot.__dict__ for slot in slots],
-                    "generated_at": datetime.now(timezone.utc).isoformat(),
-                    "preferred_day": request.preferred_day or preferred_day,
-                    "preferred_date": request.requested_dates[0] if request.requested_dates else None,
-                    "avoid_day": request.avoid_weekdays[0] if request.avoid_weekdays else avoid_day,
-                    "preferred_period": request.periods[0] if request.periods else preferred_period,
-                    "exact_time": request.exact_time or exact_time,
-                    "range_start": request.range_start or range_start,
-                    "range_end": request.range_end or range_end,
-                    "matched_preference": plan.fallback_reason is None,
-                    "match_mode": plan.match_mode,
-                    "request": request.to_payload(),
-                    "planner": plan.to_payload(),
-                }
-            },
+            raw_payload={"booking_offer": booking_offer},
         )
 
-    def handle_exact_time_request(
+    def matches_active_offer(
+        self,
+        *,
+        inbound_text: str,
+        active_offer: dict[str, Any] | None,
+    ) -> bool:
+        """Return whether the message selects a slot that is actually visible."""
+
+        slots = (
+            active_offer.get("slots")
+            if isinstance(active_offer, dict)
+            and isinstance(active_offer.get("slots"), list)
+            else []
+        )
+        normalized_slots = [slot for slot in slots if isinstance(slot, dict)]
+        return self._match_slot(inbound_text, normalized_slots) is not None
+
+    def handle_time_request(
         self,
         *,
         client: Client,
@@ -677,7 +1170,7 @@ class BookingService:
         inbound_text: str,
         db: Session | None = None,
     ) -> BookingSelectionResult | None:
-        """Check a newly requested future day/time before interpreting old offers."""
+        """Check a new temporal request before interpreting a stale slot offer."""
 
         raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
         has_booking_context = bool(
@@ -697,29 +1190,34 @@ class BookingService:
             text=inbound_text,
             timezone_name=client.timezone or "UTC",
             now_utc=now_utc,
-            source="deterministic_exact_time",
+            source="deterministic_time_request",
         )
-        if not request.requested_dates or request.exact_time_minutes is None:
+        if request.scope == "broad":
             return None
-        try:
-            requested_date = date.fromisoformat(request.requested_dates[0])
-        except ValueError:
-            return None
-        hour, minute = divmod(request.exact_time_minutes, 60)
-        requested_at = datetime.combine(
-            requested_date,
-            dt_time(hour=hour, minute=minute),
-            tzinfo=_tzinfo(client.timezone),
+        exact_date_time_request = bool(
+            request.requested_dates and request.exact_time_minutes is not None
         )
-        if requested_at <= now_utc.astimezone(_tzinfo(client.timezone)):
-            return None
+        if exact_date_time_request:
+            try:
+                requested_date = date.fromisoformat(request.requested_dates[0])
+            except ValueError:
+                return None
+            hour, minute = divmod(request.exact_time_minutes or 0, 60)
+            requested_at = datetime.combine(
+                requested_date,
+                dt_time(hour=hour, minute=minute),
+                tzinfo=_tzinfo(client.timezone),
+            )
+            if requested_at <= now_utc.astimezone(_tzinfo(client.timezone)):
+                return None
 
         try:
             offer = self.find_slots(
                 client=client,
                 lead=lead,
                 request_text=inbound_text,
-                limit=1,
+                booking_request=request,
+                limit=1 if exact_date_time_request else 3,
                 db=db,
             )
         except BookingProviderError as exc:
@@ -740,12 +1238,18 @@ class BookingService:
                 audit_decision={
                     "inbound": inbound_text,
                     "provider_status": exc.provider_status,
-                    "reason": "exact_time_lookup_failed",
+                    "reason": "time_request_lookup_failed",
+                    "request": request.to_payload(),
                 },
                 transition_reason="calendar_availability_handoff",
             )
 
         booking_offer = offer.raw_payload.get("booking_offer", {})
+        audit_event_type = (
+            "calendar_exact_time_checked"
+            if exact_date_time_request
+            else "calendar_time_request_checked"
+        )
         return BookingSelectionResult(
             handled=True,
             reply_text=offer.reply_text,
@@ -754,13 +1258,30 @@ class BookingService:
                 "booking_offer": booking_offer,
                 "pending_step": "slot_selection_pending" if offer.slots else None,
             },
-            audit_event_type="calendar_exact_time_checked",
+            audit_event_type=audit_event_type,
             audit_decision={
                 "inbound": inbound_text,
                 "matched_slot_count": len(offer.slots),
                 "booking_offer": booking_offer,
             },
-            transition_reason="calendar_exact_time_checked",
+            transition_reason=audit_event_type,
+        )
+
+    def handle_exact_time_request(
+        self,
+        *,
+        client: Client,
+        lead: Lead,
+        inbound_text: str,
+        db: Session | None = None,
+    ) -> BookingSelectionResult | None:
+        """Backward-compatible alias for the canonical temporal-request route."""
+
+        return self.handle_time_request(
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            db=db,
         )
 
     def book_requested_slot(
@@ -774,34 +1295,36 @@ class BookingService:
         slot_text: str | None = None,
         db: Session | None = None,
     ) -> dict[str, Any]:
-        slots = []
-        if isinstance(latest_offer, dict) and isinstance(latest_offer.get("slots"), list):
-            slots = [slot for slot in latest_offer.get("slots", []) if isinstance(slot, dict)]
-
-        matched: dict[str, Any] | None = None
-        if slot_start_time:
-            for slot in slots:
-                if str(slot.get("start_time", "")).strip() == str(slot_start_time).strip():
-                    matched = slot
-                    break
-        if matched is None and slot_index:
-            for slot in slots:
-                try:
-                    if int(slot.get("index")) == int(slot_index):
-                        matched = slot
-                        break
-                except Exception:
-                    continue
-        if matched is None and slot_text:
-            matched = self._match_slot(slot_text, slots)
-
-        if matched is None:
+        inbound_text = (
+            str(slot_text or "").strip()
+            or (f"option {slot_index}" if slot_index else "")
+            or "confirm it"
+        )
+        selection = self.handle_slot_selection(
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            history=[],
+            active_offer=latest_offer,
+            resolved_slot_index=slot_index,
+            resolved_slot_start_time=slot_start_time,
+            db=db,
+        )
+        if selection is None:
             language = client_language(client, lead=lead)
+            slots = (
+                latest_offer.get("slots", [])
+                if isinstance(latest_offer, dict)
+                and isinstance(latest_offer.get("slots"), list)
+                else []
+            )
             return {
                 "reply_text": (
-                    "Je n'ai pas pu associer ça à une des options actuelles. Je peux vérifier ce moment et envoyer de nouvelles disponibilités."
+                    "Je n'ai pas pu associer ça à une des options actuelles. "
+                    "Je peux vérifier ce moment et envoyer de nouvelles disponibilités."
                     if language == "fr"
-                    else "I couldn’t match that to one of the current call options. I can check that time and send fresh call times."
+                    else "I couldn’t match that to one of the current call options. "
+                    "I can check that time and send fresh call times."
                 ),
                 "slots": slots,
                 "runtime_payload": {
@@ -810,37 +1333,29 @@ class BookingService:
                 },
             }
 
-        offer_provider = str((latest_offer or {}).get("provider", "")).strip().lower()
-        if offer_provider == _INTERNAL_PROVIDER or booking_mode_label(client) in _INTERNAL_MODE_ALIASES:
-            booking = self._book_internal_slot(client=client, lead=lead, slot=matched, db=db)
-        else:
-            booking = self._book_calendly_slot(client=client, lead=lead, slot=matched, db=db)
-
-        was_rescheduled = bool(booking.get("rescheduled_from_booking_ids") or booking.get("rescheduled_from_event_uri"))
-        language = client_language(client, lead=lead)
-        display_time = _slot_display_from_dict(matched, timezone_name=client.timezone or "UTC", language=language)
-        if language == "fr":
-            reply_prefix = "Mis à jour. Votre appel est maintenant prévu" if was_rescheduled else "Réservé. Votre appel est prévu"
-            reply_text = f"{reply_prefix} pour {display_time}."
-            if booking.get("booking_id"):
-                reply_text = f"{reply_text[:-1]} et ajouté à notre calendrier."
-        else:
-            reply_prefix = "Updated. Your call is now set" if was_rescheduled else "Booked. Your call is set"
-            reply_text = f"{reply_prefix} for {display_time}."
-            if booking.get("booking_id"):
-                reply_text = f"{reply_text[:-1]} and saved on our calendar."
-        return {
-            "reply_text": reply_text,
-            "booking": booking,
-            "runtime_payload": {
-                "calendar_booking": {
-                    "provider": booking.get("provider", offer_provider or "calendly"),
-                    "slot": matched,
-                    "booking": booking,
-                },
-                "pending_step": None,
-            },
+        runtime_payload = dict(selection.raw_payload or {})
+        calendar_booking = runtime_payload.get("calendar_booking")
+        booking = (
+            calendar_booking.get("booking")
+            if isinstance(calendar_booking, dict)
+            and isinstance(calendar_booking.get("booking"), dict)
+            else None
+        )
+        booking_offer = runtime_payload.get("booking_offer")
+        slots = (
+            booking_offer.get("slots", [])
+            if isinstance(booking_offer, dict)
+            and isinstance(booking_offer.get("slots"), list)
+            else []
+        )
+        result: dict[str, Any] = {
+            "reply_text": selection.reply_text,
+            "slots": slots,
+            "runtime_payload": runtime_payload,
         }
+        if booking is not None:
+            result["booking"] = booking
+        return result
 
     def handle_slot_selection(
         self,
@@ -859,8 +1374,23 @@ class BookingService:
             return None
         commitment_requested = _slot_commitment_requested(inbound_text)
         resolved_selection = bool(resolved_slot_index or resolved_slot_start_time)
-        if not resolved_selection and not looks_like_slot_selection_message(inbound_text) and not commitment_requested:
+        numeric_selection = _is_numeric_slot_reply(inbound_text)
+        if not resolved_selection and not numeric_selection and not commitment_requested:
             return None
+        stale_reason = _booking_offer_stale_reason(
+            client=client,
+            offer=latest_offer,
+            now_utc=datetime.now(timezone.utc),
+        )
+        if stale_reason:
+            return self._refresh_stale_offer(
+                client=client,
+                lead=lead,
+                latest_offer=latest_offer,
+                inbound_text=inbound_text,
+                stale_reason=stale_reason,
+                db=db,
+            )
 
         slots = latest_offer.get("slots", [])
         matched: dict[str, Any] | None = None
@@ -879,18 +1409,13 @@ class BookingService:
                     continue
         if matched is None:
             matched = self._match_slot(inbound_text, slots)
-        if (
-            matched is None
-            and commitment_requested
-            and len(slots) == 1
-            and not _has_specific_time_request(inbound_text)
-        ):
-            matched = slots[0]
+        if matched is None:
+            matched = confirmed_single_offered_slot(inbound_text, slots)
         if matched is None:
             if _has_specific_time_request(inbound_text) and not _is_numeric_slot_reply(inbound_text):
                 return None
             language = client_language(client, lead=lead)
-            timezone_label = self._timezone_abbreviation(client.timezone)
+            timezone_label = self._timezone_abbreviation(client.timezone, slots)
             indexed_slots = _localized_dict_slots(slots, timezone_name=client.timezone or "UTC", language=language)
             if language == "fr":
                 lines = [
@@ -912,6 +1437,16 @@ class BookingService:
                 audit_event_type="calendar_booking_offer_repeated",
                 audit_decision={"inbound": inbound_text, "slots": indexed_slots},
                 transition_reason="calendar_booking_offer_repeated",
+            )
+        matched_start = _to_utc_datetime(str(matched.get("start_time") or ""))
+        if matched_start is None or matched_start <= datetime.now(timezone.utc):
+            return self._refresh_stale_offer(
+                client=client,
+                lead=lead,
+                latest_offer=latest_offer,
+                inbound_text=inbound_text,
+                stale_reason="selected_slot_not_future",
+                db=db,
             )
 
         offer_provider = str(latest_offer.get("provider", "")).strip().lower()
@@ -1223,6 +1758,75 @@ class BookingService:
             transition_reason="calendar_booking_created",
         )
 
+    def _refresh_stale_offer(
+        self,
+        *,
+        client: Client,
+        lead: Lead,
+        latest_offer: dict[str, Any],
+        inbound_text: str,
+        stale_reason: str,
+        db: Session | None,
+    ) -> BookingSelectionResult:
+        request_payload = (
+            latest_offer.get("request")
+            if isinstance(latest_offer.get("request"), dict)
+            else {}
+        )
+        request_text = str(request_payload.get("raw_text") or "").strip()
+        try:
+            refreshed = (
+                self.find_slots(
+                    client=client,
+                    lead=lead,
+                    request_text=request_text,
+                    db=db,
+                )
+                if request_text
+                else self.offer_slots(client=client, lead=lead, db=db)
+            )
+        except BookingProviderError as exc:
+            language = client_language(client, lead=lead, inbound_text=inbound_text)
+            return BookingSelectionResult(
+                handled=True,
+                reply_text=(
+                    "Ces options ne sont plus à jour et je n'arrive pas à revérifier le calendrier. "
+                    "Je transmets la demande à l'équipe."
+                    if language == "fr"
+                    else "Those options are no longer current and I can't recheck the calendar. "
+                    "I'm passing this to the team."
+                ),
+                next_state=ConversationStateEnum.HANDOFF,
+                raw_payload={"pending_step": None},
+                audit_event_type="calendar_booking_stale_offer_handoff",
+                audit_decision={
+                    "inbound": inbound_text,
+                    "reason": stale_reason,
+                    "provider_status": exc.provider_status,
+                },
+                transition_reason="calendar_booking_stale_offer_handoff",
+            )
+
+        booking_offer = refreshed.raw_payload.get("booking_offer", {})
+        return BookingSelectionResult(
+            handled=True,
+            reply_text=refreshed.reply_text,
+            next_state=ConversationStateEnum.BOOKING_SENT,
+            raw_payload={
+                "booking_offer": booking_offer,
+                "pending_step": (
+                    "slot_selection_pending" if refreshed.slots else None
+                ),
+            },
+            audit_event_type="calendar_booking_offer_refreshed",
+            audit_decision={
+                "inbound": inbound_text,
+                "reason": stale_reason,
+                "booking_offer": booking_offer,
+            },
+            transition_reason="calendar_booking_offer_refreshed",
+        )
+
     def _calendly_config(self, client: Client) -> dict[str, str]:
         config = client.booking_config or {}
         return {
@@ -1230,13 +1834,49 @@ class BookingService:
             "calendly_event_type_uri": str(config.get("calendly_event_type_uri", "")).strip(),
         }
 
-    def _list_calendly_slots(self, *, client: Client, limit: int) -> list[BookingSlot]:
+    def _search_calendly_slots(
+        self,
+        *,
+        client: Client,
+        request: BookingTimeRequest,
+        limit: int,
+        now_utc: datetime,
+    ) -> AvailabilitySearchResult:
+        start, end, coverage = _calendly_search_window(
+            client=client,
+            request=request,
+            now_utc=now_utc,
+        )
+        fetched_slots = self._list_calendly_slots(
+            client=client,
+            limit=min(max(1, limit) + 1, _MAX_AVAILABILITY_RESULTS + 1),
+            start=start,
+            end=end,
+        )
+        truncated = len(fetched_slots) > limit
+        slots = fetched_slots[:limit]
+        if truncated:
+            coverage = replace(
+                coverage,
+                complete=False,
+                reason="result_limit_reached",
+            )
+        return AvailabilitySearchResult(slots=slots, coverage=coverage)
+
+    def _list_calendly_slots(
+        self,
+        *,
+        client: Client,
+        limit: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[BookingSlot]:
         config = self._calendly_config(client)
         if not config["calendly_personal_access_token"] or not config["calendly_event_type_uri"]:
             raise BookingProviderError("Calendly token and event type URI are required.")
 
-        start = datetime.now(timezone.utc).replace(second=0, microsecond=0) + timedelta(minutes=30)
-        end = start + timedelta(days=7)
+        start = start or (datetime.now(timezone.utc).replace(second=0, microsecond=0) + timedelta(minutes=30))
+        end = end or (start + timedelta(days=7))
         response = self._request(
             token=config["calendly_personal_access_token"],
             method="GET",
@@ -1389,6 +2029,38 @@ class BookingService:
                 ambiguous=True,
             ) from exc
 
+    def _search_internal_slots(
+        self,
+        *,
+        client: Client,
+        request: BookingTimeRequest,
+        limit: int,
+        db: Session | None,
+        now_utc: datetime,
+    ) -> AvailabilitySearchResult:
+        coverage, search_horizon = _internal_search_coverage(
+            client=client,
+            request=request,
+            now_utc=now_utc,
+        )
+        fetched_slots = self._list_internal_slots(
+            client=client,
+            limit=min(max(1, limit) + 1, _MAX_AVAILABILITY_RESULTS + 1),
+            db=db,
+            request=request,
+            now_utc=now_utc,
+            search_horizon_days=search_horizon,
+        )
+        truncated = len(fetched_slots) > limit
+        slots = fetched_slots[:limit]
+        if truncated:
+            coverage = replace(
+                coverage,
+                complete=False,
+                reason="result_limit_reached",
+            )
+        return AvailabilitySearchResult(slots=slots, coverage=coverage)
+
     def _list_internal_slots(
         self,
         *,
@@ -1396,20 +2068,26 @@ class BookingService:
         limit: int,
         db: Session | None,
         request: BookingTimeRequest | None = None,
+        now_utc: datetime | None = None,
+        search_horizon_days: int | None = None,
     ) -> list[BookingSlot]:
         config = _internal_calendar_config(client)
         availability_rows = [row for row in config["availability"] if bool(row.get("enabled"))]
         if not availability_rows:
             raise BookingProviderError("Internal calendar availability is not configured.")
 
-        clamped_limit = max(1, min(limit, 240))
+        clamped_limit = max(1, min(limit, _MAX_AVAILABILITY_RESULTS + 1))
         slot_minutes = config["slot_minutes"]
         notice_minutes = config["notice_minutes"]
-        horizon_days = config["horizon_days"]
+        horizon_days = (
+            max(1, min(_MAX_REQUEST_SEARCH_HORIZON_DAYS, int(search_horizon_days)))
+            if search_horizon_days is not None
+            else config["horizon_days"]
+        )
 
         tz_name = client.timezone or "UTC"
         tz = _tzinfo(tz_name)
-        now_local = datetime.now(timezone.utc).astimezone(tz)
+        now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
         earliest_local = now_local + timedelta(minutes=notice_minutes)
 
         window_start_utc = earliest_local.astimezone(timezone.utc)
@@ -1522,6 +2200,15 @@ class BookingService:
             end_at = start_at + timedelta(minutes=slot_minutes)
         if end_at <= start_at:
             raise BookingProviderError("Selected slot has an invalid time range.")
+        if not _internal_slot_still_allowed(
+            client=client,
+            start_at=start_at,
+            end_at=end_at,
+            now_utc=datetime.now(timezone.utc),
+        ):
+            raise BookingProviderError(
+                "That time is no longer available under the current calendar settings."
+            )
 
         with _as_session_context(db) as session:
             duplicate = session.scalar(
@@ -1686,15 +2373,46 @@ class BookingService:
                     continue
         for slot in slots:
             variants = [item.strip() for item in str(slot.get("search_blob", "")).split("|") if item.strip()]
-            if any(variant in normalized for variant in variants):
+            if any(
+                re.search(
+                    rf"(?<!\w){re.escape(variant)}(?!\w)",
+                    normalized,
+                )
+                for variant in variants
+            ):
                 return slot
             if slot.get("display_hint"):
                 hint = _normalize_slot_text(str(slot["display_hint"]))
-                if hint and hint in normalized:
+                if hint and re.search(
+                    rf"(?<!\w){re.escape(hint)}(?!\w)",
+                    normalized,
+                ):
                     return slot
         return None
 
-    def _timezone_abbreviation(self, tz_name: str) -> str:
+    def _timezone_abbreviation(
+        self,
+        tz_name: str,
+        slots: Sequence[Any] | None = None,
+    ) -> str:
+        zone = _tzinfo(tz_name)
+        abbreviations: set[str] = set()
+        for slot in slots or ():
+            start_value = (
+                slot.get("start_time")
+                if isinstance(slot, dict)
+                else getattr(slot, "start_time", "")
+            )
+            start_at = _to_utc_datetime(str(start_value or ""))
+            if start_at is None:
+                continue
+            abbreviation = start_at.astimezone(zone).tzname()
+            if abbreviation:
+                abbreviations.add(abbreviation)
+        if len(abbreviations) == 1:
+            return next(iter(abbreviations))
+        if len(abbreviations) > 1:
+            return tz_name or "UTC"
         local_now = datetime.now(timezone.utc).astimezone(_tzinfo(tz_name))
         return local_now.tzname() or tz_name
 

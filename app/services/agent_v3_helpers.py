@@ -8,6 +8,8 @@ from typing import Any
 
 from app.db.models import Client, ConversationStateEnum, Lead, Message, MessageDirection
 from app.services.agent_v3_types import *
+from app.services.booking import looks_like_booking_commitment
+from app.services.booking_request import BookingTimeRequest, build_booking_time_request
 from app.services.i18n import normalize_language
 from app.services.lead_summary import build_lead_summary_text
 
@@ -47,6 +49,13 @@ def _is_identity_question(text: str) -> bool:
     normalized = _normalize_text(text)
     if not normalized:
         return False
+    if re.search(
+        r"\b(?:qui (?:etes[- ]?vous|es[- ]?tu)|vous etes qui|"
+        r"a qui (?:je parle|ai[- ]?je affaire)|avec qui je parle|"
+        r"je parle a qui|c est qui)\b",
+        normalized,
+    ):
+        return True
     if normalized in {"founder", "owner", "human", "person", "bot", "assistant"}:
         return True
     if "?" in str(text or "") and re.search(r"\b(founder|owner|human|person|bot|assistant)\b", normalized):
@@ -276,14 +285,22 @@ def _salient_value_terms(value: str) -> list[str]:
 
 
 def _slot_offer_tool_result(*, offer: Any, availability_query: dict[str, Any]) -> dict[str, Any]:
+    booking_offer = offer.raw_payload.get("booking_offer", {})
+    constraints_satisfied = bool(
+        booking_offer.get("constraints_satisfied", bool(offer.slots))
+    )
     pending_step = "slot_selection_pending" if offer.slots else None
     return {
-        "kind": "slots" if offer.slots else "no_slots",
+        "kind": "slots" if offer.slots and constraints_satisfied else "no_slots",
         "slots": [slot.__dict__ for slot in offer.slots],
         "reply_hint": offer.reply_text,
         "availability_query": availability_query,
+        "outcome": booking_offer.get("outcome"),
+        "match_mode": booking_offer.get("match_mode"),
+        "constraints_satisfied": constraints_satisfied,
+        "coverage": booking_offer.get("coverage"),
         "runtime_payload": {
-            "booking_offer": offer.raw_payload.get("booking_offer", {}),
+            "booking_offer": booking_offer,
             "pending_step": pending_step,
         },
         "fallback_reply": offer.reply_text,
@@ -1253,7 +1270,15 @@ def _apply_response_guardrails_with_events(
     if not clean:
         return clean, [], False
     if _reply_has_identity_violation(clean):
-        return _identity_reply(context), ["identity_violation_replaced"], True
+        replacement, intro_event = _apply_assistant_intro_policy(
+            _identity_reply(context),
+            context,
+        )
+        replacement = _enforce_response_language(replacement, context)
+        events = ["identity_violation_replaced"]
+        if intro_event:
+            events.append(intro_event)
+        return replacement, events, True
     clean = _remove_redundant_acknowledged_fact_clauses(clean, context)
     pricing_replaced = bool(
         _reply_has_budget_language(clean)
@@ -1263,9 +1288,11 @@ def _apply_response_guardrails_with_events(
         )
     )
     clean = _remove_disallowed_pricing_language(clean, context)
-    clean = _ensure_initial_intro(clean, context)
+    clean, intro_event = _apply_assistant_intro_policy(clean, context)
     clean = _enforce_response_language(clean, context)
     events = ["disallowed_pricing_replaced"] if pricing_replaced else []
+    if intro_event:
+        events.append(intro_event)
     return clean, events, pricing_replaced
 
 
@@ -1459,6 +1486,78 @@ def _ensure_initial_intro(text: str, context: dict[str, Any]) -> str:
     if normalized.startswith(_normalize_text(prefix)):
         return text
     return f"{prefix} {text}".strip()
+
+
+def _apply_assistant_intro_policy(
+    text: str,
+    context: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Enforce one unsolicited assistant introduction per conversation."""
+
+    if context.get("initial_outreach"):
+        introduced = _ensure_initial_intro(text, context)
+        event = "initial_intro_added" if introduced != text else None
+        return introduced, event
+    if context.get("identity_question"):
+        return text, None
+
+    stripped = _strip_leading_assistant_intro(text, context)
+    if stripped == text:
+        return text, None
+    if not stripped:
+        stripped = _non_booking_bridge_reply(context)
+    return stripped, "redundant_intro_removed"
+
+
+def _strip_leading_assistant_intro(text: str, context: dict[str, Any]) -> str:
+    """Remove only a leading name-and-role clause and retain its useful tail."""
+
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return clean
+    identity = (
+        context.get("agent_identity")
+        if isinstance(context.get("agent_identity"), dict)
+        else {}
+    )
+    assistant_name = str(identity.get("name") or _ASSISTANT_NAME).strip()
+    business_name = str(
+        identity.get("business_name")
+        or context.get("business_name")
+        or ""
+    ).strip()
+    if not assistant_name:
+        return clean
+
+    name_pattern = re.escape(assistant_name)
+    business_pattern = (
+        re.escape(business_name)
+        if business_name
+        else r"[^.!?]{1,120}"
+    )
+    patterns = (
+        re.compile(
+            rf"^(?:(?:bonjour|salut)(?:\s+[^,!.?]{{1,80}})?\s*,\s*)?"
+            rf"(?:(?:ici|je\s+suis)\s+{name_pattern}\b|"
+            rf"{name_pattern}\s+[àa]\s+l['’]appareil\b)"
+            rf"(?:\s*,?\s*l['’]assistant(?:e)?\s+"
+            rf"(?:d['’]|de\s+|chez\s+|pour\s+){business_pattern})?"
+            r"\s*(?:[.!]\s*|[,;:–—-]\s*|(?:et|and)\s+|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"^(?:(?:hi|hello|hey)(?:\s+[^,!.?]{{1,80}})?\s*,\s*)?"
+            rf"(?:(?:i['’]?m|i\s+am|this\s+is|my\s+name\s+is)\s+{name_pattern}\b)"
+            rf"(?:\s*,?\s*(?:the\s+)?assistant\s+(?:for|at|with)\s+{business_pattern})?"
+            r"\s*(?:[.!]\s*|[,;:–—-]\s*|(?:et|and)\s+|$)",
+            re.IGNORECASE,
+        ),
+    )
+    for pattern in patterns:
+        match = pattern.match(clean)
+        if match is not None:
+            return clean[match.end() :].lstrip(" ,;:–—-")
+    return clean
 
 
 def _initial_intro_prefix(context: dict[str, Any]) -> str:
@@ -2009,11 +2108,14 @@ def _extract_slot_choice(inbound_text: str, latest_offer: dict[str, Any] | None)
         r"(?:option\s*)?(\d+)(?:\s+(?:please|pls|svp))?",
         normalized,
     )
+    explicit_numeric_choice = numeric_choice is not None
     if numeric_choice is None:
         numeric_choice = re.search(
             r"\b(?:option|choice|slot|number)\s*#?\s*(\d+)\b",
             normalized,
         )
+    if not explicit_numeric_choice and not looks_like_booking_commitment(inbound_text):
+        return None
     if numeric_choice is not None:
         index = int(numeric_choice.group(1))
         if index in slot_indexes:
@@ -2021,7 +2123,14 @@ def _extract_slot_choice(inbound_text: str, latest_offer: dict[str, Any] | None)
     for slot in slots:
         blob = _normalize_text(str(slot.get("search_blob", "")))
         start_time = str(slot.get("start_time", "")).strip()
-        if blob and any(part.strip() and part.strip() in normalized for part in blob.split("|")):
+        if blob and any(
+            part.strip()
+            and re.search(
+                rf"(?<!\w){re.escape(part.strip())}(?!\w)",
+                normalized,
+            )
+            for part in blob.split("|")
+        ):
             return {"slot_start_time": start_time} if start_time else {}
     time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm)|\d{1,2}\s*h\s*\d{0,2})\b", normalized)
     if time_match:
@@ -2035,7 +2144,11 @@ def _extract_slot_choice(inbound_text: str, latest_offer: dict[str, Any] | None)
                     ]
                 )
             )
-            if _normalize_text(time_match.group(1)) in haystack:
+            normalized_time = _normalize_text(time_match.group(1))
+            if re.search(
+                rf"(?<!\w){re.escape(normalized_time)}(?!\w)",
+                haystack,
+            ):
                 start_time = str(slot.get("start_time", "")).strip()
                 return {"slot_start_time": start_time} if start_time else {}
     return None
@@ -2046,61 +2159,53 @@ def _normalize_optional_string(value: Any) -> str | None:
     return text or None
 
 
-def _extract_booking_preferences(text: str) -> dict[str, str]:
-    normalized = _normalize_text(text)
-    if not normalized:
-        return {}
-
+def _booking_preferences_from_request(request: BookingTimeRequest) -> dict[str, str]:
+    normalized = _normalize_text(request.raw_text)
     preferences: dict[str, str] = {}
-    day_name = next((day for day in _DAY_NAMES if day in normalized), None)
-    unavailable = any(
-        phrase in normalized
-        for phrase in (
-            "not available",
-            "dont work",
-            "doesnt work",
-            "can't do",
-            "cant do",
-            "won't work",
-            "wont work",
-            "not free",
+    day_name = next(
+        (
+            day
+            for day in _DAY_NAMES
+            if re.search(rf"\b{re.escape(day)}\b", normalized)
+        ),
+        None,
+    )
+    if request.requested_dates:
+        preferences["preferred_day"] = day_name or request.preferred_day or request.requested_dates[0]
+    elif request.requested_weekdays:
+        preferences["preferred_day"] = day_name or request.requested_weekdays[0]
+    if request.avoid_weekdays:
+        preferences["avoid_day"] = day_name or request.avoid_weekdays[0]
+    if request.periods:
+        preferences["preferred_period"] = request.periods[0]
+    if request.exact_time:
+        raw_time = re.search(
+            r"\b(?:noon|midi|midnight|minuit|\d{1,2}(?::\d{2})?\s?(?:am|pm)|\d{1,2}\s*h\s*\d{0,2})\b",
+            normalized,
         )
-    )
-    if day_name:
-        if unavailable:
-            preferences["avoid_day"] = day_name
-        else:
-            preferences["preferred_day"] = day_name
-
-    date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", normalized)
-    if date_match and "preferred_day" not in preferences and "avoid_day" not in preferences:
-        inferred_day = _normalize_requested_day(date_match.group(1))
-        if inferred_day:
-            preferences["preferred_day"] = inferred_day
-
-    if "morning" in normalized:
-        preferences["preferred_period"] = "morning"
-    elif "afternoon" in normalized:
-        preferences["preferred_period"] = "afternoon"
-    elif "evening" in normalized:
-        preferences["preferred_period"] = "evening"
-
-    range_match = re.search(
-        r"\b(?:between|from|entre|de)\s+(\d{1,2}(?::\d{2}|\s*h\s*\d{0,2})?\s*(?:am|pm)?)\s+(?:and|to|et|à|a)\s+(\d{1,2}(?::\d{2}|\s*h\s*\d{0,2})?\s*(?:am|pm)?)\b",
-        normalized,
-    )
-    if range_match:
-        start_raw = range_match.group(1).strip()
-        end_raw = range_match.group(2).strip()
-        range_pair = _normalize_time_range(start_raw, end_raw)
-        if range_pair:
-            preferences["range_start"], preferences["range_end"] = range_pair
-
-    time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s?(?:am|pm)|\d{1,2}\s*h\s*\d{0,2})\b", normalized)
-    if time_match and "range_start" not in preferences:
-        preferences["exact_time"] = time_match.group(1)
-
+        preferences["exact_time"] = (
+            raw_time.group(0).strip()
+            if raw_time is not None
+            else request.exact_time.lower()
+        )
+    if request.range_start:
+        preferences["range_start"] = request.range_start.lower()
+    if request.range_end:
+        preferences["range_end"] = request.range_end.lower()
     return preferences
+
+
+def _extract_booking_preferences(
+    text: str,
+    *,
+    timezone_name: str = "UTC",
+) -> dict[str, str]:
+    request = build_booking_time_request(
+        text=text,
+        timezone_name=timezone_name,
+        source="agent_inbound_context",
+    )
+    return _booking_preferences_from_request(request)
 
 
 def _latest_outbound_text(recent_messages: Any) -> str | None:

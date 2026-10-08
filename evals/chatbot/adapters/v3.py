@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
@@ -34,6 +35,7 @@ from app.db.models import (
     Client,
     ConversationStateEnum,
     Lead,
+    LeadTask,
     LeadSource,
     Message,
     MessageDirection,
@@ -44,9 +46,12 @@ from app.services.booking import (
     BookingSelectionResult,
     BookingSlot,
     SlotOffer,
+    confirmed_single_offered_slot,
     looks_like_booking_commitment,
     looks_like_slot_selection_message,
 )
+from app.services.booking_copy import render_exact_slot_confirmation
+from app.services.booking_request import build_booking_time_request
 from app.services.i18n import client_language, format_datetime_for_language
 from app.services.inbound_sms import process_inbound_turn
 from app.services.sms_service import build_mock_sms_service
@@ -303,6 +308,12 @@ class AdapterTurnResult:
     booking_created: bool = False
     handoff_requested: bool = False
     tool_calls: tuple[dict[str, Any], ...] = ()
+    total_lead_task_count: int | None = None
+    total_booking_event_count: int | None = None
+    total_outbound_message_count: int | None = None
+    booking_confirmation_unknown: bool | None = None
+    handoff_reason: str | None = None
+    lead_source: str | None = None
     provider: str = ""
     provider_error: str | None = None
     conversation_act: str | None = None
@@ -432,6 +443,20 @@ class DeterministicBookingService:
             )
         else:
             reply = reply or _localized_value(self.world.get("offer_reply"), language)
+            if not reply and exact_time and len(slots) == 1:
+                # Reuse production copy for a verified exact fixture match.
+                # Fixtures supply calendar data, not a separate dialogue policy.
+                request = build_booking_time_request(text="", exact_time=exact_time, timezone_name=client.timezone)
+                start = datetime.fromisoformat(slots[0].start_time.replace("Z", "+00:00"))
+                local = start.astimezone(ZoneInfo(client.timezone or "UTC"))
+                if (
+                    request.exact_time_minutes == local.hour * 60 + local.minute
+                    and _filter_slots(slots, arguments)
+                ):
+                    reply = render_exact_slot_confirmation(
+                        slot=slots[0], timezone_label=local.tzname() or client.timezone,
+                        language=language, timezone_name=client.timezone,
+                    )
             reply = reply or _render_offer_reply(slots, language=language, timezone_name=client.timezone)
         offer = {
             "provider": "eval",
@@ -591,6 +616,8 @@ class DeterministicBookingService:
             slot_start_time=resolved_slot_start_time,
             slot_text=inbound_text,
         )
+        if selected is None:
+            selected = confirmed_single_offered_slot(inbound_text, slots)
         if selected is None:
             # A specific new time belongs back in the normal Agent V3 path so
             # it can ask find_slots instead of pretending it matched an offer.
@@ -953,6 +980,16 @@ class V3ScenarioAdapter:
             provider = underlying_provider
         provider_error = str(raw_agent.get("provider_error") or "").strip() or None
         lead_payload = current_lead.raw_payload if isinstance(current_lead.raw_payload, dict) else {}
+        handoff_payload = (
+            lead_payload.get("handoff")
+            if isinstance(lead_payload.get("handoff"), dict)
+            else {}
+        )
+        handoff_reason = str(
+            raw_agent.get("handoff_reason")
+            or handoff_payload.get("reason")
+            or ""
+        ).strip() or None
         pending_step = metadata.get("pending_step_after")
         if pending_step is None:
             pending_step = lead_payload.get("pending_step")
@@ -1004,6 +1041,40 @@ class V3ScenarioAdapter:
             booking_created=booking_created,
             handoff_requested=handoff_requested,
             tool_calls=tuple(_logical_tool_calls(model_tools, booking_tools)),
+            total_lead_task_count=len(
+                self.db.scalars(
+                    select(LeadTask).where(LeadTask.lead_id == current_lead.id)
+                ).all()
+            ),
+            total_booking_event_count=len(
+                self.db.scalars(
+                    select(AuditLog).where(
+                        AuditLog.lead_id == current_lead.id,
+                        AuditLog.event_type == "calendar_booking_created",
+                    )
+                ).all()
+            ),
+            total_outbound_message_count=len(
+                self.db.scalars(
+                    select(Message).where(
+                        Message.lead_id == current_lead.id,
+                        Message.direction == MessageDirection.OUTBOUND,
+                    )
+                ).all()
+            ),
+            booking_confirmation_unknown=_strict_optional_bool(
+                (
+                    lead_payload["booking_confirmation_unknown"]
+                    if "booking_confirmation_unknown" in lead_payload
+                    else metadata.get("booking_confirmation_unknown", False)
+                )
+            ),
+            handoff_reason=handoff_reason,
+            lead_source=(
+                current_lead.source.value
+                if getattr(current_lead, "source", None) is not None
+                else None
+            ),
             provider=provider,
             provider_error=provider_error,
             conversation_act=conversation_act,
@@ -1462,6 +1533,24 @@ def _parse_datetime(value: Any, *, default: datetime) -> datetime:
 def _safe_identifier(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
     return (normalized or "scenario")[:32]
+
+
+def _strict_optional_bool(value: Any) -> bool | None:
+    """Parse persisted JSON booleans without Python truthiness surprises."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return None
 
 
 def _bounded_metadata(value: Any, *, depth: int = 0) -> Any:

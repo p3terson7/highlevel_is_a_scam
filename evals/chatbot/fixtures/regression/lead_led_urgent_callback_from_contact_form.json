@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "id": "lead_led_urgent_callback_from_contact_form",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["lead-led", "callback", "contact-form", "urgent", "no-reintro"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Northstar Product Studio",
+    "tone": "direct, calm, and useful",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "What deadline must the finished design meet?",
+      "Who else is involved in approving the project?"
+    ],
+    "booking_mode": "internal",
+    "fallback_handoff_number": "+14165550188",
+    "faq_context": "Urgent prospects may call the published team number at +1 416 555 0188. The assistant must not promise when a team member will return a call.",
+    "ai_context": "When a lead directly requests a callback, stop the qualification script and route the request to human attention. Do not invent a callback time or guarantee availability."
+  },
+  "lead": {
+    "full_name": "Jordan Example",
+    "email": "jordan.callback@example.test",
+    "phone": "+15145550131",
+    "city": "Montréal",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "project_narrative_42": "I am launching a new company and need a long-term technical partner for the design and development of a precision consumer product. The first project involves several custom mechanical components, production-ready CAD files, supplier coordination, and prototype review. I have already spent more than a year preparing the concept and would like to discuss feasibility, responsibilities, and the fastest responsible path to a first prototype with someone on your team."
+    },
+    "raw_payload": {
+      "lead_language": "en"
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Hi Jordan, I'm Hermes, the assistant for Northstar Product Studio. What deadline must the finished design meet?",
+      "raw_payload": {
+        "initial_outreach": true,
+        "agent": {
+          "next_question_key": "urgency_driver"
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "This is time-sensitive. Please call me directly as soon as possible.",
+      "replay_outputs": [],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "HANDOFF",
+        "expected_action": "handoff_to_human",
+        "allowed_actions": ["handoff_to_human"],
+        "allowed_conversation_acts": ["handoff"],
+        "expected_next_states": ["HANDOFF"],
+        "allowed_resolution_paths": ["pre_llm_handoff_policy", "agent_handoff_tool"],
+        "must_include": ["team", "+14165550188"],
+        "any_of": ["precision product", "precision-product", "technical partner", "prototype"],
+        "must_not_include": [
+          "I'm Hermes",
+          "this is Hermes",
+          "deadline must the finished design meet",
+          "who else is involved",
+          "will call you",
+          "within 5 minutes",
+          "guaranteed",
+          "already booked"
+        ],
+        "forbidden_claims": [
+          "A team member is guaranteed to call within a specific amount of time.",
+          "A callback or appointment has already happened."
+        ],
+        "forbidden_tools": ["find_slots", "book_slot", "mark_booked"],
+        "max_questions": 0,
+        "max_chars": 320,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": true,
+        "expected_handoff_reason": "explicit_human_request",
+        "expected_total_lead_task_count": 1,
+        "expected_total_booking_event_count": 0,
+        "expected_total_outbound_message_count": 2,
+        "expected_booking_confirmation_unknown": false,
+        "expected_lead_source": "manual",
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Treat the direct callback request as the lead's active goal and suspend the qualification script.",
+          "Create exactly one durable callback task and enter terminal handoff so automation cannot compete with human follow-up.",
+          "Acknowledge the precision-product request from the long arbitrary contact-form field instead of treating the callback as context-free.",
+          "Do not reintroduce the assistant or promise an unverified response time."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}
