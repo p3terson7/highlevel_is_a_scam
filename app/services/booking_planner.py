@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timezone
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo
 
@@ -31,8 +31,14 @@ class BookingPlanResult:
     considered_count: int
     selected_count: int
     fallback_reason: str | None = None
+    outcome: str = ""
+    constraints_satisfied: bool = False
+    matching_slots: list[Any] = field(default_factory=list)
+    alternative_slots: list[Any] = field(default_factory=list)
+    searched_coverage: BookingSearchCoverage | None = None
 
     def to_payload(self) -> dict[str, Any]:
+        coverage = self.searched_coverage
         return {
             "strategy": self.strategy,
             "match_mode": self.match_mode,
@@ -40,6 +46,33 @@ class BookingPlanResult:
             "considered_count": self.considered_count,
             "selected_count": self.selected_count,
             "fallback_reason": self.fallback_reason,
+            "outcome": self.outcome,
+            "constraints_satisfied": self.constraints_satisfied,
+            "matching_count": len(self.matching_slots),
+            "alternative_count": len(self.alternative_slots),
+            "coverage_start_date": coverage.start_date if coverage else None,
+            "coverage_end_date": coverage.end_date if coverage else None,
+            "coverage_complete": coverage.complete if coverage else True,
+            "coverage_reason": coverage.reason if coverage else None,
+            "searched_coverage": coverage.to_payload() if coverage else None,
+        }
+
+
+@dataclass(frozen=True)
+class BookingSearchCoverage:
+    """The provider window that was actually searched for this request."""
+
+    start_date: str | None = None
+    end_date: str | None = None
+    complete: bool = True
+    reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "complete": self.complete,
+            "reason": self.reason,
         }
 
 
@@ -49,8 +82,33 @@ def plan_booking_slots(
     request: BookingTimeRequest,
     limit: int,
     timezone_name: str,
+    searched_coverage: BookingSearchCoverage | None = None,
+    coverage_start_date: str | None = None,
+    coverage_end_date: str | None = None,
+    coverage_complete: bool = True,
 ) -> BookingPlanResult:
+    if searched_coverage is None and (
+        coverage_start_date is not None or coverage_end_date is not None or not coverage_complete
+    ):
+        searched_coverage = BookingSearchCoverage(
+            start_date=coverage_start_date,
+            end_date=coverage_end_date,
+            complete=coverage_complete,
+        )
     views = _slot_views(slots, timezone_name=timezone_name)
+    if _request_needs_clarification(request):
+        return BookingPlanResult(
+            slots=[],
+            strategy="needs_clarification",
+            match_mode="none",
+            candidate_count=0,
+            considered_count=len(views),
+            selected_count=0,
+            fallback_reason="incomplete_time_request",
+            outcome="needs_clarification",
+            constraints_satisfied=False,
+            searched_coverage=searched_coverage,
+        )
     considered = _without_avoided_weekdays(views, request)
     limit = max(1, min(limit, len(considered) or limit))
     if not considered:
@@ -62,98 +120,289 @@ def plan_booking_slots(
             considered_count=len(views),
             selected_count=0,
             fallback_reason="no_slots_after_avoidance",
+            outcome=_unmatched_outcome(request, searched_coverage),
+            constraints_satisfied=False,
+            searched_coverage=searched_coverage,
         )
 
     if request.scope in {"specific_date", "specific_dates"} and request.requested_dates:
-        return _plan_for_specific_dates(views=considered, request=request, limit=limit)
+        result = _plan_for_specific_dates(views=considered, request=request, limit=limit)
+        return _with_coverage(result, request=request, coverage=searched_coverage)
 
     if request.scope == "date_range" and request.date_range_start and request.date_range_end:
-        return _plan_for_date_range(views=considered, request=request, limit=limit)
+        result = _plan_for_date_range(views=considered, request=request, limit=limit)
+        return _with_coverage(result, request=request, coverage=searched_coverage)
 
     if request.scope == "weekday_recurring" and request.requested_weekdays:
-        return _plan_for_weekdays(views=considered, request=request, limit=limit)
+        result = _plan_for_weekdays(views=considered, request=request, limit=limit)
+        return _with_coverage(result, request=request, coverage=searched_coverage)
 
     if request.scope == "time_only":
-        return _plan_for_time_only(views=considered, request=request, limit=limit)
+        result = _plan_for_time_only(views=considered, request=request, limit=limit)
+        return _with_coverage(result, request=request, coverage=searched_coverage)
 
-    return _plan_broad(views=considered, limit=limit)
+    return _with_coverage(
+        _plan_broad(views=considered, limit=limit),
+        request=request,
+        coverage=searched_coverage,
+    )
 
 
 def _plan_for_specific_dates(*, views: list[SlotView], request: BookingTimeRequest, limit: int) -> BookingPlanResult:
     requested = set(request.requested_dates)
-    same_date = [view for view in views if view.date_iso in requested]
-    if not same_date:
+    date_candidates = _views_for_anchor_dates(
+        views,
+        anchor_dates=requested,
+        request=request,
+    )
+    if not date_candidates:
         selected = _select_closest_to_requested_dates(views, requested_dates=request.requested_dates, limit=limit)
-        return _result(selected, "specific_date", "closest_alternative", len(same_date), len(views), "no_slots_on_requested_date")
+        return _result(
+            selected,
+            "specific_date",
+            "closest_alternative",
+            0,
+            len(views),
+            "no_slots_on_requested_date",
+            outcome="unavailable_within_coverage",
+            constraints_satisfied=False,
+        )
 
-    exact = _filter_exact_time(same_date, request)
+    exact = _filter_exact_time(date_candidates, request)
     if exact:
         selected = _select_nearest_time(exact, request.exact_time_minutes, limit=limit)
-        return _result(selected, "specific_date_exact_time", "exact_time", len(exact), len(views))
+        return _result(
+            selected,
+            "specific_date_exact_time",
+            "exact_time",
+            len(exact),
+            len(views),
+            outcome="exact_available",
+            constraints_satisfied=True,
+        )
 
-    windowed = _filter_time_window(same_date, request)
+    windowed = _filter_time_window(
+        date_candidates,
+        request,
+        anchor_dates=requested,
+    )
     if windowed:
         selected = _select_within_dates(windowed, limit=limit, prefer_spread=not request.has_time_constraint or request.all_day)
-        return _result(selected, "specific_date_window", _time_match_mode(request), len(windowed), len(views))
+        return _result(
+            selected,
+            "specific_date_window",
+            _time_match_mode(request),
+            len(windowed),
+            len(views),
+            outcome="requested_window_available",
+            constraints_satisfied=True,
+        )
 
     if request.has_time_constraint:
-        selected = _select_same_day_alternatives(same_date, request=request, limit=limit)
-        return _result(selected, "specific_date_alternative", "same_day_alternative", len(same_date), len(views), "requested_time_unavailable")
+        selected = _select_same_day_alternatives(date_candidates, request=request, limit=limit)
+        return _result(
+            selected,
+            "specific_date_alternative",
+            "same_day_alternative",
+            0,
+            len(views),
+            "requested_time_unavailable",
+            outcome="unavailable_within_coverage",
+            constraints_satisfied=False,
+        )
 
-    selected = _select_within_dates(same_date, limit=limit, prefer_spread=True)
-    return _result(selected, "specific_date", "same_day", len(same_date), len(views))
+    selected = _select_within_dates(date_candidates, limit=limit, prefer_spread=True)
+    return _result(
+        selected,
+        "specific_date",
+        "same_day",
+        len(date_candidates),
+        len(views),
+        outcome="requested_window_available",
+        constraints_satisfied=True,
+    )
 
 
 def _plan_for_date_range(*, views: list[SlotView], request: BookingTimeRequest, limit: int) -> BookingPlanResult:
-    ranged = [view for view in views if str(request.date_range_start) <= view.date_iso <= str(request.date_range_end)]
+    anchor_dates = _date_range_values(
+        request.date_range_start,
+        request.date_range_end,
+    )
+    ranged = _views_for_anchor_dates(
+        views,
+        anchor_dates=anchor_dates,
+        request=request,
+    )
     if not ranged:
         selected = _select_closest_to_requested_dates(views, requested_dates=[str(request.date_range_start)], limit=limit)
-        return _result(selected, "date_range", "closest_alternative", 0, len(views), "no_slots_in_requested_range")
-    windowed = _filter_time_window(ranged, request)
+        return _result(
+            selected,
+            "date_range",
+            "closest_alternative",
+            0,
+            len(views),
+            "no_slots_in_requested_range",
+            outcome="unavailable_within_coverage",
+            constraints_satisfied=False,
+        )
+    windowed = _filter_time_window(
+        ranged,
+        request,
+        anchor_dates=anchor_dates,
+    )
     if windowed:
         selected = _select_broad_spread(windowed, limit=limit)
-        return _result(selected, "date_range_window", _time_match_mode(request), len(windowed), len(views))
+        return _result(
+            selected,
+            "date_range_window",
+            _time_match_mode(request),
+            len(windowed),
+            len(views),
+            outcome="requested_window_available",
+            constraints_satisfied=True,
+        )
     if request.has_time_constraint:
         selected = _select_broad_spread(ranged, limit=limit)
-        return _result(selected, "date_range_alternative", "closest_in_range", len(ranged), len(views), "requested_time_unavailable")
+        return _result(
+            selected,
+            "date_range_alternative",
+            "closest_in_range",
+            0,
+            len(views),
+            "requested_time_unavailable",
+            outcome="unavailable_within_coverage",
+            constraints_satisfied=False,
+        )
     selected = _select_broad_spread(ranged, limit=limit)
-    return _result(selected, "date_range", "date_range", len(ranged), len(views))
+    return _result(
+        selected,
+        "date_range",
+        "date_range",
+        len(ranged),
+        len(views),
+        outcome="requested_window_available",
+        constraints_satisfied=True,
+    )
 
 
 def _plan_for_weekdays(*, views: list[SlotView], request: BookingTimeRequest, limit: int) -> BookingPlanResult:
     weekdays = set(request.requested_weekdays)
-    matching = [view for view in views if view.weekday in weekdays]
+    anchor_dates = {
+        view.date_iso
+        for view in views
+        if view.weekday in weekdays
+    }
+    if _is_overnight_range(request):
+        for view in views:
+            previous_date = view.start_local.date() - timedelta(days=1)
+            if previous_date.strftime("%A").lower() in weekdays:
+                anchor_dates.add(previous_date.isoformat())
+    matching = _views_for_anchor_dates(
+        views,
+        anchor_dates=anchor_dates,
+        request=request,
+    )
     if not matching:
         selected = _select_broad_spread(views, limit=limit)
-        return _result(selected, "weekday_recurring", "closest_alternative", 0, len(views), "no_slots_on_requested_weekday")
-    windowed = _filter_time_window(matching, request)
+        return _result(
+            selected,
+            "weekday_recurring",
+            "closest_alternative",
+            0,
+            len(views),
+            "no_slots_on_requested_weekday",
+            outcome="unavailable_within_coverage",
+            constraints_satisfied=False,
+        )
+    windowed = _filter_time_window(
+        matching,
+        request,
+        anchor_dates=anchor_dates,
+    )
     if windowed:
-        matching = windowed
-        match_mode = _time_match_mode(request)
+        selected = _select_earliest_day_then_fill(windowed, limit=limit)
+        return _result(
+            selected,
+            "weekday_recurring",
+            _time_match_mode(request),
+            len(windowed),
+            len(views),
+            outcome="requested_window_available",
+            constraints_satisfied=True,
+        )
     elif request.has_time_constraint:
-        match_mode = "same_weekday_alternative"
-    else:
-        match_mode = "weekday"
+        selected = _select_earliest_day_then_fill(matching, limit=limit)
+        return _result(
+            selected,
+            "weekday_recurring",
+            "same_weekday_alternative",
+            0,
+            len(views),
+            "requested_time_unavailable",
+            outcome="unavailable_within_coverage",
+            constraints_satisfied=False,
+        )
     selected = _select_earliest_day_then_fill(matching, limit=limit)
-    return _result(selected, "weekday_recurring", match_mode, len(matching), len(views))
+    return _result(
+        selected,
+        "weekday_recurring",
+        "weekday",
+        len(matching),
+        len(views),
+        outcome="requested_window_available",
+        constraints_satisfied=True,
+    )
 
 
 def _plan_for_time_only(*, views: list[SlotView], request: BookingTimeRequest, limit: int) -> BookingPlanResult:
     exact = _filter_exact_time(views, request)
     if exact:
         selected = _select_broad_spread(exact, limit=limit)
-        return _result(selected, "time_only_exact", "exact_time", len(exact), len(views))
+        return _result(
+            selected,
+            "time_only_exact",
+            "exact_time",
+            len(exact),
+            len(views),
+            outcome="exact_available",
+            constraints_satisfied=True,
+        )
     windowed = _filter_time_window(views, request)
     if windowed:
         selected = _select_broad_spread(windowed, limit=limit)
-        return _result(selected, "time_only_window", _time_match_mode(request), len(windowed), len(views))
+        return _result(
+            selected,
+            "time_only_window",
+            _time_match_mode(request),
+            len(windowed),
+            len(views),
+            outcome="requested_window_available",
+            constraints_satisfied=True,
+        )
     selected = _select_broad_spread(views, limit=limit)
-    return _result(selected, "time_only_alternative", "closest_alternative", 0, len(views), "requested_time_unavailable")
+    return _result(
+        selected,
+        "time_only_alternative",
+        "closest_alternative",
+        0,
+        len(views),
+        "requested_time_unavailable",
+        outcome="unavailable_within_coverage",
+        constraints_satisfied=False,
+    )
 
 
 def _plan_broad(*, views: list[SlotView], limit: int) -> BookingPlanResult:
     selected = _select_broad_spread(views, limit=limit)
-    return _result(selected, "broad_coverage", "broad_coverage", len(views), len(views))
+    return _result(
+        selected,
+        "broad_coverage",
+        "broad_coverage",
+        len(views),
+        len(views),
+        outcome="broad_availability",
+        constraints_satisfied=True,
+    )
 
 
 def _slot_views(slots: Sequence[Any], *, timezone_name: str) -> list[SlotView]:
@@ -195,19 +444,98 @@ def _filter_exact_time(views: list[SlotView], request: BookingTimeRequest) -> li
     return [view for view in views if view.minutes == request.exact_time_minutes]
 
 
-def _filter_time_window(views: list[SlotView], request: BookingTimeRequest) -> list[SlotView]:
+def _filter_time_window(
+    views: list[SlotView],
+    request: BookingTimeRequest,
+    *,
+    anchor_dates: set[str] | None = None,
+) -> list[SlotView]:
     if request.exact_time_minutes is not None:
         return _filter_exact_time(views, request)
     filtered = list(views)
-    if request.range_start_minutes is not None:
-        filtered = [view for view in filtered if view.minutes >= request.range_start_minutes]
-    if request.range_end_minutes is not None:
-        end = request.range_end_minutes % (24 * 60)
-        filtered = [view for view in filtered if view.minutes <= end]
+    start = request.range_start_minutes
+    end = request.range_end_minutes
+    if start is not None and end is not None and end > 24 * 60:
+        overflow_end = end - 24 * 60
+        if anchor_dates:
+            filtered = [
+                view
+                for view in filtered
+                if (
+                    view.date_iso in anchor_dates
+                    and view.minutes >= start
+                )
+                or (
+                    (
+                        view.start_local.date() - timedelta(days=1)
+                    ).isoformat()
+                    in anchor_dates
+                    and view.minutes <= overflow_end
+                )
+            ]
+        else:
+            filtered = [
+                view
+                for view in filtered
+                if view.minutes >= start or view.minutes <= overflow_end
+            ]
+    else:
+        if start is not None:
+            filtered = [view for view in filtered if view.minutes >= start]
+        if end is not None:
+            filtered = [
+                view
+                for view in filtered
+                if view.minutes <= min(end, 24 * 60 - 1)
+            ]
     if request.periods:
         periods = set(request.periods)
         filtered = [view for view in filtered if view.period in periods]
     return filtered
+
+
+def _is_overnight_range(request: BookingTimeRequest) -> bool:
+    return bool(
+        request.range_start_minutes is not None
+        and request.range_end_minutes is not None
+        and request.range_end_minutes > 24 * 60
+    )
+
+
+def _views_for_anchor_dates(
+    views: list[SlotView],
+    *,
+    anchor_dates: set[str],
+    request: BookingTimeRequest,
+) -> list[SlotView]:
+    if not anchor_dates:
+        return []
+    if not _is_overnight_range(request):
+        return [view for view in views if view.date_iso in anchor_dates]
+    spill_dates = {
+        (parsed + timedelta(days=1)).isoformat()
+        for raw_date in anchor_dates
+        if (parsed := _parse_date(raw_date)) is not None
+    }
+    return [
+        view
+        for view in views
+        if view.date_iso in anchor_dates or view.date_iso in spill_dates
+    ]
+
+
+def _date_range_values(
+    start_raw: str | None,
+    end_raw: str | None,
+) -> set[str]:
+    start = _parse_date(start_raw)
+    end = _parse_date(end_raw)
+    if start is None or end is None or end < start:
+        return set()
+    return {
+        (start + timedelta(days=offset)).isoformat()
+        for offset in range((end - start).days + 1)
+    }
 
 
 def _select_within_dates(views: list[SlotView], *, limit: int, prefer_spread: bool) -> list[SlotView]:
@@ -350,16 +678,133 @@ def _result(
     candidate_count: int,
     considered_count: int,
     fallback_reason: str | None = None,
+    *,
+    outcome: str,
+    constraints_satisfied: bool,
 ) -> BookingPlanResult:
+    selected_slots = [view.slot for view in selected]
     return BookingPlanResult(
-        slots=[view.slot for view in selected],
+        slots=selected_slots,
         strategy=strategy,
         match_mode=match_mode,
         candidate_count=candidate_count,
         considered_count=considered_count,
         selected_count=len(selected),
         fallback_reason=fallback_reason,
+        outcome=outcome,
+        constraints_satisfied=constraints_satisfied,
+        matching_slots=selected_slots if constraints_satisfied else [],
+        alternative_slots=[] if constraints_satisfied else selected_slots,
     )
+
+
+def _with_coverage(
+    result: BookingPlanResult,
+    *,
+    request: BookingTimeRequest,
+    coverage: BookingSearchCoverage | None,
+) -> BookingPlanResult:
+    outcome = result.outcome
+    if not result.constraints_satisfied and outcome == "unavailable_within_coverage":
+        outcome = _unmatched_outcome_for_coverage(request, coverage)
+    return replace(result, outcome=outcome, searched_coverage=coverage)
+
+
+def _unmatched_outcome(
+    request: BookingTimeRequest,
+    coverage: BookingSearchCoverage | None,
+) -> str:
+    if request.scope == "broad" and not request.avoid_weekdays:
+        return "no_availability"
+    return _unmatched_outcome_for_coverage(request, coverage)
+
+
+def _unmatched_outcome_for_coverage(
+    request: BookingTimeRequest,
+    coverage: BookingSearchCoverage | None,
+) -> str:
+    if coverage is not None and (not coverage.complete or not _coverage_contains_request(coverage, request)):
+        return "outside_search_coverage"
+    return "unavailable_within_coverage"
+
+
+def _coverage_contains_request(
+    coverage: BookingSearchCoverage,
+    request: BookingTimeRequest,
+) -> bool:
+    start = _parse_date(coverage.start_date)
+    end = _parse_date(coverage.end_date)
+    if start is None or end is None:
+        return True
+
+    if request.requested_dates:
+        targets = [_parse_date(raw) for raw in request.requested_dates]
+        spill_days = 1 if _is_overnight_range(request) else 0
+        return all(
+            target is not None
+            and start <= target
+            and target + timedelta(days=spill_days) <= end
+            for target in targets
+        )
+    if request.date_range_start or request.date_range_end:
+        range_start = _parse_date(request.date_range_start)
+        range_end = _parse_date(request.date_range_end)
+        if range_end is not None and _is_overnight_range(request):
+            range_end += timedelta(days=1)
+        return (
+            range_start is not None
+            and range_end is not None
+            and start <= range_start
+            and range_end <= end
+        )
+    if request.requested_weekdays:
+        requested_indexes = {_weekday_index(day) for day in request.requested_weekdays}
+        requested_indexes.discard(None)
+        latest_anchor = end - timedelta(days=1) if _is_overnight_range(request) else end
+        covered_indexes: set[int] = set()
+        current = start
+        while current <= latest_anchor:
+            if current.weekday() in requested_indexes:
+                covered_indexes.add(current.weekday())
+            current = date.fromordinal(current.toordinal() + 1)
+        return covered_indexes == requested_indexes
+    return True
+
+
+def _parse_date(raw: str | None) -> date | None:
+    if raw is None:
+        return None
+    try:
+        return date.fromisoformat(str(raw))
+    except ValueError:
+        return None
+
+
+def _weekday_index(day: str) -> int | None:
+    weekdays = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    normalized = str(day or "").strip().lower()
+    try:
+        return weekdays.index(normalized)
+    except ValueError:
+        return None
+
+
+def _request_needs_clarification(request: BookingTimeRequest) -> bool:
+    if {
+        "ambiguous_time",
+        "ambiguous_numeric_date",
+        "multiple_temporal_clauses",
+        "weekday_date_mismatch",
+        "negated_time_constraint",
+    } & set(request.reasons):
+        return True
+    if request.scope in {"specific_date", "specific_dates"}:
+        return not request.requested_dates
+    if request.scope == "date_range":
+        return not (request.date_range_start and request.date_range_end)
+    if request.scope == "weekday_recurring":
+        return not request.requested_weekdays
+    return False
 
 
 def _time_match_mode(request: BookingTimeRequest) -> str:

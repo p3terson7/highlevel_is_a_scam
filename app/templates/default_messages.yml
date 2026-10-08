@@ -1,4 +1,4 @@
-initial_sms: "Hi {first_name}, thanks for reaching out to {business_name}. I can help you quickly. {consent_text}"
+initial_sms: "Hi {first_name}, I'm {assistant_name}, the assistant for {business_name}. Thanks for reaching out. I can help you quickly. {consent_text}"
 after_hours: "Thanks for messaging {business_name}. We are currently offline and will reply during business hours."
 follow_up: "Quick follow-up from {business_name}: if you are ready, pick a time here {booking_url}"
 stop_confirmation: "You are unsubscribed and will no longer receive messages. Reply START to re-subscribe."

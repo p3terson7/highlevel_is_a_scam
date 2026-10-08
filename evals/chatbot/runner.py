@@ -75,6 +75,32 @@ def _enum_value(value: Any) -> str | None:
     return text or None
 
 
+def _optional_count(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return None
+
+
 def _turn_observation(adapter_turn: Any) -> TurnObservation:
     tool_calls = getattr(adapter_turn, "tool_calls", ()) or ()
     return TurnObservation(
@@ -88,6 +114,20 @@ def _turn_observation(adapter_turn: Any) -> TurnObservation:
         booking_created=bool(getattr(adapter_turn, "booking_created", False)),
         handoff_requested=bool(getattr(adapter_turn, "handoff_requested", False)),
         tool_calls=tuple(dict(item) for item in tool_calls if isinstance(item, dict)),
+        total_lead_task_count=_optional_count(
+            getattr(adapter_turn, "total_lead_task_count", None)
+        ),
+        total_booking_event_count=_optional_count(
+            getattr(adapter_turn, "total_booking_event_count", None)
+        ),
+        total_outbound_message_count=_optional_count(
+            getattr(adapter_turn, "total_outbound_message_count", None)
+        ),
+        booking_confirmation_unknown=_optional_bool(
+            getattr(adapter_turn, "booking_confirmation_unknown", None)
+        ),
+        handoff_reason=_enum_value(getattr(adapter_turn, "handoff_reason", None)),
+        lead_source=_enum_value(getattr(adapter_turn, "lead_source", None)),
     )
 
 

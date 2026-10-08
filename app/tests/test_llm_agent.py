@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -8,7 +9,7 @@ from app.services.agent_v3_helpers import _apply_response_guardrails, _extract_s
 from app.services.booking import BookingProviderError, BookingSlot, SlotOffer
 from app.services.knowledge import KnowledgeContextResult, KnowledgeRetrievalQuery
 from app.services.llm_agent import LLMAgent
-from app.workers.tasks import _meta_initial_seed_text
+from app.services.initial_outreach import initial_seed_text
 
 
 class FailingProvider:
@@ -1169,7 +1170,7 @@ def test_internal_form_type_is_excluded_from_agent_context_and_meta_seed():
     )
     agent = agent_v3_module.LLMAgentV3(provider=FailingProvider())
 
-    seed = _meta_initial_seed_text(lead)
+    seed = initial_seed_text(lead)
     context = agent._build_context(
         client=_client(),
         lead=lead,
@@ -1223,7 +1224,7 @@ def test_meta_initial_french_reply_replaces_clear_english_provider_draft():
     response = LLMAgent(provider=EnglishDraftForFrenchLeadProvider()).next_reply(
         client=_client(),
         lead=lead,
-        inbound_text=_meta_initial_seed_text(lead),
+        inbound_text=initial_seed_text(lead),
         history=[],
     )
 
@@ -1830,6 +1831,53 @@ def test_initial_outreach_strips_generic_meeting_cta_but_keeps_question():
     assert "deadline or key date" in text
     assert "line up a strategy call" not in text
     assert response.reply_text.count("?") == 1
+
+
+def test_initial_outreach_is_derived_from_prior_outbound_not_total_history():
+    agent = agent_v3_module.LLMAgentV3(provider=FailingProvider())
+    client = _client()
+    lead = _lead()
+    current_inbound = Message(
+        direction=MessageDirection.INBOUND,
+        body="Bonjour, voici ma demande.",
+    )
+
+    first_reply_context = agent._build_context(
+        client=client,
+        lead=lead,
+        inbound_text=current_inbound.body,
+        history=[current_inbound],
+    )
+
+    assert first_reply_context["initial_outreach"] is True
+    assert first_reply_context["has_prior_outbound"] is False
+    assert first_reply_context["outbound_turn_count"] == 0
+
+    prior_outbound = Message(
+        direction=MessageDirection.OUTBOUND,
+        body="Bonjour, ici Hermes, l'assistante de Survey North.",
+    )
+    later_reply_context = agent._build_context(
+        client=client,
+        lead=lead,
+        inbound_text=current_inbound.body,
+        history=[prior_outbound, current_inbound],
+    )
+
+    assert later_reply_context["initial_outreach"] is False
+    assert later_reply_context["has_prior_outbound"] is True
+    assert later_reply_context["outbound_turn_count"] == 1
+
+    lead.last_outbound_at = datetime(2026, 8, 22, 15, 0, tzinfo=timezone.utc)
+    durable_context = agent._build_context(
+        client=client,
+        lead=lead,
+        inbound_text=current_inbound.body,
+        history=[current_inbound],
+    )
+
+    assert durable_context["initial_outreach"] is False
+    assert durable_context["has_prior_outbound"] is True
 
 
 def test_medium_intent_lead_clarifies_before_booking():

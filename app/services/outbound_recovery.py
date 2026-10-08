@@ -15,7 +15,6 @@ _REENQUEUE_AFTER = timedelta(minutes=10)
 _DEFAULT_MAX_ATTEMPTS = 3
 _RECOVERABLE_KINDS = {
     "automated_initial_sms",
-    "automated_followup_sms",
     "zapier_booking_webhook",
 }
 
@@ -33,6 +32,12 @@ class OutboundRecoveryResult:
     pending_marked_ambiguous: int
     dead_lettered: int
     retry_directives: tuple[OutboundRetryDirective, ...]
+
+
+def is_retired_after_hours_outreach(request_kind: str, reason: str) -> bool:
+    return request_kind == "automated_followup_sms" or (
+        request_kind == "automated_initial_sms" and reason == "after_hours_initial_sms_sent"
+    )
 
 
 def reconcile_stale_outbound_requests(
@@ -107,6 +112,18 @@ def reconcile_stale_outbound_requests(
                 reason="ambiguous_delivery_not_retriable",
             )
             dead_lettered += 1
+            continue
+
+        # Failed legacy after-hours sends must not be revived after the 24/7
+        # rollout. Pending/ambiguous outcomes retain the reconciliation above.
+        if is_retired_after_hours_outreach(record.request_kind, str(response.get("reason") or "")):
+            record.status = "cancelled"
+            record.response_json = {**response, "safe_to_retry": False, "recovery_state": "after_hours_automation_retired"}
+            record.updated_at = observed_at
+            _add_recovery_audit(
+                db=db, record=record, event_type="outbound_delivery_recovery_cancelled",
+                reason="after_hours_automation_retired",
+            )
             continue
 
         attempt_count = _positive_int(

@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "id": "french_friday_noon_uses_requested_slot",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["french", "booking", "specific-time", "calendar-grounding"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Atelier Démo",
+    "tone": "direct, utile et concis",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Quel est votre échéancier?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "Les appels de consultation durent 30 minutes. Toute disponibilité doit provenir du calendrier connecté.",
+    "ai_context": "Lorsqu'un prospect propose une date et une heure, vérifier précisément ce créneau avant de répondre."
+  },
+  "lead": {
+    "full_name": "Alex Exemple",
+    "email": "alex.friday@example.test",
+    "phone": "+14165550123",
+    "city": "Québec",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "message": "Projet mécanique urgent nécessitant un échange avec l'équipe."
+    },
+    "raw_payload": {
+      "lead_language": "fr"
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Souhaitez-vous que je vous aide à planifier un appel?",
+      "raw_payload": {
+        "agent": {
+          "action": "offer_booking"
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "Oui, êtes-vous disponibles vendredi prochain à midi?",
+      "replay_outputs": [
+        {
+          "reply_text": "",
+          "next_state": "BOOKING_SENT",
+          "conversation_act": "offer_slots",
+          "lead_intent": "disponibilite_vendredi_midi",
+          "confidence": 0.99,
+          "reasoning_summary": "Le prospect demande explicitement le vendredi suivant à midi.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Projet mécanique",
+            "timeline": "Urgent",
+            "locations": "Québec",
+            "decision_makers": null,
+            "urgency_driver": "Projet urgent",
+            "booking_intent_locked": true
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "find_slots",
+            "args": {
+              "preferred_day": "friday",
+              "exact_time": "12:00",
+              "limit": 3
+            }
+          }
+        },
+        {
+          "reply_text": "Le créneau demandé est disponible : vendredi 17 juillet à 12 h 00. Souhaitez-vous le réserver?",
+          "next_state": "BOOKING_SENT",
+          "conversation_act": "offer_slots",
+          "lead_intent": "disponibilite_vendredi_midi",
+          "confidence": 0.99,
+          "reasoning_summary": "La réponse présente uniquement le créneau retourné par le calendrier.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Projet mécanique",
+            "timeline": "Urgent",
+            "locations": "Québec",
+            "decision_makers": null,
+            "urgency_driver": "Projet urgent",
+            "booking_intent_locked": true
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "BOOKING_SENT",
+        "expected_action": "none",
+        "expected_pending_step": "slot_selection_pending",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["offer_slots"],
+        "expected_next_states": ["BOOKING_SENT"],
+        "must_include": ["vendredi 17 juillet", "12 h 00"],
+        "must_not_include": ["lundi", "9 h 00", "déjà réservé", "confirmé"],
+        "tool": {
+          "proposed_name": "find_slots",
+          "args_subset": {
+            "preferred_day": "friday",
+            "exact_time": "12:00"
+          },
+          "max_calls": 1
+        },
+        "visible_slot_indexes": [1],
+        "max_questions": 1,
+        "max_chars": 320,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": ["find_slots"],
+        "max_tool_calls": 1
+      }
+    }
+  ],
+  "tool_world": {
+    "booking_reference": "eval-friday-noon-1",
+    "slots": [
+      {
+        "start": "2026-07-17T12:00:00-04:00",
+        "end": "2026-07-17T12:30:00-04:00",
+        "display_time": "vendredi 17 juillet à 12 h 00"
+      }
+    ]
+  }
+}

@@ -9,11 +9,13 @@ from app.db.session import get_session_factory
 from app.services.agent_v3 import LLMAgentV3
 from app.services.agent_v3_helpers import (
     _apply_response_guardrails,
+    _apply_response_guardrails_with_events,
     _answer_then_explicit_expert_meeting_offer,
     _count_meeting_suggestions,
     _ensure_slot_fallback_line,
     _extract_from_form_answers,
     _has_booking_intent,
+    _is_identity_question,
     _lead_asked_question,
     _latest_outbound_invites_meeting,
     _message_invites_meeting,
@@ -23,7 +25,7 @@ from app.services.agent_v3_helpers import (
     _trim_sms_text,
 )
 from app.services.agent_v3_types import _HANDOFF_PATTERN, _PRICING_PATTERN
-from app.services.booking import BookingService
+from app.services.booking import BookingService, handoff_suffix
 from app.services.i18n import client_language, detect_language, format_datetime_for_language, remember_lead_language
 from app.services.lead_intake import normalize_webhook_payload
 from app.services.lead_summary import normalize_form_answers
@@ -33,6 +35,39 @@ from app.services.sms_service import SMSService, load_default_templates
 class DummyProvider:
     def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
         raise RuntimeError("not used")
+
+
+@pytest.mark.parametrize("language", ["fr", "en"])
+@pytest.mark.parametrize("draft", ["", "Which slot would you like to book at 7:00 PM?"])
+def test_booking_clarification_uses_saved_locale_and_calendar_facts(language, draft):
+    from app.services.inbound_sms import _booking_clarification_result
+
+    client = Client(timezone="America/Toronto", provider_config={"language": "en"})
+    lead = Lead(raw_payload={"lead_language": "en"})
+    if language == "fr":
+        remember_lead_language(client, lead, inbound_text="Réponds-moi seulement en français.")
+    offer = {"slots": [
+        {"index": 1, "start_time": "2026-07-17T13:00:00Z", "display_time": "Fri Jul 17 at 9:00 AM"},
+        {"index": 2, "start_time": "2026-07-17T15:00:00Z", "display_time": "Fri Jul 17 at 11:00 AM"},
+    ]}
+    result = _booking_clarification_result(
+        client=client, lead=lead, inbound_text="OK", active_offer=offer,
+        resolution={"decision": "ask_clarification", "reply_text": draft},
+    )
+    assert result.next_state == ConversationStateEnum.BOOKING_SENT
+    assert result.raw_payload["active_booking_offer"] == offer
+    assert result.raw_payload["pending_step"] == "slot_selection_pending"
+    assert "7:00" not in result.reply_text
+    if language == "fr":
+        assert "Quel créneau" in result.reply_text
+        assert "vendredi 17 juillet à 9 h 00" in result.reply_text
+        assert "vendredi 17 juillet à 11 h 00" in result.reply_text
+        assert "AM" not in result.reply_text
+        assert "Which" not in result.reply_text
+    else:
+        assert "Which time" in result.reply_text
+        assert "9:00 AM" in result.reply_text
+        assert "11:00 AM" in result.reply_text
 
 
 class DummySmsProvider:
@@ -316,8 +351,9 @@ def test_sms_templates_render_in_workspace_language(test_context):
 
         body = service.render_template(client, "initial_sms", context={"first_name": "Marc"})
 
-        assert body.startswith("Bonjour Marc")
-        assert "merci d’avoir contacté" in body
+        assert body.startswith("Bonjour Marc, ici Hermes")
+        assert "l’assistante de" in body
+        assert "Merci de nous avoir contactés" in body
 
 
 def test_internal_booking_offer_uses_french_copy_and_time_format(test_context):
@@ -445,6 +481,131 @@ def test_initial_french_intro_is_still_added_when_model_omits_it():
 
     assert reply.startswith("Bonjour Big, ici Hermes, l'assistante de 3D PreciScan.")
     assert _normalize_text(reply).count("ici hermes") == 1
+
+
+@pytest.mark.parametrize(
+    ("draft", "expected"),
+    [
+        (
+            "Bonjour Jean, ici Hermes, l'assistant d'Atelier Démo. Quel est votre échéancier?",
+            "Quel est votre échéancier?",
+        ),
+        (
+            "Je suis Hermes, l'assistante de Atelier Démo. Voici la réponse utile.",
+            "Voici la réponse utile.",
+        ),
+        (
+            "Hermes à l'appareil. Voici la réponse utile.",
+            "Voici la réponse utile.",
+        ),
+        (
+            "Hi Jean, I'm Hermes, the assistant for Atelier Démo. What timeline are you targeting?",
+            "What timeline are you targeting?",
+        ),
+    ],
+)
+def test_later_reply_removes_only_leading_assistant_reintroduction(
+    draft: str,
+    expected: str,
+):
+    reply, events, replaced = _apply_response_guardrails_with_events(
+        draft,
+        {
+            "initial_outreach": False,
+            "identity_question": False,
+            "response_language": "fr" if "Hermes, l'" in draft or "appareil" in draft else "en",
+            "business_name": "Atelier Démo",
+            "agent_identity": {
+                "name": "Hermes",
+                "business_name": "Atelier Démo",
+            },
+            "pricing_context_available": False,
+            "pricing_question": False,
+            "intent_level": "MEDIUM_INTENT",
+            "cta_state": {},
+        },
+    )
+
+    assert reply == expected
+    assert "redundant_intro_removed" in events
+    assert replaced is False
+
+
+def test_later_reply_preserves_identity_answer_and_ordinary_name_mention():
+    base_context = {
+        "initial_outreach": False,
+        "response_language": "fr",
+        "business_name": "Atelier Démo",
+        "agent_identity": {
+            "name": "Hermes",
+            "business_name": "Atelier Démo",
+        },
+        "pricing_context_available": False,
+        "pricing_question": False,
+        "intent_level": "MEDIUM_INTENT",
+        "cta_state": {},
+    }
+    identity_reply = "Ici Hermes, l'assistante d'Atelier Démo. Je peux répondre ici."
+    ordinary_mention = "Hermes peut transmettre le contexte à l'équipe."
+
+    assert _apply_response_guardrails(
+        identity_reply,
+        {**base_context, "identity_question": True},
+    ) == identity_reply
+    assert _apply_response_guardrails(
+        ordinary_mention,
+        {**base_context, "identity_question": False},
+    ) == ordinary_mention
+
+
+def test_later_intro_only_draft_falls_back_to_nonempty_copy_without_reintroducing():
+    reply, events, _ = _apply_response_guardrails_with_events(
+        "Ici Hermes, l'assistante d'Atelier Démo.",
+        {
+            "initial_outreach": False,
+            "identity_question": False,
+            "response_language": "fr",
+            "business_name": "Atelier Démo",
+            "agent_identity": {
+                "name": "Hermes",
+                "business_name": "Atelier Démo",
+            },
+            "pricing_context_available": False,
+            "pricing_question": False,
+            "intent_level": "LOW_INTENT",
+            "cta_state": {},
+        },
+    )
+
+    assert reply
+    assert "hermes" not in _normalize_text(reply)
+    assert "redundant_intro_removed" in events
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["Qui êtes-vous?", "À qui je parle?", "C'est qui?"],
+)
+def test_french_identity_questions_are_detected(question: str):
+    assert _is_identity_question(question) is True
+
+
+def test_handoff_suffix_uses_explicit_turn_language(test_context):
+    SessionLocal = get_session_factory()
+    with SessionLocal() as db:
+        client = db.scalar(
+            select(Client).where(Client.client_key == test_context.client_key)
+        )
+        assert client is not None
+        client.fallback_handoff_number = "+14165550199"
+        client.provider_config = {}
+
+        french = handoff_suffix(client, language="fr")
+        english = handoff_suffix(client, language="en")
+
+    assert french == " Pour une aide immédiate, appelez le +14165550199."
+    assert "For immediate help" not in french
+    assert english == " For immediate help, call +14165550199."
 
 
 def test_agent_context_and_prompt_include_response_language(test_context):

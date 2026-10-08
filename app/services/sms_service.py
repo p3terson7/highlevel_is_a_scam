@@ -14,6 +14,7 @@ from twilio.rest import Client as TwilioClient
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.db.models import Client
+from app.services.agent_v3_types import ASSISTANT_NAME
 from app.services.i18n import client_language, normalize_language
 from app.services.sms_delivery import (
     twilio_status_callback_url,
@@ -209,6 +210,7 @@ class SMSService:
         localized_key = f"{language}:{template_key}"
         template = merged.get(localized_key) or merged.get(template_key, "")
         values: dict[str, Any] = {
+            "assistant_name": ASSISTANT_NAME,
             "business_name": client.business_name,
             "booking_url": client.booking_url,
             "consent_text": client.consent_text,

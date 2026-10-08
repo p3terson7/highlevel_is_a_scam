@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "id": "duplicate_intro_after_initial_sms",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["identity", "initial-outreach", "contact-form", "french"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Atelier Démo",
+    "tone": "direct, utile et concis",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Quel est votre échéancier?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "L'équipe peut rappeler les prospects qui demandent un échange direct.",
+    "ai_context": "Répondre en français et ne jamais se présenter une deuxième fois."
+  },
+  "lead": {
+    "full_name": "Jean Exemple",
+    "email": "jean.exemple@example.test",
+    "phone": "+14165550121",
+    "city": "Montréal",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "message": "Je cherche un service de conception CAO et de rétro-ingénierie pour reproduire plusieurs petites pièces en 3D."
+    },
+    "raw_payload": {
+      "lead_language": "fr"
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Bonjour Jean, ici Hermes, l'assistant d'Atelier Démo. Êtes-vous la personne qui coordonne le projet? Répondez STOP pour vous désabonner.",
+      "raw_payload": {
+        "initial_outreach": true
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "Oui, c'est bien moi.",
+      "replay_outputs": [
+        {
+          "reply_text": "Bonjour Jean, ici Hermes, l'assistant d'Atelier Démo. Quel est votre échéancier?",
+          "next_state": "QUALIFYING",
+          "conversation_act": "nurture",
+          "lead_intent": "decisionnaire_confirme",
+          "confidence": 0.98,
+          "reasoning_summary": "Le prospect demande un rappel, mais la réponse générée recommence l'introduction.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Conception CAO et rétro-ingénierie",
+            "timeline": null,
+            "locations": "Montréal",
+            "decision_makers": "Oui, c'est bien moi.",
+            "urgency_driver": null,
+            "booking_intent_locked": false
+          },
+          "next_question_key": "urgency_driver",
+          "action": "ask_next_question",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "QUALIFYING",
+        "allowed_actions": ["ask_next_question", "none"],
+        "allowed_conversation_acts": ["nurture"],
+        "expected_next_states": ["QUALIFYING"],
+        "must_not_include": ["ici Hermes", "l'assistant d'Atelier Démo"],
+        "max_questions": 1,
+        "max_chars": 280,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_tool_names": [],
+        "max_tool_calls": 0
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}

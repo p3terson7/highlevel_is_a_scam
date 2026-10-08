@@ -15,7 +15,7 @@ _MEETING_CTA_PATTERN = re.compile(
     r"\b(?:"
     r"book(?:ing)?|schedule|meeting|appointment|consultation|calendar|"
     r"available\s+times?|availability|time\s+slots?|send\s+(?:me\s+)?times?|"
-    r"réserv(?:er|ez|ation|é)|rendez[- ]vous|rencontre|appel|disponibilit(?:é|és)|"
+    r"réserv(?:e|er|ez|ation|é)|rendez[- ]vous|rencontre|appel|disponibilit(?:é|és)|"
     r"créneau(?:x)?|planifi(?:er|ez)|calendrier"
     r")\b",
     re.IGNORECASE,
@@ -552,6 +552,140 @@ def grade_turn(
                 ),
                 observed=observation.handoff_requested,
                 expected=expectation.handoff_expected,
+            )
+        )
+
+    if expectation.expected_total_lead_task_count is not None:
+        observed_count = observation.total_lead_task_count
+        supported = observed_count is not None
+        passed = supported and observed_count == expectation.expected_total_lead_task_count
+        checks.append(
+            _check(
+                category="side_effects",
+                code="total_lead_task_count",
+                passed=passed,
+                detail=(
+                    "adapter did not expose the cumulative lead task count"
+                    if not supported
+                    else f"cumulative lead task count was {observed_count}"
+                    if passed
+                    else (
+                        f"cumulative lead task count was {observed_count}, expected "
+                        f"{expectation.expected_total_lead_task_count}"
+                    )
+                ),
+                observed=observed_count,
+                expected=expectation.expected_total_lead_task_count,
+            )
+        )
+
+    if expectation.expected_total_booking_event_count is not None:
+        observed_count = observation.total_booking_event_count
+        supported = observed_count is not None
+        passed = supported and observed_count == expectation.expected_total_booking_event_count
+        checks.append(
+            _check(
+                category="side_effects",
+                code="total_booking_event_count",
+                passed=passed,
+                detail=(
+                    "adapter did not expose the cumulative booking event count"
+                    if not supported
+                    else f"cumulative booking event count was {observed_count}"
+                    if passed
+                    else (
+                        f"cumulative booking event count was {observed_count}, expected "
+                        f"{expectation.expected_total_booking_event_count}"
+                    )
+                ),
+                observed=observed_count,
+                expected=expectation.expected_total_booking_event_count,
+            )
+        )
+
+    if expectation.expected_total_outbound_message_count is not None:
+        observed_count = observation.total_outbound_message_count
+        supported = observed_count is not None
+        passed = supported and observed_count == expectation.expected_total_outbound_message_count
+        checks.append(
+            _check(
+                category="side_effects",
+                code="total_outbound_message_count",
+                passed=passed,
+                detail=(
+                    "adapter did not expose the cumulative outbound message count"
+                    if not supported
+                    else f"cumulative outbound message count was {observed_count}"
+                    if passed
+                    else (
+                        f"cumulative outbound message count was {observed_count}, expected "
+                        f"{expectation.expected_total_outbound_message_count}"
+                    )
+                ),
+                observed=observed_count,
+                expected=expectation.expected_total_outbound_message_count,
+            )
+        )
+
+    if expectation.expected_booking_confirmation_unknown is not None:
+        observed_unknown = observation.booking_confirmation_unknown
+        supported = observed_unknown is not None
+        passed = supported and observed_unknown is expectation.expected_booking_confirmation_unknown
+        checks.append(
+            _check(
+                category="booking",
+                code="booking_confirmation_unknown",
+                passed=passed,
+                detail=(
+                    "adapter did not expose the booking ambiguity marker"
+                    if not supported
+                    else "booking ambiguity marker matched expectation"
+                    if passed
+                    else (
+                        "booking_confirmation_unknown was "
+                        f"{observed_unknown}"
+                    )
+                ),
+                observed=observed_unknown,
+                expected=expectation.expected_booking_confirmation_unknown,
+            )
+        )
+
+    if expectation.expected_handoff_reason is not None:
+        observed_reason = _normalize_optional(observation.handoff_reason)
+        expected_reason = _normalize_optional(expectation.expected_handoff_reason)
+        passed = observed_reason == expected_reason
+        checks.append(
+            _check(
+                category="handoff",
+                code="handoff_reason",
+                passed=passed,
+                detail=(
+                    f"handoff reason matched {expectation.expected_handoff_reason}"
+                    if passed
+                    else f"handoff reason was {observation.handoff_reason or 'unset'}"
+                ),
+                observed=observation.handoff_reason,
+                expected=expectation.expected_handoff_reason,
+            )
+        )
+
+    if expectation.expected_lead_source is not None:
+        observed_source = _normalize_optional(observation.lead_source)
+        expected_source = _normalize_optional(expectation.expected_lead_source)
+        passed = observed_source == expected_source
+        checks.append(
+            _check(
+                category="attribution",
+                code="lead_source",
+                passed=passed,
+                detail=(
+                    f"lead source matched {expectation.expected_lead_source}"
+                    if passed
+                    else f"lead source was {observation.lead_source or 'unset'}"
+                ),
+                observed=observation.lead_source,
+                expected=expectation.expected_lead_source,
             )
         )
 

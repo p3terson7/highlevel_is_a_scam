@@ -97,6 +97,12 @@ def test_richer_expectations_parse_without_turning_semantics_into_snapshots() ->
             "max_calls": 1,
         },
         "max_ctas": 1,
+        "expected_total_lead_task_count": 1,
+        "expected_total_booking_event_count": 0,
+        "expected_total_outbound_message_count": 2,
+        "expected_booking_confirmation_unknown": True,
+        "expected_handoff_reason": "explicit_human_request",
+        "expected_lead_source": "linkedin",
     }
 
     expectation = EvalScenario.from_dict(payload).turns[0].expect
@@ -107,6 +113,12 @@ def test_richer_expectations_parse_without_turning_semantics_into_snapshots() ->
     assert expectation.visible_slot_indexes == (1, 2)
     assert expectation.max_meeting_ctas == 1
     assert expectation.max_ctas == 1
+    assert expectation.expected_total_lead_task_count == 1
+    assert expectation.expected_total_booking_event_count == 0
+    assert expectation.expected_total_outbound_message_count == 2
+    assert expectation.expected_booking_confirmation_unknown is True
+    assert expectation.expected_handoff_reason == "explicit_human_request"
+    assert expectation.expected_lead_source == "linkedin"
     assert expectation.tool == ToolExpectation(
         proposed_name="find_slots",
         args_subset={"preferred_day": "tuesday"},

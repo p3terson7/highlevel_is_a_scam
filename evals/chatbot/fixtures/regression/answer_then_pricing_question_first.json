@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "id": "answer_then_pricing_question_first",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["lead-led", "answer-first", "pricing", "grounding", "script-interruption"],
+  "risk": "high",
+  "tenant": {
+    "business_name": "Atlas Technical Services",
+    "tone": "direct, factual, and concise",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "Are you the person coordinating the project?",
+      "What project deadline are you working toward?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "The standard initial feasibility review covers a 45-minute technical review and a written next-step summary.",
+    "ai_context": "Pricing: The standard initial feasibility review costs $250 CAD. This is the only confirmed price. Answer a lead's direct question before returning to qualification."
+  },
+  "lead": {
+    "full_name": "Taylor Example",
+    "email": "taylor.pricing@example.test",
+    "phone": "+15145550133",
+    "city": "Laval",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "service_interest": "Technical feasibility review"
+    },
+    "raw_payload": {
+      "lead_language": "en"
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Are you the person coordinating the project?",
+      "raw_payload": {
+        "agent": {
+          "next_question_key": "decision_makers"
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "Yes, I'm the owner. Before we go further, what does the standard initial feasibility review cost?",
+      "replay_outputs": [
+        {
+          "reply_text": "Thanks, I noted that you're the owner. What project deadline are you working toward?",
+          "next_state": "QUALIFYING",
+          "conversation_act": "nurture",
+          "lead_intent": "answers_decision_maker_and_asks_pricing",
+          "confidence": 0.96,
+          "reasoning_summary": "The draft incorrectly advances the qualification script without answering the new pricing question.",
+          "uses_knowledge_context": false,
+          "collected_fields": {
+            "service_needed": "Technical feasibility review",
+            "timeline": null,
+            "locations": "Laval",
+            "decision_makers": "Owner",
+            "urgency_driver": null,
+            "booking_intent_locked": false
+          },
+          "next_question_key": "urgency_driver",
+          "action": "ask_next_question",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "QUALIFYING",
+        "expected_action": "none",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["answer_question"],
+        "expected_next_states": ["QUALIFYING"],
+        "allowed_resolution_paths": ["agent_v3"],
+        "must_include": ["initial feasibility review", "$250 CAD"],
+        "must_not_include": [
+          "what project deadline",
+          "when do you need",
+          "consultation call",
+          "book",
+          "appointment"
+        ],
+        "required_facts": [
+          "The standard initial feasibility review costs $250 CAD.",
+          "The response uses the configured price rather than inventing another amount."
+        ],
+        "forbidden_claims": [
+          "The review has a different price.",
+          "A meeting or booking is required to learn the configured price."
+        ],
+        "forbidden_tools": ["find_slots", "book_slot", "mark_booked", "handoff_to_human"],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 280,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_total_lead_task_count": 0,
+        "expected_total_outbound_message_count": 2,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Recognize both the qualification answer and the lead's new direct question.",
+          "Answer the pricing question first from configured tenant facts instead of advancing the stale script."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}

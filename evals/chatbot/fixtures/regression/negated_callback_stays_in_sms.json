@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "id": "negated_callback_stays_in_sms",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["lead-led", "negation", "callback", "handoff", "sms"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Harbour Operations",
+    "tone": "clear, respectful, and concise",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "How many locations need support?",
+      "When would you like the work completed?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "The team can continue answering project questions by SMS. A phone call is optional.",
+    "ai_context": "Respect channel preferences. Negated callback or human-request wording must not trigger a callback, handoff, or booking."
+  },
+  "lead": {
+    "full_name": "Morgan Example",
+    "email": "morgan.sms@example.test",
+    "phone": "+14165550132",
+    "city": "Toronto",
+    "state": "QUALIFYING",
+    "form_answers": {
+      "service_interest": "Operations workflow review"
+    },
+    "raw_payload": {
+      "lead_language": "en"
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Would you like someone from the team to call you, or would you rather continue here by text?",
+      "raw_payload": {
+        "agent": {
+          "action": "none"
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "No, do not call me and I do not want a human handoff. Please keep helping me here by text.",
+      "replay_outputs": [
+        {
+          "reply_text": "Understood. We can continue here by text. What would you like me to clarify?",
+          "next_state": "QUALIFYING",
+          "conversation_act": "nurture",
+          "lead_intent": "continue_by_sms",
+          "confidence": 0.99,
+          "reasoning_summary": "The lead explicitly rejected a callback and human handoff while asking to continue in the current channel.",
+          "uses_knowledge_context": true,
+          "collected_fields": {
+            "service_needed": "Operations workflow review",
+            "timeline": null,
+            "locations": "Toronto",
+            "decision_makers": null,
+            "urgency_driver": null,
+            "booking_intent_locked": false
+          },
+          "next_question_key": null,
+          "action": "none",
+          "tool_call": {
+            "name": "none",
+            "args": {}
+          }
+        }
+      ],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "QUALIFYING",
+        "expected_action": "none",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["answer_question", "nurture"],
+        "expected_next_states": ["QUALIFYING"],
+        "allowed_resolution_paths": ["agent_v3"],
+        "must_include": ["continue", "by text"],
+        "must_not_include": ["call", "human", "transfer", "hand off", "appointment", "book"],
+        "forbidden_claims": [
+          "The lead requested or accepted a callback.",
+          "The conversation has been transferred to a person."
+        ],
+        "forbidden_tools": ["handoff_to_human", "find_slots", "book_slot", "mark_booked"],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 1,
+        "max_chars": 240,
+        "max_meeting_ctas": 0,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_total_lead_task_count": 0,
+        "expected_total_outbound_message_count": 2,
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Interpret callback and human keywords within the scope of their negation.",
+          "Continue helping in the requested SMS channel without scheduling or escalation."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": []
+  }
+}

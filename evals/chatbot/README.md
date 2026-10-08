@@ -4,6 +4,11 @@ This directory contains synthetic, repository-local evaluations for the producti
 
 The adapter runs the real inbound conversation pipeline, including persistence, guardrails, state transitions, memory, and booking orchestration. SMS and calendar boundaries are local fakes. Replay mode also replaces the model response with fixture data; live mode is the only mode that calls OpenAI.
 
+The calendar fake reuses production exact-slot confirmation copy and single-slot
+affirmative selection. A real internal-calendar SMS integration test also covers
+exact-time lookup, confirmation, and duplicate-webhook booking safety, so this
+contract is checked beyond the fake calendar.
+
 ## Corpus layout
 
 - `fixtures/smoke/`: known-green, fast checks for every pull request.
@@ -22,6 +27,13 @@ The initial corpus covers:
 - Suppression of a repeated meeting CTA.
 - Clarification when a slot reference is ambiguous.
 - Refusal of prompt-injection and synthetic data-exfiltration requests.
+
+The approved-agent regression pack adds ten behavior groups: urgent callback
+interruption, callback negation, answer-before-script priority, exact-time
+confirmation, unavailable-time alternatives, visible-offer supersession,
+decision-maker negation, source/form-shape independence, full-message language
+switching, and ambiguous-delivery booking safety. Source independence uses three
+fixtures (website, Meta, and LinkedIn), so the ten groups contain twelve files.
 
 ## Running evaluations
 
@@ -47,7 +59,7 @@ python scripts/run_chatbot_evals.py \
   --fail-on never
 ```
 
-`--suite all` records the current V3 baseline; it is not the pull-request gate. Four regression cases intentionally remain red: a warranty question is escalated before it can be answered, a French estimate question is replaced by a generic pricing diversion and CTA, a refused-call turn still carries an `answer_then_soft_cta` planner act before final sanitization, and a repeated-CTA support question is replaced by generic package/pricing copy. Keep `--fail-on never` for baseline runs until those architecture issues are fixed. Only `--suite smoke` is currently required to pass in CI.
+`--suite all` records the current V3 baseline; it is not the pull-request gate. Some regression cases intentionally remain red until their underlying architecture issues are fixed. Keep `--fail-on never` for baseline runs and inspect the generated failure table rather than normalizing current defects into expected output. The smoke suite and explicitly listed known-green regression packs are the CI gates.
 
 Run one fixture by ID:
 
@@ -90,6 +102,12 @@ Deterministic checks are the release gate. They cover observable behavior such a
 - required or forbidden response content;
 - question, length, and meeting-CTA limits;
 - permitted conversation acts, state paths, slot visibility, and grounded claims where a fixture specifies them.
+- cumulative persisted totals (`expected_total_lead_task_count`,
+  `expected_total_booking_event_count`, and
+  `expected_total_outbound_message_count`) where a fixture specifies them; an
+  adapter that cannot expose an asserted total fails the check instead of
+  treating missing data as zero;
+- stored attribution source, handoff reason, and unknown-booking markers.
 
 The default `--fail-on deterministic` exits non-zero for runtime or deterministic failures. `--fail-on never` is useful for exploratory live runs.
 

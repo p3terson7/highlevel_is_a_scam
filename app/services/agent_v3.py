@@ -20,9 +20,10 @@ from app.services.booking import (
     BookingService,
     automated_booking_enabled,
     booking_mode_label,
+    calendar_booking_confirmed,
     looks_like_booking_commitment,
-    looks_like_slot_selection_message,
 )
+from app.services.booking_request import build_booking_time_request
 from app.services.i18n import client_language, language_instruction, normalize_language
 from app.services.knowledge import (
     KnowledgeRetrievalQuery,
@@ -464,12 +465,29 @@ def _active_offer_from_payload(raw_payload: dict[str, Any]) -> dict[str, Any] | 
 
 
 def _current_user_slot_choice(inbound_text: str, latest_offer: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not (
-        looks_like_slot_selection_message(inbound_text)
-        or looks_like_booking_commitment(inbound_text)
-    ):
+    choice = _extract_slot_choice(
+        inbound_text=inbound_text,
+        latest_offer=latest_offer,
+    )
+    if choice is not None:
+        return choice
+    if not looks_like_booking_commitment(inbound_text):
         return None
-    return _extract_slot_choice(inbound_text=inbound_text, latest_offer=latest_offer)
+    slots = (
+        latest_offer.get("slots")
+        if isinstance(latest_offer, dict)
+        and isinstance(latest_offer.get("slots"), list)
+        else []
+    )
+    normalized_slots = [slot for slot in slots if isinstance(slot, dict)]
+    if len(normalized_slots) != 1:
+        return None
+    slot = normalized_slots[0]
+    try:
+        return {"slot_index": int(slot.get("index"))}
+    except (TypeError, ValueError):
+        start_time = str(slot.get("start_time") or "").strip()
+        return {"slot_start_time": start_time} if start_time else None
 
 
 def _mentioned_offered_slot_indexes(
@@ -507,6 +525,51 @@ def _latest_outbound_body(history: Sequence[Message]) -> str:
     return ""
 
 
+def _latest_outbound_contains_active_offer(
+    history: Sequence[Message],
+    active_offer: dict[str, Any],
+) -> bool:
+    """Confirm that the menu the lead can see is the active structured offer."""
+
+    for message in reversed(history):
+        if message.direction != MessageDirection.OUTBOUND:
+            continue
+        raw_payload = (
+            message.raw_payload
+            if isinstance(message.raw_payload, dict)
+            else {}
+        )
+        visible_offer = _active_offer_from_payload(raw_payload)
+        if not _offer_has_slots(visible_offer):
+            return False
+
+        active_fingerprint = str(
+            active_offer.get("offer_fingerprint") or ""
+        ).strip()
+        visible_fingerprint = str(
+            visible_offer.get("offer_fingerprint") or ""
+        ).strip()
+        if active_fingerprint and visible_fingerprint:
+            return active_fingerprint == visible_fingerprint
+
+        def slot_identity(offer: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+            slots = offer.get("slots")
+            if not isinstance(slots, list):
+                return ()
+            return tuple(
+                (
+                    str(slot.get("index") or "").strip(),
+                    str(slot.get("start_time") or "").strip(),
+                )
+                for slot in slots
+                if isinstance(slot, dict)
+            )
+
+        visible_slots = slot_identity(visible_offer)
+        return bool(visible_slots and visible_slots == slot_identity(active_offer))
+    return False
+
+
 class LLMAgentV3:
     def __init__(self, provider: LLMProvider) -> None:
         self._provider = provider
@@ -538,15 +601,36 @@ class LLMAgentV3:
             limit=_MAX_HISTORY_BODY_CHARS,
         )
         deterministic_slot_choice = _current_user_slot_choice(bounded_inbound, active_offer)
-        deterministic_booking_confirmation = bool(
-            deterministic_slot_choice
-            or _mentioned_offered_slot_indexes(bounded_inbound, active_offer)
-            or _has_booking_intent(
-                bounded_inbound,
-                allow_generic_confirmation=_message_suggests_meeting(bounded_last_outbound),
-            )
+        visible_active_offer = _latest_outbound_contains_active_offer(
+            history,
+            active_offer,
         )
-        if not deterministic_booking_confirmation and not _has_scheduling_intent(bounded_inbound):
+        if (
+            deterministic_slot_choice is None
+            and looks_like_booking_commitment(bounded_inbound)
+            and visible_active_offer
+        ):
+            # A short affirmation can safely select a slot only when the
+            # immediately visible outbound text singled out one concrete
+            # option from the active offer.
+            deterministic_slot_choice = _extract_slot_choice(
+                inbound_text=bounded_last_outbound,
+                latest_offer=active_offer,
+            )
+        deterministic_booking_confirmation = bool(deterministic_slot_choice)
+        references_offered_option = bool(
+            _mentioned_offered_slot_indexes(bounded_inbound, active_offer)
+        )
+        committed_to_visible_offer = bool(
+            visible_active_offer
+            and looks_like_booking_commitment(bounded_inbound)
+        )
+        if (
+            not deterministic_booking_confirmation
+            and not _has_scheduling_intent(bounded_inbound)
+            and not references_offered_option
+            and not committed_to_visible_offer
+        ):
             # An unrelated lead message must never enter an LLM-controlled slot
             # selection path merely because an older offer is still active.
             return None
@@ -603,6 +687,20 @@ class LLMAgentV3:
             decision = "not_booking"
             selected_index = None
             selected_start = None
+        if decision == "select_slot" and deterministic_slot_choice:
+            selected_index = (
+                _to_int(
+                    deterministic_slot_choice.get("slot_index"),
+                    default=0,
+                )
+                or None
+            )
+            selected_start = (
+                str(
+                    deterministic_slot_choice.get("slot_start_time") or ""
+                ).strip()
+                or None
+            )
         if decision == "select_slot" and selected_index not in valid_indexes and selected_start not in valid_starts:
             decision = "ask_clarification"
             selected_index = None
@@ -702,7 +800,7 @@ class LLMAgentV3:
                     decision.next_state = ConversationStateEnum.BOOKED
                     decision.tool_call = ToolCall()
                     return _finalize_response_with_context(decision, context)
-                slot_choice = _extract_slot_choice(
+                slot_choice = _current_user_slot_choice(
                     inbound_text=str(context.get("latest_inbound_message") or ""),
                     latest_offer=context.get("latest_booking_offer"),
                 )
@@ -813,6 +911,7 @@ class LLMAgentV3:
             "- Use conversation_context.response_language for the reply language. "
             f"{language_instruction(response_language)}\n"
             "- If response_language is fr, every lead-facing word must be French. Do not use English weekday/month abbreviations, AM/PM, 'Reply with', 'Times shown', or 'If none of those work'. Format times like 'mercredi 24 juin à 10 h 00'.\n"
+            "- conversation_context.initial_outreach is authoritative. Introduce yourself only when it is true. When it is false, do not greet by restating your name and assistant role unless identity_question is true.\n"
             f"- On the first outbound SMS in English, start with: \"Hi {{first_name}}, I'm {_ASSISTANT_NAME}, the assistant for {{business_name}}.\" "
             f"In French, start with: \"Bonjour {{first_name}}, ici {_ASSISTANT_NAME}, l'assistante de {{business_name}}.\" "
             "Then acknowledge the inquiry and help toward an answer or booking.\n"
@@ -944,7 +1043,19 @@ class LLMAgentV3:
         memory = _merge_memory(prior_memory, answer_memory, history_memory, inbound_memory)
         recent_messages = _bounded_recent_messages(history)
         active_offer = _active_offer_from_payload(raw_payload)
-        latest_offer = active_offer or _latest_booking_offer(history)
+        has_authoritative_offer_state = isinstance(
+            raw_payload.get("active_booking_offer"),
+            dict,
+        ) or isinstance(raw_payload.get("booking_offer"), dict)
+        latest_offer = (
+            active_offer
+            if active_offer is not None
+            else (
+                None
+                if has_authoritative_offer_state
+                else _latest_booking_offer(history)
+            )
+        )
         answered_missing_field_keys = _extract_answered_missing_field_keys(history)
         allow_generic_booking_confirmation = bool(
             latest_offer
@@ -958,7 +1069,12 @@ class LLMAgentV3:
             memory.booking_intent_locked = True
         booking_ready, booking_gap_fields = _booking_threshold(memory=memory)
         flow_state = str(raw_payload.get("flow_state") or "NEW").strip().upper()
-        inbound_preferences = _extract_booking_preferences(inbound_text)
+        inbound_booking_request = build_booking_time_request(
+            text=inbound_text,
+            timezone_name=client.timezone or "UTC",
+            source="agent_inbound_context",
+        )
+        inbound_preferences = _booking_preferences_from_request(inbound_booking_request)
         scheduling_intent_detected = _has_scheduling_intent(inbound_text) or bool(inbound_preferences)
         known_form_facts = _build_known_form_facts(normalized_answers, lead=lead)
         acknowledged_form_fact_keys = _extract_acknowledged_form_fact_keys(known_form_facts=known_form_facts, history=history)
@@ -1000,9 +1116,16 @@ class LLMAgentV3:
         safe_active_offer = _bounded_prompt_value(active_offer) if active_offer else None
         safe_known_form_facts = _bounded_prompt_value(known_form_facts)
         safe_memory = _bounded_prompt_value(memory.model_dump(exclude_none=True))
-        safe_internal_summary = _bounded_prompt_value(internal_summary)
+        # Attribution stays in lead/CRM records, not in model behavior inputs.
+        prompt_summary = {key: value for key, value in internal_summary.items() if key != "source_platform"}
+        safe_internal_summary = _bounded_prompt_value(prompt_summary)
         outbound_turn_count = len(
             [message for message in history if message.direction == MessageDirection.OUTBOUND]
+        )
+        has_prior_outbound = bool(
+            outbound_turn_count
+            or lead.initial_sms_sent_at is not None
+            or lead.last_outbound_at is not None
         )
 
         context = {
@@ -1033,7 +1156,8 @@ class LLMAgentV3:
             "current_state": lead.conversation_state.value if lead.conversation_state else ConversationStateEnum.NEW.value,
             "already_booked": lead.conversation_state == ConversationStateEnum.BOOKED,
             "crm_stage": getattr(lead, "crm_stage", None),
-            "initial_outreach": len(history) == 0,
+            "initial_outreach": not has_prior_outbound,
+            "has_prior_outbound": has_prior_outbound,
             "flow_state": _sanitize_prompt_text(flow_state, limit=64),
             "qualification_memory": safe_memory,
             "asked_question_keys": asked_question_keys,
@@ -1051,11 +1175,18 @@ class LLMAgentV3:
             "booking_url": _sanitize_prompt_text(client.booking_url, limit=500),
             "latest_booking_offer": safe_latest_offer,
             "active_booking_offer": safe_active_offer,
+            "active_booking_offer_authoritative": has_authoritative_offer_state,
             "latest_inbound_booking_preferences": _bounded_prompt_value(inbound_preferences),
+            "latest_inbound_booking_request": _bounded_prompt_value(
+                inbound_booking_request.to_payload()
+            ),
+            "latest_inbound_booking_request_fingerprint": inbound_booking_request.fingerprint,
             "available_tools": ["find_slots", "book_slot", "mark_booked", "handoff_to_human"],
             "explicit_booking_intent": explicit_booking_intent,
             "scheduling_intent_detected": scheduling_intent_detected,
-            "booked_confirmation_intent": bool(_BOOKED_CONFIRM_PATTERN.search(inbound_text or "")),
+            "booked_confirmation_intent": calendar_booking_confirmed(
+                inbound_text or ""
+            ),
             "handoff_intent": bool(_HANDOFF_PATTERN.search(inbound_text or "")),
             "closing_only": bool(_CLOSING_PATTERN.match((inbound_text or "").strip())),
             "pricing_question": bool(_PRICING_PATTERN.search(inbound_text or "")),
@@ -1800,9 +1931,27 @@ class LLMAgentV3:
         db: Session | None,
     ) -> dict[str, Any]:
         args = tool_call.args or {}
-        latest_offer = context.get("latest_booking_offer") if _offer_has_slots(context.get("latest_booking_offer")) else _latest_booking_offer(history)
+        latest_offer = (
+            context.get("latest_booking_offer")
+            if _offer_has_slots(context.get("latest_booking_offer"))
+            else (
+                None
+                if bool(context.get("active_booking_offer_authoritative"))
+                else _latest_booking_offer(history)
+            )
+        )
+        raw_inbound_preferences = context.get("latest_inbound_booking_preferences")
+        inbound_preferences = {
+            key: str(value)
+            for key, value in (
+                raw_inbound_preferences.items()
+                if isinstance(raw_inbound_preferences, dict)
+                else []
+            )
+            if value is not None and str(value).strip()
+        }
         inferred_preferences = _booking_preferences_with_offer_context(
-            _extract_booking_preferences(str(context.get("latest_inbound_message") or "")),
+            inbound_preferences,
             latest_offer=latest_offer,
         )
         if tool_call.name == "find_slots":

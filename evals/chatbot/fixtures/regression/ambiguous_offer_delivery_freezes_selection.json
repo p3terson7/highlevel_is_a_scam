@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "id": "ambiguous_offer_delivery_freezes_selection",
+  "owner": "conversation-platform",
+  "kind": "checkpoint",
+  "tags": ["idempotency", "delivery-ambiguity", "booking", "write-safety", "handoff"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Atelier Sûr",
+    "tone": "calme, précis et concis",
+    "timezone": "America/Toronto",
+    "qualification_questions": [],
+    "booking_mode": "internal",
+    "faq_context": "Aucun créneau ne doit être réservé si le système ne peut pas confirmer quel menu a été livré.",
+    "ai_context": "Ne jamais annoncer une réservation sans confirmation du calendrier. En cas de livraison ambiguë, geler la sélection et transférer la vérification."
+  },
+  "lead": {
+    "full_name": "Robin Exemple",
+    "email": "robin.ambiguous@example.test",
+    "phone": "+14165550205",
+    "city": "Toronto",
+    "source": "meta",
+    "state": "BOOKING_SENT",
+    "form_answers": {
+      "besoin": "Consultation technique"
+    },
+    "raw_payload": {
+      "lead_language": "fr",
+      "booking_offer_delivery_unknown": {
+        "inbound_message_id": 9001,
+        "outbound_request_id": 7001,
+        "recorded_at": "2026-07-15T13:59:00+00:00"
+      },
+      "booking_offer_delivery_transition": {
+        "schema_version": 1,
+        "status": "offer_delivery_unknown",
+        "inbound_message_id": 9001,
+        "outbound_request_id": 7001,
+        "previous_offer_fingerprint": "offer-visible-before-timeout",
+        "proposed_offer_fingerprint": "offer-unknown-after-timeout",
+        "recorded_at": "2026-07-15T13:59:00+00:00"
+      },
+      "active_booking_offer": {
+        "status": "offer_delivery_unknown",
+        "slots": []
+      }
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Ancien menu visible : 1) jeudi 16 juillet à 10 h 00. Répondez 1 pour réserver.",
+      "raw_payload": {
+        "booking_offer": {
+          "provider": "internal",
+          "offer_fingerprint": "offer-visible-before-timeout",
+          "slots": [
+            {
+              "index": 1,
+              "start_time": "2026-07-16T10:00:00-04:00",
+              "end_time": "2026-07-16T10:30:00-04:00",
+              "display_time": "jeudi 16 juillet à 10 h 00"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "inbound": "1",
+      "replay_outputs": [],
+      "expect": {
+        "expected_language": "fr",
+        "expected_state": "HANDOFF",
+        "expected_action": "handoff_to_human",
+        "expected_pending_step": "none",
+        "allowed_actions": ["handoff_to_human"],
+        "allowed_conversation_acts": ["handoff"],
+        "expected_next_states": ["HANDOFF"],
+        "allowed_resolution_paths": ["handoff_policy"],
+        "must_include": ["ne peux pas confirmer", "équipe", "mauvais créneau"],
+        "must_not_include": ["réservé", "réservation confirmée", "succès", "Booked", "confirmed"],
+        "forbidden_claims": [
+          "Le créneau visible avant l'échec a été réservé.",
+          "Le nouveau menu a été livré au prospect.",
+          "Le calendrier a confirmé la réservation."
+        ],
+        "forbidden_tools": ["find_slots", "book_slot", "mark_booked"],
+        "tool": {
+          "proposed_name": "none",
+          "max_calls": 0
+        },
+        "max_questions": 0,
+        "max_chars": 360,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": true,
+        "expected_total_lead_task_count": 0,
+        "expected_total_booking_event_count": 0,
+        "expected_total_outbound_message_count": 2,
+        "expected_booking_confirmation_unknown": false,
+        "expected_handoff_reason": "booking_offer_delivery_unknown",
+        "expected_lead_source": "meta",
+        "expected_tool_names": [],
+        "max_tool_calls": 0,
+        "semantic_criteria": [
+          "Freeze slot selection when offer delivery is ambiguous.",
+          "Do not claim booking success without a calendar confirmation.",
+          "Escalate safely instead of selecting from either uncertain menu."
+        ]
+      }
+    }
+  ],
+  "tool_world": {
+    "slots": [
+      {
+        "start": "2026-07-16T10:00:00-04:00",
+        "end": "2026-07-16T10:30:00-04:00",
+        "display_time": "jeudi 16 juillet à 10 h 00"
+      }
+    ]
+  }
+}

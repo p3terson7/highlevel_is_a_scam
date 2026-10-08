@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "id": "new_time_request_supersedes_active_offer",
+  "owner": "conversation-platform",
+  "kind": "journey",
+  "tags": ["booking", "active-offer", "new-time", "supersession", "write-safety"],
+  "risk": "critical",
+  "tenant": {
+    "business_name": "Lakeshore Engineering",
+    "tone": "clear, responsive, and concise",
+    "timezone": "America/Toronto",
+    "qualification_questions": [
+      "What engineering support do you need?"
+    ],
+    "booking_mode": "internal",
+    "faq_context": "Consultations are 30 minutes. Only the latest visible calendar offer may be selected.",
+    "ai_context": "If the lead asks for a new time after receiving a menu, replace the old menu with availability matching the new request."
+  },
+  "lead": {
+    "full_name": "Taylor Example",
+    "email": "taylor.supersede@example.test",
+    "phone": "+14165550206",
+    "city": "Ottawa",
+    "external_lead_id": "eval-supersede-active-offer",
+    "state": "BOOKING_SENT",
+    "form_answers": {
+      "service_interest": "Mechanical engineering consultation"
+    },
+    "raw_payload": {
+      "lead_language": "en",
+      "pending_step": "slot_selection_pending",
+      "booking_offer": {
+        "provider": "internal",
+        "slots": [
+          {
+            "index": 1,
+            "start_time": "2026-07-21T09:00:00-04:00",
+            "end_time": "2026-07-21T09:30:00-04:00",
+            "display_time": "Tue Jul 21 at 9:00 AM"
+          },
+          {
+            "index": 2,
+            "start_time": "2026-07-22T10:00:00-04:00",
+            "end_time": "2026-07-22T10:30:00-04:00",
+            "display_time": "Wed Jul 22 at 10:00 AM"
+          }
+        ]
+      },
+      "active_booking_offer": {
+        "provider": "internal",
+        "slots": [
+          {
+            "index": 1,
+            "start_time": "2026-07-21T09:00:00-04:00",
+            "end_time": "2026-07-21T09:30:00-04:00",
+            "display_time": "Tue Jul 21 at 9:00 AM"
+          },
+          {
+            "index": 2,
+            "start_time": "2026-07-22T10:00:00-04:00",
+            "end_time": "2026-07-22T10:30:00-04:00",
+            "display_time": "Wed Jul 22 at 10:00 AM"
+          }
+        ]
+      }
+    }
+  },
+  "initial_history": [
+    {
+      "direction": "OUTBOUND",
+      "body": "Here are the current options: 1) Tue Jul 21 at 9:00 AM or 2) Wed Jul 22 at 10:00 AM. Reply with 1 or 2.",
+      "raw_payload": {
+        "agent": {
+          "action": "none"
+        },
+        "booking_offer": {
+          "provider": "internal",
+          "slots": [
+            {
+              "index": 1,
+              "start_time": "2026-07-21T09:00:00-04:00",
+              "end_time": "2026-07-21T09:30:00-04:00",
+              "display_time": "Tue Jul 21 at 9:00 AM"
+            },
+            {
+              "index": 2,
+              "start_time": "2026-07-22T10:00:00-04:00",
+              "end_time": "2026-07-22T10:30:00-04:00",
+              "display_time": "Wed Jul 22 at 10:00 AM"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "turns": [
+    {
+      "turn_id": "replace_old_menu_with_friday_noon",
+      "inbound": "I need different availability. Is Friday at noon available instead?",
+      "replay_outputs": [
+        {
+          "decision": "new_times",
+          "selected_slot_index": null,
+          "selected_slot_start_time": null,
+          "reply_text": "",
+          "reasoning_summary": "The lead rejected the visible menu by requesting different availability on Friday at noon."
+        }
+      ],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "BOOKING_SENT",
+        "expected_action": "none",
+        "expected_pending_step": "slot_selection_pending",
+        "allowed_actions": ["none"],
+        "allowed_conversation_acts": ["offer_slots"],
+        "expected_next_states": ["BOOKING_SENT"],
+        "allowed_resolution_paths": ["deterministic_booking_flow"],
+        "must_include": ["Fri Jul 17 at 12:00 PM", "Fri Jul 17 at 12:30 PM"],
+        "must_not_include": ["Tue Jul 21", "Wed Jul 22", "9:00 AM", "10:00 AM", "already booked"],
+        "required_facts": [
+          "The previous Tuesday/Wednesday menu is replaced.",
+          "Only the newly queried Friday-noon options remain visible."
+        ],
+        "forbidden_claims": [
+          "The old option 1 remains selectable.",
+          "A meeting has already been booked."
+        ],
+        "tool": {
+          "proposed_name": "find_slots",
+          "args_subset": {
+            "request_text": "I need different availability. Is Friday at noon available instead?"
+          },
+          "max_calls": 1
+        },
+        "visible_slot_indexes": [1, 2],
+        "max_questions": 0,
+        "max_chars": 320,
+        "max_meeting_ctas": 1,
+        "booking_expected": false,
+        "handoff_expected": false,
+        "expected_total_booking_event_count": 0,
+        "expected_total_outbound_message_count": 2,
+        "expected_tool_names": ["find_slots"],
+        "max_tool_calls": 1
+      }
+    },
+    {
+      "turn_id": "option_one_books_only_new_menu",
+      "inbound": "1",
+      "replay_outputs": [],
+      "expect": {
+        "expected_language": "en",
+        "expected_state": "BOOKED",
+        "expected_action": "mark_booked",
+        "expected_pending_step": "none",
+        "allowed_actions": ["mark_booked"],
+        "allowed_conversation_acts": ["book_selected_slot"],
+        "expected_next_states": ["BOOKED"],
+        "allowed_resolution_paths": ["deterministic_booking_flow"],
+        "must_include": ["Booked", "Fri Jul 17 at 12:00 PM"],
+        "must_not_include": ["Fri Jul 17 at 12:30 PM", "Tue Jul 21", "Wed Jul 22", "could not confirm"],
+        "forbidden_tools": ["find_slots", "handoff_to_human"],
+        "tool": {
+          "proposed_name": "book_slot",
+          "max_calls": 1
+        },
+        "max_questions": 0,
+        "max_chars": 240,
+        "max_meeting_ctas": 1,
+        "booking_expected": true,
+        "handoff_expected": false,
+        "expected_total_booking_event_count": 1,
+        "expected_total_outbound_message_count": 3,
+        "expected_tool_names": ["book_slot"],
+        "max_tool_calls": 1
+      }
+    }
+  ],
+  "tool_world": {
+    "booking_reference": "eval-superseded-menu-booking-1",
+    "slots": [
+      {
+        "start": "2026-07-17T12:00:00-04:00",
+        "end": "2026-07-17T12:30:00-04:00",
+        "display_time": "Fri Jul 17 at 12:00 PM"
+      },
+      {
+        "start": "2026-07-17T12:30:00-04:00",
+        "end": "2026-07-17T13:00:00-04:00",
+        "display_time": "Fri Jul 17 at 12:30 PM"
+      }
+    ]
+  }
+}

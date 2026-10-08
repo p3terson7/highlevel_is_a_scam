@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -17,6 +19,7 @@ from app.db.models import (
     MessageDirection,
 )
 from app.services.booking import (
+    BookingProviderError,
     BookingSelectionResult,
     BookingService,
     calendar_booking_confirmed,
@@ -26,6 +29,7 @@ from app.services.booking import (
     looks_like_slot_selection_message,
 )
 from app.services.agent_control import should_suppress_ai_reply
+from app.services.booking_copy import render_slot_clarification
 from app.services.crm import (
     CRM_STAGE_CONTACTED,
     CRM_STAGE_MEETING_BOOKED,
@@ -51,8 +55,19 @@ from app.services.zapier_booking import notify_zapier_booking_webhook
 
 _PENDING_STEP_KEY = "pending_step"
 _ACTIVE_BOOKING_OFFER_KEY = "active_booking_offer"
+_ACTIVE_BOOKING_REQUEST_KEY = "active_booking_request"
 _PENDING_RESCHEDULE_KEY = "pending_reschedule_confirmation"
 _RESCHEDULE_PENDING_STEP = "reschedule_confirmation_pending"
+_BOOKING_OFFER_DELIVERY_TRANSITION_KEY = "booking_offer_delivery_transition"
+_BOOKING_OFFER_DELIVERY_UNKNOWN_KEY = "booking_offer_delivery_unknown"
+_BOOKING_FLOW_SNAPSHOT_KEYS = (
+    "booking_offer",
+    _ACTIVE_BOOKING_OFFER_KEY,
+    _ACTIVE_BOOKING_REQUEST_KEY,
+    _PENDING_STEP_KEY,
+    _PENDING_RESCHEDULE_KEY,
+    _BOOKING_OFFER_DELIVERY_UNKNOWN_KEY,
+)
 _DEFAULT_HISTORY_LIMIT = 40
 
 
@@ -88,6 +103,232 @@ def _store_outbound_message(
     db.add(Message(**values))
 
 
+def _booking_flow_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: deepcopy(payload[key])
+        for key in _BOOKING_FLOW_SNAPSHOT_KEYS
+        if key in payload
+    }
+
+
+def _apply_booking_flow_snapshot(
+    *,
+    payload: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> None:
+    for key in _BOOKING_FLOW_SNAPSHOT_KEYS:
+        payload.pop(key, None)
+    for key, value in snapshot.items():
+        if key in _BOOKING_FLOW_SNAPSHOT_KEYS:
+            payload[key] = deepcopy(value)
+    payload.pop(_BOOKING_OFFER_DELIVERY_TRANSITION_KEY, None)
+
+
+def _booking_offer_delivery_plan(
+    *,
+    lead: Lead,
+    runtime_payload: dict[str, Any],
+    next_state: ConversationStateEnum,
+) -> dict[str, Any] | None:
+    if not isinstance(runtime_payload.get("booking_offer"), dict):
+        return None
+    current_payload = dict(lead.raw_payload or {})
+    proposed_payload = deepcopy(current_payload)
+    _apply_booking_flow_memory_to_payload(
+        payload=proposed_payload,
+        runtime_payload=runtime_payload,
+        next_state=next_state,
+    )
+    return {
+        "schema_version": 1,
+        "previous": _booking_flow_snapshot(current_payload),
+        "proposed": _booking_flow_snapshot(proposed_payload),
+    }
+
+
+def _valid_booking_offer_delivery_plan(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or int(raw.get("schema_version") or 0) != 1:
+        return None
+    previous = raw.get("previous")
+    proposed = raw.get("proposed")
+    if not isinstance(previous, dict) or not isinstance(proposed, dict):
+        return None
+    return {
+        "schema_version": 1,
+        "previous": deepcopy(previous),
+        "proposed": deepcopy(proposed),
+    }
+
+
+def _booking_offer_fingerprint_from_snapshot(snapshot: dict[str, Any]) -> str:
+    offer = snapshot.get(_ACTIVE_BOOKING_OFFER_KEY)
+    if not isinstance(offer, dict):
+        offer = snapshot.get("booking_offer")
+    return _offer_fingerprint(offer)
+
+
+def _freeze_booking_offer_delivery_payload(
+    *,
+    payload: dict[str, Any],
+    transition: dict[str, Any],
+    status: str,
+    inbound_message_id: int | None,
+    outbound_request_id: int | None,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    _deactivate_booking_flow(payload=payload, status=status)
+    payload[_BOOKING_OFFER_DELIVERY_TRANSITION_KEY] = {
+        "schema_version": 1,
+        "status": status,
+        "inbound_message_id": inbound_message_id,
+        "outbound_request_id": outbound_request_id,
+        "previous_offer_fingerprint": _booking_offer_fingerprint_from_snapshot(
+            transition["previous"]
+        ),
+        "proposed_offer_fingerprint": _booking_offer_fingerprint_from_snapshot(
+            transition["proposed"]
+        ),
+        "recorded_at": now,
+    }
+    if status == "offer_delivery_unknown":
+        payload[_BOOKING_OFFER_DELIVERY_UNKNOWN_KEY] = {
+            "inbound_message_id": inbound_message_id,
+            "outbound_request_id": outbound_request_id,
+            "recorded_at": now,
+        }
+    else:
+        payload.pop(_BOOKING_OFFER_DELIVERY_UNKNOWN_KEY, None)
+
+
+def _stage_booking_offer_delivery_transition(
+    *,
+    db: Session,
+    lead: Lead,
+    transition: dict[str, Any],
+    inbound_message_id: int | None,
+    outbound_request_id: int | None,
+) -> None:
+    """Durably freeze slot selection before the provider can expose a new menu."""
+
+    payload = dict(lead.raw_payload or {})
+    _freeze_booking_offer_delivery_payload(
+        payload=payload,
+        transition=transition,
+        status="offer_delivery_pending",
+        inbound_message_id=inbound_message_id,
+        outbound_request_id=outbound_request_id,
+    )
+    lead.raw_payload = payload
+    # The provider call must not happen until the quarantine is durable. Using
+    # the caller transaction avoids a second Session trying to lock the same
+    # lead and self-blocking on PostgreSQL (or locking SQLite in tests).
+    db.commit()
+
+
+def _booking_offer_delivery_marker_matches(
+    *,
+    payload: dict[str, Any],
+    outbound_request_id: int | None,
+) -> bool:
+    marker = payload.get(_BOOKING_OFFER_DELIVERY_TRANSITION_KEY)
+    if not isinstance(marker, dict):
+        return False
+    if outbound_request_id is None:
+        return marker.get("outbound_request_id") is None
+    try:
+        return int(marker.get("outbound_request_id") or 0) == int(
+            outbound_request_id
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _restore_booking_offer_delivery_transition(
+    *,
+    lead: Lead,
+    transition: dict[str, Any],
+    outbound_request_id: int | None,
+) -> None:
+    payload = dict(lead.raw_payload or {})
+    if not _booking_offer_delivery_marker_matches(
+        payload=payload,
+        outbound_request_id=outbound_request_id,
+    ):
+        return
+    _apply_booking_flow_snapshot(
+        payload=payload,
+        snapshot=transition["previous"],
+    )
+    lead.raw_payload = payload
+
+
+def _mark_booking_offer_delivery_unknown(
+    *,
+    lead: Lead,
+    transition: dict[str, Any],
+    inbound_message_id: int | None,
+    outbound_request_id: int | None,
+) -> None:
+    payload = dict(lead.raw_payload or {})
+    _freeze_booking_offer_delivery_payload(
+        payload=payload,
+        transition=transition,
+        status="offer_delivery_unknown",
+        inbound_message_id=inbound_message_id,
+        outbound_request_id=outbound_request_id,
+    )
+    lead.raw_payload = payload
+
+
+def _activate_booking_offer_delivery_transition(
+    *,
+    db: Session,
+    lead: Lead,
+    transition: dict[str, Any],
+    outbound_request_id: int | None,
+    inbound_message_id: int | None,
+    provider_sid: str,
+    attempt_count: int,
+) -> None:
+    payload = dict(lead.raw_payload or {})
+    if not _booking_offer_delivery_marker_matches(
+        payload=payload,
+        outbound_request_id=outbound_request_id,
+    ):
+        # The provider accepted a menu, but another transition replaced its
+        # marker before activation. Do not let this delayed result overwrite
+        # newer state; quarantine all slot selection for reconciliation.
+        _mark_booking_offer_delivery_unknown(
+            lead=lead,
+            transition=transition,
+            inbound_message_id=inbound_message_id,
+            outbound_request_id=outbound_request_id,
+        )
+        db.commit()
+        raise RuntimeError(
+            "Booking offer delivery transition was superseded before activation"
+        )
+    _apply_booking_flow_snapshot(
+        payload=payload,
+        snapshot=transition["proposed"],
+    )
+    lead.raw_payload = payload
+    if outbound_request_id is not None:
+        complete_outbound_request(
+            db=db,
+            request_id=outbound_request_id,
+            provider_reference=provider_sid,
+            response={
+                "inbound_message_id": inbound_message_id,
+                "provider_sid": provider_sid,
+                "attempt_count": attempt_count,
+            },
+        )
+    # This commit is the crash-safety boundary: the provider-accepted menu and
+    # the completed outbox row become durable together before control returns.
+    db.commit()
+
+
 def _send_inbound_reply_once(
     *,
     db: Session,
@@ -97,11 +338,29 @@ def _send_inbound_reply_once(
     body: str,
     inbound_message_id: int | None,
     retry_definitive_failure: bool = False,
+    booking_offer_transition: dict[str, Any] | None = None,
 ) -> tuple[str, str] | None:
+    requested_transition = _valid_booking_offer_delivery_plan(
+        booking_offer_transition
+    )
     if inbound_message_id is None:
+        if requested_transition is not None:
+            _stage_booking_offer_delivery_transition(
+                db=db,
+                lead=lead,
+                transition=requested_transition,
+                inbound_message_id=None,
+                outbound_request_id=None,
+            )
         delivery_state = lock_lead_for_outbound_delivery(db=db, lead_id=lead.id)
         if delivery_state is None:
             db.rollback()
+            if requested_transition is not None:
+                _restore_booking_offer_delivery_transition(
+                    lead=lead,
+                    transition=requested_transition,
+                    outbound_request_id=None,
+                )
             db.add(
                 AuditLog(
                     client_id=client.id,
@@ -112,9 +371,50 @@ def _send_inbound_reply_once(
             )
             db.commit()
             return None
-        provider_sid = sms_service.send_message(to_number=delivery_state.phone, body=body)
+        try:
+            provider_sid = sms_service.send_message(
+                to_number=delivery_state.phone,
+                body=body,
+            )
+        except Exception as exc:
+            if requested_transition is not None:
+                failure = classify_sms_delivery_failure(exc)
+                db.rollback()
+                if failure.ambiguous:
+                    _mark_booking_offer_delivery_unknown(
+                        lead=lead,
+                        transition=requested_transition,
+                        inbound_message_id=None,
+                        outbound_request_id=None,
+                    )
+                else:
+                    _restore_booking_offer_delivery_transition(
+                        lead=lead,
+                        transition=requested_transition,
+                        outbound_request_id=None,
+                    )
+                db.commit()
+            raise
+        if requested_transition is not None:
+            _activate_booking_offer_delivery_transition(
+                db=db,
+                lead=lead,
+                transition=requested_transition,
+                outbound_request_id=None,
+                inbound_message_id=None,
+                provider_sid=provider_sid,
+                attempt_count=1,
+            )
         return provider_sid, body
 
+    pending_response: dict[str, Any] = {
+        "inbound_message_id": inbound_message_id,
+        "body": body,
+        "attempt_count": 1,
+        "max_attempts": 3,
+    }
+    if requested_transition is not None:
+        pending_response["booking_offer_transition"] = requested_transition
     reservation = reserve_outbound_request(
         db=db,
         lead=lead,
@@ -125,14 +425,15 @@ def _send_inbound_reply_once(
             "lead_id": lead.id,
             "inbound_message_id": inbound_message_id,
         },
-        pending_response={
-            "inbound_message_id": inbound_message_id,
-            "body": body,
-            "attempt_count": 1,
-            "max_attempts": 3,
-        },
+        pending_response=pending_response,
         retry_failed=retry_definitive_failure,
         require_safe_retry=retry_definitive_failure,
+    )
+    transition = (
+        _valid_booking_offer_delivery_plan(
+            reservation.response.get("booking_offer_transition")
+        )
+        or requested_transition
     )
     if not reservation.should_send:
         if reservation.status == "pending":
@@ -148,6 +449,20 @@ def _send_inbound_reply_once(
                 },
                 merge_response=True,
             )
+        if transition is not None:
+            if reservation.status in {"pending", "ambiguous", "dead_letter"}:
+                _mark_booking_offer_delivery_unknown(
+                    lead=lead,
+                    transition=transition,
+                    inbound_message_id=inbound_message_id,
+                    outbound_request_id=reservation.request_id,
+                )
+            elif reservation.status in {"failed", "cancelled"}:
+                _restore_booking_offer_delivery_transition(
+                    lead=lead,
+                    transition=transition,
+                    outbound_request_id=reservation.request_id,
+                )
         db.add(
             AuditLog(
                 client_id=client.id,
@@ -162,6 +477,14 @@ def _send_inbound_reply_once(
         db.commit()
         return None
 
+    if transition is not None:
+        _stage_booking_offer_delivery_transition(
+            db=db,
+            lead=lead,
+            transition=transition,
+            inbound_message_id=inbound_message_id,
+            outbound_request_id=reservation.request_id,
+        )
     delivery_state = lock_lead_for_outbound_delivery(db=db, lead_id=lead.id)
     if delivery_state is None:
         cancel_outbound_request(
@@ -170,6 +493,12 @@ def _send_inbound_reply_once(
             reason="consent_withdrawn_before_send",
             response={"inbound_message_id": inbound_message_id},
         )
+        if transition is not None:
+            _restore_booking_offer_delivery_transition(
+                lead=lead,
+                transition=transition,
+                outbound_request_id=reservation.request_id,
+            )
         db.add(
             AuditLog(
                 client_id=client.id,
@@ -220,19 +549,44 @@ def _send_inbound_reply_once(
                 },
             )
         )
+        if transition is not None:
+            if failure.ambiguous:
+                _mark_booking_offer_delivery_unknown(
+                    lead=lead,
+                    transition=transition,
+                    inbound_message_id=inbound_message_id,
+                    outbound_request_id=reservation.request_id,
+                )
+            else:
+                _restore_booking_offer_delivery_transition(
+                    lead=lead,
+                    transition=transition,
+                    outbound_request_id=reservation.request_id,
+                )
         db.commit()
         return None
 
-    complete_outbound_request(
-        db=db,
-        request_id=reservation.request_id,
-        provider_reference=provider_sid,
-        response={
-            "inbound_message_id": inbound_message_id,
-            "provider_sid": provider_sid,
-            "attempt_count": reservation.response.get("attempt_count", 1),
-        },
-    )
+    if transition is not None:
+        _activate_booking_offer_delivery_transition(
+            db=db,
+            lead=lead,
+            transition=transition,
+            outbound_request_id=reservation.request_id,
+            inbound_message_id=inbound_message_id,
+            provider_sid=provider_sid,
+            attempt_count=reservation.response.get("attempt_count", 1),
+        )
+    else:
+        complete_outbound_request(
+            db=db,
+            request_id=reservation.request_id,
+            provider_reference=provider_sid,
+            response={
+                "inbound_message_id": inbound_message_id,
+                "provider_sid": provider_sid,
+                "attempt_count": reservation.response.get("attempt_count", 1),
+            },
+        )
     return provider_sid, body
 
 
@@ -276,14 +630,207 @@ def _offer_has_slots(offer: Any) -> bool:
     return isinstance(offer, dict) and isinstance(offer.get("slots"), list) and bool(offer.get("slots"))
 
 
+def _offer_fingerprint(offer: Any) -> str:
+    if not isinstance(offer, dict):
+        return ""
+    return str(offer.get("offer_fingerprint") or "").strip()
+
+
+def _same_fingerprinted_offer(previous_offer: Any, next_offer: Any) -> bool:
+    previous_fingerprint = _offer_fingerprint(previous_offer)
+    next_fingerprint = _offer_fingerprint(next_offer)
+    return bool(
+        previous_fingerprint
+        and next_fingerprint
+        and previous_fingerprint == next_fingerprint
+    )
+
+
+def _stored_booking_offer(lead: Lead) -> dict[str, Any] | None:
+    raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    active = raw_payload.get(_ACTIVE_BOOKING_OFFER_KEY)
+    if isinstance(active, dict):
+        return active
+    legacy = raw_payload.get("booking_offer")
+    return legacy if isinstance(legacy, dict) else None
+
+
+def _unchanged_booking_offer_reply(
+    *,
+    client: Client,
+    lead: Lead,
+    inbound_text: str,
+    booking_offer: Any,
+) -> str:
+    language = client_language(client, lead=lead, inbound_text=inbound_text)
+    if not _offer_has_slots(booking_offer):
+        if language == "fr":
+            return (
+                "Je viens de revérifier: les disponibilités n'ont pas changé. "
+                "Envoyez-moi un autre jour ou une autre plage horaire et je vérifierai."
+            )
+        return (
+            "I just rechecked, and availability has not changed. Send another day "
+            "or time window and I will check it."
+        )
+    constraints_satisfied = bool(
+        booking_offer.get("constraints_satisfied", True)
+        if isinstance(booking_offer, dict)
+        else True
+    )
+    if not constraints_satisfied:
+        if language == "fr":
+            return (
+                "Je viens de revérifier: le moment demandé n'est toujours pas disponible. "
+                "Les alternatives déjà proposées n'ont pas changé. Envoyez-moi un autre "
+                "moment, ou répondez avec le numéro d'une alternative qui vous convient."
+            )
+        return (
+            "I just rechecked: the requested time is still unavailable. The alternatives "
+            "already offered have not changed. Send another time, or reply with the number "
+            "of an alternative that works."
+        )
+    if language == "fr":
+        return (
+            "Les disponibilités n'ont pas changé. Les options déjà proposées sont "
+            "toujours valides; répondez avec leur numéro pour réserver, ou envoyez "
+            "un autre jour ou une autre heure."
+        )
+    return (
+        "Availability has not changed. The options already offered are still valid; "
+        "reply with their number to book, or send another day or time."
+    )
+
+
+def _merge_active_booking_offer(
+    *,
+    payload: dict[str, Any],
+    booking_offer: dict[str, Any],
+) -> None:
+    """Store an offer and, when available, its separately versioned request state.
+
+    Older booking providers do not emit fingerprints. Their payload shape and
+    behavior remain unchanged until they adopt the structured request contract.
+    """
+
+    payload.pop(_BOOKING_OFFER_DELIVERY_UNKNOWN_KEY, None)
+    previous_offer = payload.get(_ACTIVE_BOOKING_OFFER_KEY)
+    if not isinstance(previous_offer, dict):
+        legacy_offer = payload.get("booking_offer")
+        previous_offer = legacy_offer if isinstance(legacy_offer, dict) else {}
+
+    request_fingerprint = str(
+        booking_offer.get("request_fingerprint") or ""
+    ).strip()
+    if request_fingerprint:
+        previous_request = payload.get(_ACTIVE_BOOKING_REQUEST_KEY)
+        if not isinstance(previous_request, dict):
+            previous_request = {}
+        previous_request_fingerprint = str(
+            previous_request.get("request_fingerprint")
+            or previous_offer.get("request_fingerprint")
+            or ""
+        ).strip()
+        try:
+            previous_revision = int(previous_request.get("revision") or 0)
+        except (TypeError, ValueError):
+            previous_revision = 0
+        if previous_revision <= 0 and previous_request_fingerprint:
+            previous_revision = 1
+
+        changed_request = bool(
+            previous_request_fingerprint
+            and previous_request_fingerprint != request_fingerprint
+        )
+        if not previous_request_fingerprint:
+            revision = 1
+        elif changed_request:
+            revision = previous_revision + 1
+        else:
+            revision = max(1, previous_revision)
+
+        request_state: dict[str, Any] = {
+            "request_fingerprint": request_fingerprint,
+            "revision": revision,
+            "status": str(
+                booking_offer.get("status")
+                or (
+                    "awaiting_slot_selection"
+                    if _offer_has_slots(booking_offer)
+                    else "no_slots"
+                )
+            ),
+        }
+        for key in (
+            "request",
+            "outcome",
+            "coverage",
+            "offer_fingerprint",
+            "generated_at",
+            "constraints_satisfied",
+            "match_mode",
+        ):
+            if key in booking_offer:
+                request_state[key] = booking_offer[key]
+        if changed_request:
+            superseded_fingerprint = _offer_fingerprint(previous_offer)
+            if superseded_fingerprint:
+                request_state["superseded_offer_fingerprint"] = (
+                    superseded_fingerprint
+                )
+        elif previous_request.get("superseded_offer_fingerprint"):
+            # Reapplying an already activated delivery transition is
+            # intentionally idempotent and must retain its lineage.
+            request_state["superseded_offer_fingerprint"] = str(
+                previous_request["superseded_offer_fingerprint"]
+            )
+        payload[_ACTIVE_BOOKING_REQUEST_KEY] = request_state
+
+    payload["booking_offer"] = booking_offer
+    payload[_ACTIVE_BOOKING_OFFER_KEY] = booking_offer
+
+
+def _deactivate_booking_flow(
+    *,
+    payload: dict[str, Any],
+    status: str,
+) -> None:
+    previous_request = payload.get(_ACTIVE_BOOKING_REQUEST_KEY)
+    try:
+        revision = int(
+            previous_request.get("revision") or 0
+            if isinstance(previous_request, dict)
+            else 0
+        )
+    except (TypeError, ValueError):
+        revision = 0
+    deactivated_at = datetime.now(timezone.utc).isoformat()
+    payload.pop("booking_offer", None)
+    payload[_ACTIVE_BOOKING_OFFER_KEY] = {
+        "schema_version": 2,
+        "slots": [],
+        "status": status,
+        "deactivated_at": deactivated_at,
+    }
+    payload[_ACTIVE_BOOKING_REQUEST_KEY] = {
+        "revision": revision,
+        "status": status,
+        "deactivated_at": deactivated_at,
+    }
+    payload.pop(_PENDING_STEP_KEY, None)
+    payload.pop(_PENDING_RESCHEDULE_KEY, None)
+
+
 def _active_booking_offer(lead: Lead, history: list[Message] | None = None) -> dict[str, Any] | None:
     raw_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
     active = raw_payload.get(_ACTIVE_BOOKING_OFFER_KEY)
-    if _offer_has_slots(active):
-        return active
+    if isinstance(active, dict):
+        # The newest request is authoritative even when it produced no slots.
+        # Do not resurrect an older menu from message history after supersession.
+        return active if _offer_has_slots(active) else None
     legacy = raw_payload.get("booking_offer")
-    if _offer_has_slots(legacy):
-        return legacy
+    if isinstance(legacy, dict):
+        return legacy if _offer_has_slots(legacy) else None
     for message in reversed(history or []):
         raw = message.raw_payload if isinstance(message.raw_payload, dict) else {}
         offer = raw.get("booking_offer")
@@ -309,12 +856,13 @@ def _store_agent_memory(
         payload[_PENDING_STEP_KEY] = pending_step
     else:
         payload.pop(_PENDING_STEP_KEY, None)
-    if runtime_payload.get("booking_offer"):
-        payload["booking_offer"] = runtime_payload["booking_offer"]
-        payload[_ACTIVE_BOOKING_OFFER_KEY] = runtime_payload["booking_offer"]
+    if isinstance(runtime_payload.get("booking_offer"), dict) and runtime_payload["booking_offer"]:
+        _merge_active_booking_offer(
+            payload=payload,
+            booking_offer=runtime_payload["booking_offer"],
+        )
     if runtime_payload.get("calendar_booking") or agent_response.next_state == ConversationStateEnum.BOOKED:
-        payload.pop("booking_offer", None)
-        payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
+        _deactivate_booking_flow(payload=payload, status="booked")
     for key in (
         "cta_state",
         "intent_level",
@@ -330,8 +878,7 @@ def _store_agent_memory(
         if key in runtime_payload:
             payload[key] = runtime_payload[key]
     if agent_response.next_state == ConversationStateEnum.HANDOFF:
-        payload.pop("booking_offer", None)
-        payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
+        _deactivate_booking_flow(payload=payload, status="handoff")
     lead.raw_payload = payload
 
 
@@ -397,11 +944,38 @@ def _has_pending_reschedule(lead: Lead) -> bool:
     return isinstance(raw_payload.get(_PENDING_RESCHEDULE_KEY), dict)
 
 
-def _should_try_deterministic_slot_selection(*, lead: Lead, inbound_text: str) -> bool:
+def _should_try_deterministic_slot_selection(
+    *,
+    lead: Lead,
+    inbound_text: str,
+    active_offer: dict[str, Any] | None,
+    booking_service: BookingService,
+) -> bool:
     pending_step = _current_pending_step(lead)
     if pending_step != "slot_selection_pending":
         return False
-    return looks_like_slot_selection_message(inbound_text)
+    if not looks_like_slot_selection_message(inbound_text):
+        return False
+    if re.fullmatch(
+        r"\s*(?:option\s*)?\d+(?:\s+(?:please|pls|svp))?\s*",
+        str(inbound_text or ""),
+        re.IGNORECASE,
+    ):
+        return True
+    if not looks_like_booking_commitment(inbound_text):
+        # A natural-language time mention is an availability request until the
+        # lead clearly accepts it. Questions, tentative language, and
+        # rejections must never mutate the calendar.
+        return False
+    matches_active_offer = getattr(booking_service, "matches_active_offer", None)
+    if callable(matches_active_offer):
+        return bool(
+            matches_active_offer(
+                inbound_text=inbound_text,
+                active_offer=active_offer,
+            )
+        )
+    return True
 
 
 def _should_try_deterministic_commitment(
@@ -419,15 +993,20 @@ def _should_try_deterministic_commitment(
     return looks_like_booking_commitment(inbound_text)
 
 
-def _merge_booking_flow_memory(*, lead: Lead, runtime_payload: dict[str, Any], next_state: ConversationStateEnum) -> None:
-    payload = dict(lead.raw_payload or {})
-    if "booking_offer" in runtime_payload and runtime_payload["booking_offer"]:
-        payload["booking_offer"] = runtime_payload["booking_offer"]
-        payload[_ACTIVE_BOOKING_OFFER_KEY] = runtime_payload["booking_offer"]
+def _apply_booking_flow_memory_to_payload(
+    *,
+    payload: dict[str, Any],
+    runtime_payload: dict[str, Any],
+    next_state: ConversationStateEnum,
+) -> None:
+    if isinstance(runtime_payload.get("booking_offer"), dict) and runtime_payload["booking_offer"]:
+        _merge_active_booking_offer(
+            payload=payload,
+            booking_offer=runtime_payload["booking_offer"],
+        )
     if "calendar_booking" in runtime_payload and runtime_payload["calendar_booking"]:
         payload["calendar_booking"] = runtime_payload["calendar_booking"]
-        payload.pop("booking_offer", None)
-        payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
+        _deactivate_booking_flow(payload=payload, status="booked")
     if _PENDING_RESCHEDULE_KEY in runtime_payload:
         pending = runtime_payload.get(_PENDING_RESCHEDULE_KEY)
         if isinstance(pending, dict) and pending:
@@ -439,14 +1018,26 @@ def _merge_booking_flow_memory(*, lead: Lead, runtime_payload: dict[str, Any], n
     elif "pending_step" in runtime_payload or next_state == ConversationStateEnum.BOOKED:
         payload.pop(_PENDING_STEP_KEY, None)
         if next_state == ConversationStateEnum.BOOKED:
-            payload.pop("booking_offer", None)
-            payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
+            _deactivate_booking_flow(payload=payload, status="booked")
     if "booking_confirmation_unknown" in runtime_payload:
         payload["booking_confirmation_unknown"] = bool(runtime_payload["booking_confirmation_unknown"])
         payload["booking_provider_status"] = runtime_payload.get("booking_provider_status")
     if next_state == ConversationStateEnum.HANDOFF:
-        payload.pop("booking_offer", None)
-        payload.pop(_ACTIVE_BOOKING_OFFER_KEY, None)
+        _deactivate_booking_flow(payload=payload, status="handoff")
+
+
+def _merge_booking_flow_memory(
+    *,
+    lead: Lead,
+    runtime_payload: dict[str, Any],
+    next_state: ConversationStateEnum,
+) -> None:
+    payload = dict(lead.raw_payload or {})
+    _apply_booking_flow_memory_to_payload(
+        payload=payload,
+        runtime_payload=runtime_payload,
+        next_state=next_state,
+    )
     lead.raw_payload = payload
 
 
@@ -624,13 +1215,23 @@ def _apply_booking_selection_result(
 ) -> None:
     reply_text = str(result.reply_text or "").strip()
     runtime_payload = dict(result.raw_payload or {})
-    _merge_booking_flow_memory(lead=lead, runtime_payload=runtime_payload, next_state=result.next_state)
+    previous_offer = _stored_booking_offer(lead)
+    next_offer = runtime_payload.get("booking_offer")
+    offer_repeated = _same_fingerprinted_offer(previous_offer, next_offer)
+    if offer_repeated:
+        reply_text = _unchanged_booking_offer_reply(
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            booking_offer=next_offer,
+        )
 
     outbound_raw_payload: dict[str, Any] = {
         "booking_flow": {
             "handled_before_llm": True,
             "event_type": result.audit_event_type,
             "transition_reason": result.transition_reason,
+            "offer_repeated": offer_repeated,
         },
         "pending_step_before": pending_step_before or None,
         "pending_step_after": runtime_payload.get("pending_step"),
@@ -649,6 +1250,13 @@ def _apply_booking_selection_result(
 
     calendar_booking = runtime_payload.get("calendar_booking")
     if result.next_state == ConversationStateEnum.BOOKED and isinstance(calendar_booking, dict) and calendar_booking:
+        # A provider-confirmed calendar booking is already authoritative even
+        # when its confirmation SMS cannot be delivered.
+        _merge_booking_flow_memory(
+            lead=lead,
+            runtime_payload=runtime_payload,
+            next_state=result.next_state,
+        )
         _persist_and_deliver_confirmed_booking(
             db=db,
             client=client,
@@ -669,6 +1277,11 @@ def _apply_booking_selection_result(
         )
         return
 
+    booking_offer_transition = _booking_offer_delivery_plan(
+        lead=lead,
+        runtime_payload=runtime_payload,
+        next_state=result.next_state,
+    )
     delivery = _send_inbound_reply_once(
         db=db,
         client=client,
@@ -677,10 +1290,18 @@ def _apply_booking_selection_result(
         body=reply_text,
         inbound_message_id=inbound_message_id,
         retry_definitive_failure=retry_definitive_failure,
+        booking_offer_transition=booking_offer_transition,
     )
     if delivery is None:
         return
     sid, reply_text = delivery
+    # Slot menus and their pending request state only become visible after the
+    # corresponding SMS has been accepted by the provider.
+    _merge_booking_flow_memory(
+        lead=lead,
+        runtime_payload=runtime_payload,
+        next_state=result.next_state,
+    )
     _store_outbound_message(
         db=db,
         lead=lead,
@@ -770,21 +1391,12 @@ def _booking_clarification_result(
     resolution: dict[str, Any],
 ) -> BookingSelectionResult:
     language = client_language(client, lead=lead, inbound_text=inbound_text)
-    reply_text = str(resolution.get("reply_text") or "").strip()
-    if not reply_text:
-        slots = active_offer.get("slots") if isinstance(active_offer.get("slots"), list) else []
-        labels = []
-        for slot in slots[:5]:
-            if not isinstance(slot, dict):
-                continue
-            index = slot.get("index")
-            display = str(slot.get("display_time") or "").strip()
-            if index and display:
-                labels.append(f"{index}) {display}")
-        if language == "fr":
-            reply_text = "Quel créneau voulez-vous réserver?" + ("\n" + "\n".join(labels) if labels else "")
-        else:
-            reply_text = "Which call time should I lock in?" + ("\n" + "\n".join(labels) if labels else "")
+    slots = active_offer.get("slots") if isinstance(active_offer.get("slots"), list) else []
+    reply_text = render_slot_clarification(
+        slots=[slot for slot in slots if isinstance(slot, dict)],
+        language=language,
+        timezone_name=client.timezone or "UTC",
+    )
     return BookingSelectionResult(
         handled=True,
         reply_text=reply_text,
@@ -849,6 +1461,75 @@ def _resolve_booking_selection_with_llm(
             active_offer=active_offer,
             resolution=resolution,
         )
+    if decision == "new_times":
+        slots = (
+            active_offer.get("slots")
+            if isinstance(active_offer.get("slots"), list)
+            else []
+        )
+        limit = max(1, min(len(slots) or 3, 5))
+        try:
+            offer = booking_service.find_slots(
+                client=client,
+                lead=lead,
+                request_text=inbound_text,
+                limit=limit,
+                db=db,
+            )
+        except BookingProviderError as exc:
+            language = client_language(
+                client,
+                lead=lead,
+                inbound_text=inbound_text,
+            )
+            reply_text = (
+                "Je n'arrive pas à consulter le calendrier pour le moment. "
+                "Je transmets votre demande à l'équipe pour confirmer les disponibilités."
+                if language == "fr"
+                else "I can't access the calendar right now. "
+                "I'm sending your request to the team to confirm availability."
+            )
+            return BookingSelectionResult(
+                handled=True,
+                reply_text=reply_text,
+                next_state=ConversationStateEnum.HANDOFF,
+                raw_payload={"pending_step": None},
+                audit_event_type="calendar_availability_handoff",
+                audit_decision={
+                    "inbound": inbound_text,
+                    "provider_status": exc.provider_status,
+                    "reason": "new_times_lookup_failed",
+                    "booking_resolution": resolution,
+                },
+                transition_reason="calendar_availability_handoff",
+            )
+
+        booking_offer = (
+            offer.raw_payload.get("booking_offer")
+            if isinstance(offer.raw_payload, dict)
+            and isinstance(offer.raw_payload.get("booking_offer"), dict)
+            else {}
+        )
+        return BookingSelectionResult(
+            handled=True,
+            reply_text=offer.reply_text,
+            next_state=ConversationStateEnum.BOOKING_SENT,
+            raw_payload={
+                "booking_offer": booking_offer,
+                "pending_step": (
+                    "slot_selection_pending"
+                    if offer.slots
+                    else None
+                ),
+            },
+            audit_event_type="calendar_booking_availability_refreshed",
+            audit_decision={
+                "inbound": inbound_text,
+                "booking_resolution": resolution,
+                "booking_offer": booking_offer,
+            },
+            transition_reason="calendar_booking_availability_refreshed",
+        )
     return None
 
 
@@ -884,6 +1565,7 @@ def _apply_handoff_decision(
     turn_time: datetime,
     sms_service: SMSService,
     decision: HandoffDecision,
+    language: str,
     inbound_message_id: int | None,
     source: str,
     provider: str = "handoff_policy",
@@ -897,10 +1579,8 @@ def _apply_handoff_decision(
     payload = dict(lead.raw_payload or {})
     if handoff_state:
         payload["handoff"] = handoff_state
-    payload.pop(_PENDING_STEP_KEY, None)
-    lead.raw_payload = payload
 
-    reply_text = f"{decision.reply_text}{handoff_suffix(client)}".strip()
+    reply_text = f"{decision.reply_text}{handoff_suffix(client, language=language)}".strip()
     outbound_raw_payload: dict[str, Any] = {
         "agent": {
             "action": "handoff_to_human",
@@ -930,6 +1610,9 @@ def _apply_handoff_decision(
     if delivery is None:
         return
     sid, reply_text = delivery
+    _deactivate_booking_flow(payload=payload, status="handoff")
+    payload.pop(_BOOKING_OFFER_DELIVERY_UNKNOWN_KEY, None)
+    lead.raw_payload = payload
     _store_outbound_message(
         db=db,
         lead=lead,
@@ -1037,7 +1720,11 @@ def process_inbound_turn(
     if detected_email and not lead.email:
         lead.email = detected_email
 
-    remember_lead_language(client, lead, inbound_text=inbound_text)
+    turn_language = remember_lead_language(
+        client,
+        lead,
+        inbound_text=inbound_text,
+    )
     should_suppress, suppress_reason = should_suppress_ai_reply(lead)
     if should_suppress:
         db.add(
@@ -1056,8 +1743,53 @@ def process_inbound_turn(
         db.commit()
         return
 
+    lead_payload = lead.raw_payload if isinstance(lead.raw_payload, dict) else {}
+    delivery_unknown = lead_payload.get(_BOOKING_OFFER_DELIVERY_UNKNOWN_KEY)
+    delivery_transition = lead_payload.get(
+        _BOOKING_OFFER_DELIVERY_TRANSITION_KEY
+    )
+    if isinstance(delivery_unknown, dict) or isinstance(
+        delivery_transition,
+        dict,
+    ):
+        transition_status = (
+            str(delivery_transition.get("status") or "offer_delivery_unknown")
+            if isinstance(delivery_transition, dict)
+            else "offer_delivery_unknown"
+        )
+        _apply_handoff_decision(
+            db=db,
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            turn_time=turn_time,
+            sms_service=sms_service,
+            decision=HandoffDecision(
+                level="required",
+                reason="booking_offer_delivery_unknown",
+                reply_text=(
+                    "Je ne peux pas confirmer quel menu de créneaux vous avez reçu. "
+                    "Je transmets la conversation à l'équipe pour éviter de réserver le mauvais créneau."
+                    if turn_language == "fr"
+                    else "I can't confirm which set of call times reached you. "
+                    "I'm passing this to the team so we don't book the wrong time."
+                ),
+                summary={
+                    "booking_offer_delivery_unknown": True,
+                    "booking_offer_delivery_status": transition_status,
+                    "latest_inbound": inbound_text,
+                },
+            ),
+            language=turn_language,
+            inbound_message_id=inbound_message_id,
+            source="booking_delivery_reconciliation",
+            retry_definitive_failure=retry_definitive_failure,
+        )
+        return
+
     pending_step_before = _current_pending_step(lead)
     active_offer_before = _active_booking_offer(lead, history)
+    stored_offer_before = _stored_booking_offer(lead) or active_offer_before
 
     deterministic_result = None
     if _has_pending_reschedule(lead):
@@ -1070,7 +1802,12 @@ def process_inbound_turn(
                 history=history,
                 db=db,
             )
-    if deterministic_result is None and _should_try_deterministic_slot_selection(lead=lead, inbound_text=inbound_text):
+    if deterministic_result is None and _should_try_deterministic_slot_selection(
+        lead=lead,
+        inbound_text=inbound_text,
+        active_offer=active_offer_before,
+        booking_service=booking_service,
+    ):
         handle_slot_selection = getattr(booking_service, "handle_slot_selection", None)
         if callable(handle_slot_selection):
             deterministic_result = handle_slot_selection(
@@ -1112,6 +1849,7 @@ def process_inbound_turn(
             turn_time=turn_time,
             sms_service=sms_service,
             decision=pre_handoff,
+            language=turn_language,
             inbound_message_id=inbound_message_id,
             source="pre_llm",
             retry_definitive_failure=retry_definitive_failure,
@@ -1222,6 +1960,10 @@ def process_inbound_turn(
     has_calendar_booking = isinstance(runtime_payload.get("calendar_booking"), dict) and bool(runtime_payload.get("calendar_booking"))
     explicit_booked_confirmation = calendar_booking_confirmed(inbound_text)
     effective_action = action
+    offer_repeated = _same_fingerprinted_offer(
+        stored_offer_before,
+        runtime_payload.get("booking_offer"),
+    )
 
     if not reply_text:
         language = client_language(client, lead=lead, inbound_text=inbound_text)
@@ -1239,6 +1981,16 @@ def process_inbound_turn(
                 decision={"inbound": inbound_text, "provider": agent_response.provider, "provider_error": agent_response.provider_error},
             )
         )
+
+    if offer_repeated:
+        reply_text = _unchanged_booking_offer_reply(
+            client=client,
+            lead=lead,
+            inbound_text=inbound_text,
+            booking_offer=runtime_payload.get("booking_offer"),
+        )
+        runtime_payload["booking_offer_repeated"] = True
+        agent_response.runtime_payload = runtime_payload
 
     if agent_response.provider_error:
         db.add(
@@ -1267,6 +2019,7 @@ def process_inbound_turn(
             turn_time=turn_time,
             sms_service=sms_service,
             decision=post_handoff,
+            language=turn_language,
             inbound_message_id=inbound_message_id,
             source="post_llm",
             provider=agent_response.provider,
@@ -1277,7 +2030,7 @@ def process_inbound_turn(
     _merge_policy_state_updates(lead=lead, decision=post_handoff)
 
     if effective_action == "handoff_to_human":
-        reply_text = f"{reply_text}{handoff_suffix(client)}".strip()
+        reply_text = f"{reply_text}{handoff_suffix(client, language=turn_language)}".strip()
         next_state = ConversationStateEnum.HANDOFF
         next_pending_step = None
     elif effective_action == "mark_booked":
@@ -1318,7 +2071,6 @@ def process_inbound_turn(
 
     action = effective_action
     agent_response.action = effective_action
-    _store_agent_memory(lead=lead, agent_response=agent_response, pending_step=next_pending_step)
 
     outbound_raw_payload = {
         "agent": {
@@ -1341,11 +2093,20 @@ def process_inbound_turn(
         outbound_raw_payload["inbound_message_id"] = int(inbound_message_id)
     if runtime_payload.get("booking_offer"):
         outbound_raw_payload["booking_offer"] = runtime_payload["booking_offer"]
+    if runtime_payload.get("booking_offer_repeated"):
+        outbound_raw_payload["booking_offer_repeated"] = True
     if runtime_payload.get("calendar_booking"):
         outbound_raw_payload["calendar_booking"] = runtime_payload["calendar_booking"]
 
     calendar_booking = runtime_payload.get("calendar_booking")
     if isinstance(calendar_booking, dict) and calendar_booking:
+        # Preserve provider-confirmed bookings before best-effort confirmation
+        # delivery, while keeping unconfirmed offers behind the delivery gate.
+        _store_agent_memory(
+            lead=lead,
+            agent_response=agent_response,
+            pending_step=next_pending_step,
+        )
         _persist_and_deliver_confirmed_booking(
             db=db,
             client=client,
@@ -1366,6 +2127,11 @@ def process_inbound_turn(
         )
         return
 
+    booking_offer_transition = _booking_offer_delivery_plan(
+        lead=lead,
+        runtime_payload=runtime_payload,
+        next_state=next_state,
+    )
     delivery = _send_inbound_reply_once(
         db=db,
         client=client,
@@ -1374,10 +2140,19 @@ def process_inbound_turn(
         body=reply_text,
         inbound_message_id=inbound_message_id,
         retry_definitive_failure=retry_definitive_failure,
+        booking_offer_transition=booking_offer_transition,
     )
     if delivery is None:
         return
     sid, reply_text = delivery
+    # Commit conversational memory (including booking_offer,
+    # active_booking_request, and pending_step) only after the provider accepts
+    # the outbound reply that made that state visible to the lead.
+    _store_agent_memory(
+        lead=lead,
+        agent_response=agent_response,
+        pending_step=next_pending_step,
+    )
     _store_outbound_message(
         db=db,
         lead=lead,

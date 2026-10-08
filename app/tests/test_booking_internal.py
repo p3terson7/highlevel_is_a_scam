@@ -4,10 +4,11 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
+import pytest
 
 from app.db.models import CalendarBooking, Client, ConversationStateEnum, Lead, LeadSource, Message, MessageDirection
 from app.db.session import get_session_factory
-from app.services.booking import BookingService
+from app.services.booking import BookingService, _reschedule_confirmed
 
 
 def _internal_always_open_config() -> dict:
@@ -22,6 +23,25 @@ def _internal_always_open_config() -> dict:
             ],
         }
     }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I'm not sure",
+        "Maybe yes",
+        "Yes, but do not change it",
+        "Should we move it?",
+        "Peut-être oui",
+    ],
+)
+def test_reschedule_confirmation_requires_unambiguous_affirmative(text):
+    assert _reschedule_confirmed(text) is False
+
+
+@pytest.mark.parametrize("text", ["yes", "go ahead", "oui", "allez-y"])
+def test_reschedule_confirmation_accepts_clear_affirmatives(text):
+    assert _reschedule_confirmed(text) is True
 
 
 def test_internal_calendar_offer_and_confirm_selection_creates_booking(test_context):
@@ -134,7 +154,7 @@ def test_internal_calendar_french_time_reply_books_matching_slot(test_context):
         result = booking_service.handle_slot_selection(
             client=client,
             lead=lead,
-            inbound_text=french_time,
+            inbound_text=f"Réservez {french_time}",
             history=history,
             db=db,
         )
@@ -206,7 +226,7 @@ def test_internal_calendar_repeats_stored_english_slots_in_french(test_context):
         result = booking_service.handle_slot_selection(
             client=client,
             lead=lead,
-            inbound_text="mercredi prochain",
+            inbound_text="option 99",
             history=history,
             db=db,
         )
@@ -500,7 +520,19 @@ def test_internal_calendar_reschedule_cancels_previous_booking(test_context):
             slot_index=1,
             db=db,
         )
-        assert second_result["reply_text"].startswith("Updated.")
+        assert "Should I cancel" in second_result["reply_text"]
+        lead.raw_payload = {
+            **dict(lead.raw_payload or {}),
+            **second_result["runtime_payload"],
+        }
+        confirmed_result = booking_service.handle_reschedule_confirmation(
+            client=client,
+            lead=lead,
+            inbound_text="yes",
+            db=db,
+        )
+        assert confirmed_result is not None
+        assert confirmed_result.reply_text.startswith("Updated.")
         db.commit()
 
         bookings = db.scalars(select(CalendarBooking).where(CalendarBooking.lead_id == lead.id)).all()
@@ -680,3 +712,73 @@ def test_internal_calendar_reschedule_decline_keeps_existing_booking(test_contex
         assert len(scheduled) == 1
         assert scheduled[0].id == old_booking_id
         assert cancelled == []
+
+
+def test_exact_time_yes_books_once_through_real_sms_pipeline(test_context):
+    from zoneinfo import ZoneInfo
+    from app.core.deps import get_booking_service, get_llm_agent
+    from app.main import app
+    from app.services.llm_agent import LLMAgent
+
+    class ExactTimeProvider:
+        calls = 0
+
+        def generate_json(self, system_prompt, user_prompt):
+            self.calls += 1
+            assert self.calls <= 2, "The explicit confirmation must not need another model call"
+            if self.calls == 1:
+                return {
+                    "reply_text": "", "next_state": "BOOKING_SENT",
+                    "conversation_act": "offer_slots",
+                    "tool_call": {"name": "find_slots", "args": {}},
+                }
+            return {"reply_text": "Model draft must use backend availability.", "next_state": "BOOKING_SENT"}
+
+    provider = ExactTimeProvider()
+    app.dependency_overrides[get_booking_service] = lambda: BookingService()
+    app.dependency_overrides[get_llm_agent] = lambda: LLMAgent(provider)
+    tomorrow = datetime.now(ZoneInfo("America/Toronto")).date() + timedelta(days=1)
+    with get_session_factory()() as db:
+        client = db.get(Client, 1)
+        client.booking_mode = "internal"
+        client.booking_config = _internal_always_open_config()
+        client.timezone = "America/Toronto"
+        client.provider_config = {**(client.provider_config or {}), "language": "fr"}
+        lead = Lead(
+            client_id=client.id, source=LeadSource.MANUAL,
+            full_name="Camille Exemple", phone="+14165550204",
+            email="camille@example.test", consented=True,
+            conversation_state=ConversationStateEnum.QUALIFYING,
+        )
+        db.add(lead)
+        db.flush()
+        lead_id = lead.id
+        db.add(Message(client_id=client.id, lead_id=lead.id, direction=MessageDirection.OUTBOUND,
+                       body="Quel moment vous conviendrait pour un appel?", raw_payload={}))
+        db.commit()
+
+    url = f"/sms/inbound/{test_context.client_key}"
+    assert test_context.client.post(url, data={
+        "From": "+14165550204", "Body": "Demain à 15 h, est-ce disponible?", "MessageSid": "SM-EXACT-CHECK",
+    }).status_code == 200
+    opening = test_context.fake_sms.sent[-1]["body"]
+    assert "15 h 00" in opening
+    assert "réserve?" in opening
+    assert "1)" not in opening
+    with get_session_factory()() as db:
+        assert db.scalars(select(CalendarBooking).where(CalendarBooking.lead_id == lead_id)).all() == []
+
+    confirmation = {"From": "+14165550204", "Body": "Oui.", "MessageSid": "SM-EXACT-CONFIRM"}
+    assert test_context.client.post(url, data=confirmation).status_code == 200
+    assert "Réservé" in test_context.fake_sms.sent[-1]["body"]
+    sent_count = len(test_context.fake_sms.sent)
+    assert test_context.client.post(url, data=confirmation).status_code == 200
+    assert len(test_context.fake_sms.sent) == sent_count
+    assert provider.calls == 2
+    with get_session_factory()() as db:
+        bookings = db.scalars(select(CalendarBooking).where(CalendarBooking.lead_id == lead_id)).all()
+        assert len(bookings) == 1
+        start = bookings[0].start_at.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/Toronto"))
+        assert start.date() == tomorrow
+        assert (start.hour, start.minute) == (15, 0)
+        assert db.get(Lead, lead_id).conversation_state == ConversationStateEnum.BOOKED
